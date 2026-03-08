@@ -265,8 +265,12 @@ class Orchestrator:
                 tool_name = tool_call.function.name
                 tool_call_id = tool_call.id  # Unique ID for this tool call
                 try:
-                    tool_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
+                    # Some servers return arguments as dict, others as JSON string
+                    if isinstance(tool_call.function.arguments, dict):
+                        tool_args = tool_call.function.arguments
+                    else:
+                        tool_args = json.loads(tool_call.function.arguments)
+                except (json.JSONDecodeError, TypeError):
                     tool_args = {}
                 
                 # Check for duplicate calls (LoopGuard)
