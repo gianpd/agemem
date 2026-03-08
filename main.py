@@ -7,13 +7,23 @@ Usage:
     python main.py
 
 Environment variables (all optional, with defaults):
-    LLAMA_HOST          default: http://localhost:8080
-    LLAMA_MODEL         default: qwen3-4b
-    LLAMA_MAX_TOKENS    default: 2048
-    LLAMA_TEMPERATURE   default: 0.2
+    BASE_URL            Base URL for LLM API (default: http://localhost:8080)
+    BASE_MODEL          Model name (default: qwen3-4b)
+    BASE_MAX_TOKENS     Max tokens (default: 2048)
+    BASE_TEMPERATURE    Temperature (default: 0.2)
+    API_KEY             API key for non-local endpoints
+    OPENAI_API_KEY      Fallback API key for OpenAI-compatible endpoints
+
+Deprecated (still supported for backward compatibility):
+    LLAMA_HOST          Use BASE_URL instead
+    LLAMA_MODEL         Use BASE_MODEL instead
+    LLAMA_MAX_TOKENS    Use BASE_MAX_TOKENS instead
+    LLAMA_TEMPERATURE   Use BASE_TEMPERATURE instead
+
+Other settings:
     WEB_SEARCH_MAX_RESULTS  default: 5
     TOOL_RESULT_MAX_CHARS   default: 4000
-    LTM_PERSIST_PATH    default: agent_memory/ltm_store.json
+    LTM_PERSIST_PATH        default: agent_memory/ltm_store.json
 """
 
 from __future__ import annotations
@@ -23,20 +33,34 @@ import os
 import sys
 import signal
 import time
+import warnings
 from pathlib import Path
 from typing import Optional, Any
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from openai import OpenAI
 
 # ── Configuration from environment ───────────────────────────────────────────
 
-LLAMA_HOST = os.getenv("LLAMA_HOST", "http://localhost:8080")
-LLAMA_MODEL = os.getenv("LLAMA_MODEL", "qwen3-9b")
-LLAMA_MAX_TOKENS = int(os.getenv("LLAMA_MAX_TOKENS", "2048"))
-LLAMA_TEMPERATURE = float(os.getenv("LLAMA_TEMPERATURE", "0.2"))
+def get_env_with_fallback(new_name: str, old_name: str, default: str) -> str:
+    """Get env var with fallback to old name for backward compatibility."""
+    value = os.getenv(new_name) or os.getenv(old_name, default)
+    if os.getenv(old_name) and not os.getenv(new_name):
+        warnings.warn(
+            f"Environment variable '{old_name}' is deprecated. "
+            f"Please use '{new_name}' instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+    return value
+
+# New generic env vars with fallback to old LLAMA_* names
+BASE_URL = get_env_with_fallback("BASE_URL", "LLAMA_HOST", "http://localhost:8080")
+BASE_MODEL = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "qwen3-9b")
+BASE_MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "2048"))
+BASE_TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.2"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
 TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "4000"))
 LTM_PERSIST_PATH = os.getenv("LTM_PERSIST_PATH", "agent_memory/ltm_store.json")
@@ -77,33 +101,58 @@ WEB_SEARCH_TOOL_SCHEMA = {
 from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
 from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
 
-def get_local_client() -> OpenAI:
-    """Get the local llama.cpp OpenAI-compatible client."""
-    return OpenAI(api_key="not-needed", base_url=f"{LLAMA_HOST}/v1")
+def get_llm_client() -> OpenAI:
+    """Get the OpenAI-compatible client with automatic API key handling.
+
+    For local endpoints (localhost/127.0.0.1), no API key is required.
+    For remote endpoints, API_KEY or OPENAI_API_KEY environment variable is required.
+    """
+    base_url = BASE_URL
+
+    # Determine if this is a local endpoint
+    is_local = "localhost" in base_url or "127.0.0.1" in base_url
+
+    if is_local:
+        api_key = "not-needed"
+    else:
+        # Check API_KEY first, then fall back to OPENAI_API_KEY
+        api_key = os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                f"API_KEY or OPENAI_API_KEY environment variable is required "
+                f"for non-local endpoint: {base_url}"
+            )
+
+    # Ensure base_url ends with /v1 for OpenAI compatibility
+    base_url_normalized = base_url.rstrip("/")
+    if not base_url_normalized.endswith("/v1"):
+        base_url_normalized = f"{base_url_normalized}/v1"
+
+    return OpenAI(api_key=api_key, base_url=base_url_normalized)
 
 # ── Build Orchestrator ───────────────────────────────────────────────────────
 
 def build_orchestrator() -> Orchestrator:
     """
-    Wire up AgeMem-hybrid with a local llama.cpp server.
+    Wire up AgeMem-hybrid with the configured LLM provider.
     """
 
-    client = get_local_client()
-    
+    client = get_llm_client()
+
     cfg = AgememConfig(
-        DEFAULT_MODEL=LLAMA_MODEL,
-        MEMORY_AGENT_MODEL=LLAMA_MODEL,
+        DEFAULT_MODEL=BASE_MODEL,
+        MEMORY_AGENT_MODEL=BASE_MODEL,
         STM_TOKEN_LIMIT=STM_TOKEN_LIMIT,
         STM_WARNING_THRESHOLD=0.75,
         STM_CRITICAL_THRESHOLD=0.90,
         LTM_PROMOTE_THRESHOLD=0.65,
         LEARNING_SCORE_PROMPT_EVERY_N=3,
         TRIGGER_EVERY_N_TURNS=10,
-        DEFAULT_MAX_TOKENS=LLAMA_MAX_TOKENS,
-        DEFAULT_TEMPERATURE=LLAMA_TEMPERATURE,
+        DEFAULT_MAX_TOKENS=BASE_MAX_TOKENS,
+        DEFAULT_TEMPERATURE=BASE_TEMPERATURE,
         PERSIST_DIR="agemem_state",
     )
-    
+
     llm = LLMClient(client, default_model=cfg.DEFAULT_MODEL)
     
     # Create LTM store with persistence
@@ -149,6 +198,14 @@ def print_diagnostics(orch: Orchestrator):
         if op.success:
             trigger_name = op.trigger.value if hasattr(op.trigger, 'value') else str(op.trigger)
             print(f"  [MEM] {op.op.value.upper()} triggered by {trigger_name} — {op.detail}")
+
+    # Learning feedback
+    if trace.feedback:
+        print(f"  [LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:50]}...")
+
+    # Memory Agent rationale
+    if trace.memory_agent_rationale:
+        print(f"  [AGENT] {trace.memory_agent_rationale[:60]}...")
 
 
 # ── REPL Commands ────────────────────────────────────────────────────────────
@@ -247,7 +304,7 @@ def print_banner(orch: Orchestrator):
 
     print(f"""
 AgeMem Chat
-  Model   : {LLAMA_MODEL} @ {LLAMA_HOST}
+  Model   : {BASE_MODEL} @ {BASE_URL}
   STM     : {STM_TOKEN_LIMIT} token limit
   LTM     : {LTM_PERSIST_PATH} ({ltm_count} entries loaded)
   Memory  : STM resets on /clear — LTM persists across sessions

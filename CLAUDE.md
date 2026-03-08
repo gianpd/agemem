@@ -122,14 +122,53 @@ All thresholds in `core/config.py`:
 
 ## Environment Variables
 
+### Primary Variables (Recommended)
+
 ```bash
-LLAMA_HOST=http://localhost:8080
-LLAMA_MODEL=qwen3-4b
-LLAMA_MAX_TOKENS=2048
-LLAMA_TEMPERATURE=0.2
+# Core LLM settings
+BASE_URL=http://localhost:8080         # LLM API base URL
+BASE_MODEL=qwen3-4b                    # Model name
+BASE_MAX_TOKENS=2048                   # Max tokens per request
+BASE_TEMPERATURE=0.2                   # Sampling temperature
+
+# API key (required for non-local endpoints)
+API_KEY=your-api-key                   # Primary API key
+OPENAI_API_KEY=your-key                # Fallback for OpenAI-compatible services
+
+# Memory and persistence
 LTM_PERSIST_PATH=agent_memory/ltm_store.json
 STM_TOKEN_LIMIT=6000
 ```
+
+### Using Remote Providers (OpenRouter, OpenAI, etc.)
+
+For non-localhost endpoints, an API key is required:
+
+```bash
+# OpenRouter example
+BASE_URL=https://openrouter.ai/api/v1
+BASE_MODEL=anthropic/claude-sonnet-4
+API_KEY=sk-or-...
+
+# OpenAI example
+BASE_URL=https://api.openai.com
+BASE_MODEL=gpt-4o-mini
+API_KEY=sk-...
+```
+
+### Backward Compatibility
+
+Old `LLAMA_*` variable names are still supported but deprecated:
+
+| Deprecated | Use Instead |
+|------------|-------------|
+| `LLAMA_HOST` | `BASE_URL` |
+| `LLAMA_MODEL` | `BASE_MODEL` |
+| `LLAMA_MAX_TOKENS` | `BASE_MAX_TOKENS` |
+| `LLAMA_TEMPERATURE` | `BASE_TEMPERATURE` |
+| `LLAMA_CTX_SIZE` | `BASE_CTX_SIZE` |
+
+If both old and new names are set, the new name takes precedence.
 
 ## Testing Philosophy
 

@@ -79,21 +79,16 @@ class LearningScorer:
         probe_messages = list(context_messages) + [
             {"role": "user", "content": _LEARNING_PROMPT}
         ]
+        print(f"[DEBUG] LearningScorer: Collecting feedback at turn {turn_index}...", flush=True)
         try:
             raw = self._llm.chat_json(
                 messages=probe_messages,
                 max_tokens=200,
             )
             score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
-            return LearningFeedback(
-                score=score,
-                rationale=raw.get("rationale", ""),
-                affected_content=raw.get("affected_content", ""),
-                turn_index=turn_index,
-            )
-        except Exception:
-            return None
-            score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
+            rationale = raw.get("rationale", "")
+            affected = raw.get("affected_content", "")[:80]
+            print(f"[DEBUG] LearningScorer: score={score:.2f}, rationale='{rationale[:50]}...', content='{affected}...'", flush=True)
             return LearningFeedback(
                 score=score,
                 rationale=raw.get("rationale", ""),
@@ -102,5 +97,4 @@ class LearningScorer:
             )
         except Exception as e:
             print(f"[DEBUG] LearningScorer.collect() failed: {e}", flush=True)
-            return None
             return None

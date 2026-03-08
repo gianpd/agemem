@@ -17,10 +17,16 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────
 # CONFIG — Agent 1 (Local Qwen)
 # ─────────────────────────────────────────────────────────────
-LLAMA_HOST = os.getenv("LLAMA_HOST", "http://localhost:8080")
-MODEL_NAME = os.getenv("LLAMA_MODEL", "qwen3.5-9b")
-MAX_TOKENS = int(os.getenv("LLAMA_MAX_TOKENS", "8096"))
-TEMPERATURE = float(os.getenv("LLAMA_TEMPERATURE", "0.1"))
+def get_env_with_fallback(new_name: str, old_name: str, default: str) -> str:
+    """Get env var with fallback to old name for backward compatibility."""
+    import warnings
+    value = os.getenv(new_name) or os.getenv(old_name, default)
+    return value
+
+BASE_URL = get_env_with_fallback("BASE_URL", "LLAMA_HOST", "http://localhost:8080")
+MODEL_NAME = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "qwen3.5-9b")
+MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "10324"))
+TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.1"))
 MAX_STEPS = int(os.getenv("LLAMA_MAX_STEPS", "50"))
 SHOW_THINKING = os.getenv("SHOW_THINKING", "false").lower() == "true"
 CORPUS = Path("corpus")
@@ -48,7 +54,7 @@ TOP_FACTS_COUNT = 5
 # ─────────────────────────────────────────────────────────────
 # CONFIG — Context window
 # ─────────────────────────────────────────────────────────────
-CTX_SIZE = int(os.getenv("LLAMA_CTX_SIZE", "49152"))
+CTX_SIZE = int(os.getenv("BASE_CTX_SIZE") or os.getenv("LLAMA_CTX_SIZE", "49152"))
 CTX_REPLY_RESERVE = MAX_TOKENS
 CTX_PROMPT_BUDGET = CTX_SIZE - CTX_REPLY_RESERVE
 CTX_WARN_THRESHOLD = int(CTX_PROMPT_BUDGET * 0.70)
