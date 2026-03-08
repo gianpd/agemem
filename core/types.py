@@ -98,7 +98,19 @@ class ContextMessage:
     tool_call_id: Optional[str] = None  # for tool role: links to the tool call
 
     def to_openai_dict(self) -> dict:
-        result = {"role": self.role, "content": self.content}
+        """Convert to OpenAI-compatible dict, with content sanitization for llama.cpp compatibility."""
+        # Sanitize content to prevent parser failures
+        # Replace control characters and normalize whitespace
+        content = self.content
+        if content:
+            # Remove null bytes and control characters except newlines/tabs
+            content = ''.join(ch for ch in content if ch == '\n' or ch == '\t' or ch == '\r' or (ord(ch) >= 32 and ord(ch) < 127) or ord(ch) > 159)
+            # Normalize line endings
+            content = content.replace('\r\n', '\n').replace('\r', '\n')
+            # Trim excessive whitespace
+            content = content.strip()
+
+        result = {"role": self.role, "content": content}
         if self.tool_call_id:
             result["tool_call_id"] = self.tool_call_id
         return result

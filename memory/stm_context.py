@@ -62,8 +62,37 @@ class STMContext:
         return list(self._messages)
 
     def openai_messages(self) -> list[dict]:
-        """Return messages in OpenAI-compatible format."""
-        return [m.to_openai_dict() for m in self._messages]
+        """Return messages in OpenAI-compatible format.
+
+        Consolidates all system messages into a single message at the beginning
+        to comply with llama.cpp Jinja template requirements.
+        Converts unsupported 'tool' role messages to 'user' messages for compatibility.
+        """
+        # Separate system messages from conversation messages
+        system_parts = []
+        conversation = []
+
+        for m in self._messages:
+            if m.role == "system":
+                system_parts.append(m.content)
+            elif m.role == "tool":
+                # Convert tool messages to user messages for compatibility
+                # Many chat templates don't support the 'tool' role
+                tool_msg = m.to_openai_dict()
+                tool_content = tool_msg.get("content", "")
+                # Wrap in markers to identify as tool result
+                tool_content = f"[TOOL RESULT] {tool_content}"
+                conversation.append({"role": "user", "content": tool_content})
+            else:
+                conversation.append(m.to_openai_dict())
+
+        result = []
+        if system_parts:
+            # Merge all system messages into one
+            result.append({"role": "system", "content": "\n\n".join(system_parts)})
+
+        result.extend(conversation)
+        return result
 
     def stats(self) -> ContextStats:
         total = self._tc.count_messages(self._messages)

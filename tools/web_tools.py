@@ -89,6 +89,17 @@ tool_definitions = [
 ]
 
 
+def sanitize_for_llm(text: str) -> str:
+    """Sanitize text to prevent llama.cpp parser failures."""
+    if not text:
+        return ""
+    # Remove control characters except newlines and tabs
+    text = ''.join(ch for ch in text if ch == '\n' or ch == '\t' or ch == '\r' or (ord(ch) >= 32 and ord(ch) < 127) or ord(ch) > 159)
+    # Normalize line endings
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    return text.strip()
+
+
 def format_web_search_results(
     query: str,
     results: list,
@@ -115,35 +126,35 @@ def format_web_search_results(
         Formatted search results string, capped via cap_tool_result()
     """
     if not results:
-        return f"[WEB SEARCH] No results found for: '{query}'"
-    
+        return f"[WEB SEARCH] No results found for: '{sanitize_for_llm(query)}'"
+
     lines = [
-        f"[WEB SEARCH RESULTS for '{query}' — {len(results)} result(s)]",
+        f"[WEB SEARCH RESULTS for '{sanitize_for_llm(query)}' — {len(results)} result(s)]",
         "=" * 60,
     ]
-    
+
     for i, r in enumerate(results, 1):
-        title = r.get("title", "No title")
-        url = r.get("url", r.get("link", ""))
-        snippet = r.get("snippet", r.get("description", ""))
-        
+        title = sanitize_for_llm(r.get("title", "No title"))
+        url = sanitize_for_llm(r.get("url", r.get("link", "")))
+        snippet = sanitize_for_llm(r.get("snippet", r.get("description", "")))
+
         lines.append(f"\n{i}. {title}")
         lines.append(f"   URL: {url}")
         if snippet:
             lines.append(f"   Snippet: {snippet[:300]}{'...' if len(snippet) > 300 else ''}")
-        
+
         # Include scraped content if available
-        scraped = r.get("scraped_content", r.get("content", ""))
+        scraped = sanitize_for_llm(r.get("scraped_content", r.get("content", "")))
         if scraped and enable_scrape:
             # Truncate scraped content to prevent context bloat
             max_scrape_chars = 1500
             if len(scraped) > max_scrape_chars:
                 scraped = scraped[:max_scrape_chars] + "... [truncated]"
             lines.append(f"   Content: {scraped}")
-    
+
     lines.append("\n" + "=" * 60)
     result_text = "\n".join(lines)
-    
+
     return result_text
 
 
