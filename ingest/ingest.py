@@ -32,6 +32,7 @@ from docling.datamodel.pipeline_options import (
     AcceleratorOptions,
     AcceleratorDevice,
     TableFormerMode,
+    TableStructureOptions
 )
 from docling.datamodel.base_models import InputFormat
 
@@ -50,13 +51,14 @@ CORPUS = Path("corpus")
 # ═══════════════════════════════════════════════════════════════
 
 _CONVERTER: DocumentConverter | None = None  # module-level singleton
+_CONVERTER_PARAMS: dict = {}  # track params used to build converter
 
 
 def _ensure_models_downloaded() -> None:
     """Pre-download docling models to ensure they're available offline."""
     try:
-        from docling.utils.model_downloader import download_models_hf
-        download_models_hf(force=False)  # skip if already present
+        from docling.utils.model_downloader import download_models
+        download_models()
         print("      Models verified (cached locally)")
     except Exception as e:
         print(f"      [warn] Could not verify model download: {e}")
@@ -66,23 +68,32 @@ def _ensure_models_downloaded() -> None:
 def _build_optimized_converter(
     do_ocr: bool = False,
     enable_table_structure: bool = True,
+    fast_mode: bool = False,
 ) -> DocumentConverter:
     """
     Build an optimized DocumentConverter for local execution.
 
     Optimized for: CPU + optional GPU, with models cached locally.
+
+    Args:
+        do_ocr: Enable OCR for scanned PDFs
+        enable_table_structure: Enable table structure recognition
+        fast_mode: Use faster but less accurate table mode
     """
     accelerator = AcceleratorOptions(
         num_threads=min(8, os.cpu_count() or 4),
         device=AcceleratorDevice.AUTO,  # uses CUDA if available, else CPU
     )
 
+    # Use FAST mode for table structure by default (ACCURATE is too slow for large docs)
+    table_mode = TableFormerMode.FAST if fast_mode else TableFormerMode.ACCURATE
+
     pipeline_options = PdfPipelineOptions(
         accelerator_options=accelerator,
         do_ocr=do_ocr,
         do_table_structure=enable_table_structure,
-        table_structure_options={"mode": TableFormerMode.ACCURATE},
-        images_scale=1.5,  # good balance: 108 DPI (1.5 * 72)
+        table_structure_options=TableStructureOptions(mode=table_mode),
+        images_scale=1.5,
         generate_page_images=False,
         generate_picture_images=False,
         generate_table_images=False,
@@ -99,11 +110,28 @@ def _build_optimized_converter(
 def _get_converter(
     do_ocr: bool = False,
     enable_table_structure: bool = True,
+    fast_mode: bool = False,
 ) -> DocumentConverter:
-    """Lazy singleton — build once, reuse across calls."""
-    global _CONVERTER
-    if _CONVERTER is None:
-        _CONVERTER = _build_optimized_converter(do_ocr, enable_table_structure)
+    """
+    Lazy singleton with param caching — rebuild only if params change.
+
+    This ensures the converter is reused when possible but correctly
+    handles parameter changes (e.g., OCR on/off).
+    """
+    global _CONVERTER, _CONVERTER_PARAMS
+
+    current_params = {
+        "do_ocr": do_ocr,
+        "enable_table_structure": enable_table_structure,
+        "fast_mode": fast_mode,
+    }
+
+    if _CONVERTER is None or _CONVERTER_PARAMS != current_params:
+        if _CONVERTER is not None:
+            print("      [info] Rebuilding converter with new parameters...")
+        _CONVERTER = _build_optimized_converter(**current_params)
+        _CONVERTER_PARAMS = current_params
+
     return _CONVERTER
 
 
@@ -388,6 +416,8 @@ def parse_pdf(
     pdf_path: Path,
     auto_detect_ocr: bool = True,
     force_ocr: bool = False,
+    fast_mode: bool = True,  # Default to FAST for reasonable performance
+    disable_tables: bool = False,
 ) -> tuple[str, List[str]]:
     """
     Returns (full_markdown, list_of_section_titles).
@@ -396,6 +426,8 @@ def parse_pdf(
         pdf_path: Path to the PDF file
         auto_detect_ocr: Automatically detect if OCR is needed (default: True)
         force_ocr: Force OCR on for scanned PDFs (overrides auto_detect)
+        fast_mode: Use fast table mode (default: True). ACCURATE mode is very slow.
+        disable_tables: Disable table structure recognition entirely (fastest)
     """
     # Determine if OCR is needed
     do_ocr = force_ocr
@@ -408,9 +440,19 @@ def parse_pdf(
     _ensure_models_downloaded()
 
     # Get optimized converter (creates singleton on first call)
-    converter = _get_converter(do_ocr=do_ocr)
+    print("      Initializing converter...")
+    converter = _get_converter(
+        do_ocr=do_ocr,
+        enable_table_structure=not disable_tables,
+        fast_mode=fast_mode,
+    )
+
+    print(f"      Converting PDF (this may take several minutes for large documents)...")
+    print(f"      Table mode: {'FAST' if fast_mode else 'ACCURATE'}, Tables: {'enabled' if not disable_tables else 'disabled'}")
 
     result = converter.convert(str(pdf_path))
+
+    print("      Exporting to markdown...")
     markdown = result.document.export_to_markdown()
     sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
 
@@ -509,6 +551,8 @@ def ingest(
     labels_arg: Optional[str] = None,
     auto_detect_ocr: bool = True,
     force_ocr: bool = False,
+    fast_mode: bool = True,
+    disable_tables: bool = False,
 ) -> str:
     """
     Ingest a PDF document into the corpus.
@@ -519,6 +563,8 @@ def ingest(
         labels_arg: Label configuration (built-in name or path:key)
         auto_detect_ocr: Automatically detect if PDF needs OCR
         force_ocr: Force OCR on (for known scanned PDFs)
+        fast_mode: Use fast table mode (default: True)
+        disable_tables: Disable table structure recognition (fastest)
 
     Returns:
         Document ID string
@@ -537,7 +583,13 @@ def ingest(
     print(f"      Labels: {len(_current_label_config['labels'])} entity types")
 
     print(f"[1/4] Parsing    {pdf.name}  (docling) ...")
-    markdown, sections = parse_pdf(pdf, auto_detect_ocr=auto_detect_ocr, force_ocr=force_ocr)
+    markdown, sections = parse_pdf(
+        pdf,
+        auto_detect_ocr=auto_detect_ocr,
+        force_ocr=force_ocr,
+        fast_mode=fast_mode,
+        disable_tables=disable_tables,
+    )
 
     print(f"[2/4] Extracting entities  ({NER_BACKEND}) ...")
     entities = extract_entities(markdown)
@@ -582,7 +634,7 @@ For custom labels, create a YAML file with the same structure as
 ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         """
     )
-    parser.add_argument("pdf_path", help="Path to the PDF file to ingest")
+    parser.add_argument("pdf_path", nargs="?", default=None, help="Path to the PDF file to ingest")
     parser.add_argument(
         "doc_type",
         nargs="?",
@@ -627,6 +679,20 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         default=False,
         help="Audit model cache and show diagnostic information"
     )
+    parser.add_argument(
+        "--accurate-tables",
+        dest="accurate_tables",
+        action="store_true",
+        default=False,
+        help="Use ACCURATE table mode (slower but better tables). Default: FAST mode"
+    )
+    parser.add_argument(
+        "--disable-tables",
+        dest="disable_tables",
+        action="store_true",
+        default=False,
+        help="Disable table structure recognition entirely (fastest option)"
+    )
 
     args = parser.parse_args()
 
@@ -638,6 +704,9 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         print("Verifying docling models are cached locally...")
         _ensure_models_downloaded()
         return
+    
+    if args.pdf_path is None:
+        parser.error("pdf_path is required unless using --verify-models or --audit")
 
     ingest(
         args.pdf_path,
@@ -645,6 +714,8 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         args.labels_arg,
         auto_detect_ocr=args.auto_detect_ocr,
         force_ocr=args.force_ocr,
+        fast_mode=not args.accurate_tables,  # FAST by default
+        disable_tables=args.disable_tables,
     )
 
 
