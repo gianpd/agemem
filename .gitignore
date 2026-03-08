@@ -5,3 +5,4 @@ __pytest__
 .venv/
 
 *.json
+*.jsonr

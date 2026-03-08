@@ -88,6 +88,7 @@ class STMContext:
         content: str,
         is_pinned: bool = False,
         relevance_score: float = 1.0,
+        tool_call_id: Optional[str] = None,
     ) -> None:
         """Append a new message.  Pinned = never evicted by FILTER."""
         msg = ContextMessage(
@@ -97,6 +98,7 @@ class STMContext:
             token_estimate=self._tc.count(content),
             relevance_score=relevance_score,
             is_pinned=is_pinned,
+            tool_call_id=tool_call_id,
         )
         self._messages.append(msg)
 
@@ -284,6 +286,7 @@ class STMContext:
                 "token_estimate": m.token_estimate,
                 "relevance_score": m.relevance_score,
                 "is_pinned": m.is_pinned,
+                "tool_call_id": m.tool_call_id,
             }
             for m in self._messages
         ]
@@ -305,6 +308,7 @@ class STMContext:
                     token_estimate=m["token_estimate"],
                     relevance_score=m["relevance_score"],
                     is_pinned=m["is_pinned"],
+                    tool_call_id=m.get("tool_call_id"),
                 )
                 for m in data
             ]

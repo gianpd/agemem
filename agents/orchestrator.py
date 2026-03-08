@@ -263,6 +263,7 @@ class Orchestrator:
                 # Parse tool call
                 tool_call = e.tool_call
                 tool_name = tool_call.function.name
+                tool_call_id = tool_call.id  # Unique ID for this tool call
                 try:
                     tool_args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
@@ -271,9 +272,9 @@ class Orchestrator:
                 # Check for duplicate calls (LoopGuard)
                 call = ToolCall(name=tool_name, arguments=tool_args)
                 if self._tool_tracker.record(call):
-                    # Duplicate detected - inject system message and break
+                    # Duplicate detected - inject user message and continue
                     self._stm.add_message(
-                        role="system",
+                        role="user",
                         content="[SYSTEM] Duplicate tool call detected. You already called this tool with the same arguments. Please try a different approach or provide a final answer.",
                         relevance_score=1.0,
                     )
@@ -290,18 +291,20 @@ class Orchestrator:
                     detail=f"Tool '{tool_name}' executed with args: {tool_args}",
                 ))
                 
-                # Add tool call and result to STM as system messages
-                # The assistant "requested" the tool call
+                # Add assistant message with tool call (for proper conversation structure)
+                # Note: We store a placeholder since our ContextMessage doesn't support tool_calls field yet
+                # The important part is the tool result message with tool_call_id
                 self._stm.add_message(
                     role="assistant",
-                    content=f"",
+                    content=f"[CALLED TOOL: {tool_name}]",
                     relevance_score=0.8,
                 )
-                # Add the tool result
+                # Add the tool result with proper role and tool_call_id
                 self._stm.add_message(
-                    role="system",
-                    content=f"[TOOL RESULT: {tool_name}] {tool_result}",
+                    role="tool",
+                    content=tool_result,
                     relevance_score=0.9,
+                    tool_call_id=tool_call_id,
                 )
                 
                 # Loop back to LLM call with the tool result
@@ -404,6 +407,35 @@ class Orchestrator:
 
     def stm_stats(self) -> ContextStats:
         return self._stm.stats()
+
+    def reset_stm(self) -> None:
+        """Reset STM context, clearing all messages except the pinned system prompt."""
+        # Find and keep the pinned system message
+        pinned_system = None
+        for msg in self._stm.messages():
+            if msg.role == "system" and msg.is_pinned:
+                pinned_system = msg
+                break
+        
+        # Clear all messages
+        self._stm._messages.clear()
+        self._stm._turn_index = 0
+        
+        # Re-add the pinned system prompt if it existed
+        if pinned_system:
+            self._stm.add_message(
+                role="system",
+                content=pinned_system.content,
+                is_pinned=True,
+            )
+        
+        # Persist the cleared state
+        self._persist_stm()
+
+    def clear_ltm(self) -> None:
+        """Clear all LTM entries from memory and disk."""
+        self._ltm._entries.clear()
+        self._ltm._maybe_persist()
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
