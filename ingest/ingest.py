@@ -11,6 +11,8 @@
 #   python ingest.py bando.pdf bando --labels edilizia
 #   python ingest.py doc.pdf custom --labels /path/to/config.yaml:medical
 
+import os
+import gc
 import yaml
 import hashlib
 import re
@@ -20,9 +22,188 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-from docling.document_converter import DocumentConverter
+# Set cache paths BEFORE any docling import to ensure models are stored locally
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+os.environ.setdefault("DOCLING_ARTIFACTS_PATH", os.path.expanduser("~/.cache/docling/models"))
+
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+    AcceleratorOptions,
+    AcceleratorDevice,
+    TableFormerMode,
+)
+from docling.datamodel.base_models import InputFormat
+
+# Try to import torch for GPU memory management
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+    torch = None  # type: ignore
 
 CORPUS = Path("corpus")
+
+# ═══════════════════════════════════════════════════════════════
+# Docling Converter — Optimized singleton with local model caching
+# ═══════════════════════════════════════════════════════════════
+
+_CONVERTER: DocumentConverter | None = None  # module-level singleton
+
+
+def _ensure_models_downloaded() -> None:
+    """Pre-download docling models to ensure they're available offline."""
+    try:
+        from docling.utils.model_downloader import download_models_hf
+        download_models_hf(force=False)  # skip if already present
+        print("      Models verified (cached locally)")
+    except Exception as e:
+        print(f"      [warn] Could not verify model download: {e}")
+        print("      Models will be downloaded on first use if needed.")
+
+
+def _build_optimized_converter(
+    do_ocr: bool = False,
+    enable_table_structure: bool = True,
+) -> DocumentConverter:
+    """
+    Build an optimized DocumentConverter for local execution.
+
+    Optimized for: CPU + optional GPU, with models cached locally.
+    """
+    accelerator = AcceleratorOptions(
+        num_threads=min(8, os.cpu_count() or 4),
+        device=AcceleratorDevice.AUTO,  # uses CUDA if available, else CPU
+    )
+
+    pipeline_options = PdfPipelineOptions(
+        accelerator_options=accelerator,
+        do_ocr=do_ocr,
+        do_table_structure=enable_table_structure,
+        table_structure_options={"mode": TableFormerMode.ACCURATE},
+        images_scale=1.5,  # good balance: 108 DPI (1.5 * 72)
+        generate_page_images=False,
+        generate_picture_images=False,
+        generate_table_images=False,
+    )
+
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
+    return converter
+
+
+def _get_converter(
+    do_ocr: bool = False,
+    enable_table_structure: bool = True,
+) -> DocumentConverter:
+    """Lazy singleton — build once, reuse across calls."""
+    global _CONVERTER
+    if _CONVERTER is None:
+        _CONVERTER = _build_optimized_converter(do_ocr, enable_table_structure)
+    return _CONVERTER
+
+
+def _clear_gpu_cache() -> None:
+    """Clear GPU memory cache after conversion."""
+    if _HAS_TORCH and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Model Cache Diagnostics
+# ═══════════════════════════════════════════════════════════════
+
+def audit_model_cache() -> None:
+    """
+    Audit the docling model cache and print diagnostic information.
+
+    Shows which models are present, their sizes, and relevant environment variables.
+    """
+    import pathlib
+
+    CACHE_DIRS = [
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        os.path.expanduser("~/.cache/docling/models"),
+        os.path.expanduser("~/.cache/docling"),
+        os.environ.get("HF_HOME", ""),
+    ]
+
+    DOCLING_MODEL_REPOS = [
+        "ds4sd--docling-models",       # Layout + TableFormer
+        "ds4sd--DocLayNet",            # Layout detection weights
+        "ds4sd--TableFormer",          # Table structure
+        "easyocr",                     # OCR (only if scanned PDF)
+    ]
+
+    print("=== Docling Model Cache Audit ===\n")
+    total_size = 0
+    for base in CACHE_DIRS:
+        if not base or not os.path.exists(base):
+            print(f"  [MISSING]  {base}")
+            continue
+        p = pathlib.Path(base)
+        dirs = [d.name for d in p.iterdir() if d.is_dir()]
+        matched = [d for d in dirs if any(m in d for m in DOCLING_MODEL_REPOS)]
+        print(f"  [FOUND]    {base}")
+        if matched:
+            for m in matched:
+                size = sum(f.stat().st_size for f in (p/m).rglob("*") if f.is_file())
+                total_size += size
+                print(f"             ✓ {m}  ({size/1e9:.2f} GB)")
+        else:
+            print("             — no docling models found here")
+
+    print(f"\n  Total cached: {total_size/1e9:.2f} GB")
+
+    print("\n=== Relevant Environment Variables ===")
+    for k in ["HF_HOME", "TRANSFORMERS_CACHE", "DOCLING_ARTIFACTS_PATH",
+              "CUDA_VISIBLE_DEVICES", "TORCH_HOME"]:
+        print(f"  {k} = {os.environ.get(k, '(not set)')}")
+
+    # Check GPU availability
+    print("\n=== GPU Status ===")
+    if _HAS_TORCH:
+        if torch.cuda.is_available():
+            print(f"  CUDA available: Yes")
+            print(f"  Device: {torch.cuda.get_device_name(0)}")
+            print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        else:
+            print("  CUDA available: No (will use CPU)")
+    else:
+        print("  PyTorch not installed (CPU-only mode)")
+
+
+# ═══════════════════════════════════════════════════════════════
+# OCR Detection — Automatic detection of scanned vs native PDFs
+# ═══════════════════════════════════════════════════════════════
+
+def _needs_ocr(pdf_path: Path, sample_pages: int = 5) -> bool:
+    """
+    Detect if PDF appears to be scanned (no text layer).
+
+    Returns True if average text per page is very low.
+    """
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(str(pdf_path))
+        text_chars = 0
+        pages_checked = min(sample_pages, doc.page_count)
+        for i in range(pages_checked):
+            text_chars += len(doc[i].get_text())
+        doc.close()
+        avg_chars_per_page = text_chars / pages_checked if pages_checked > 0 else 0
+        return avg_chars_per_page < 100  # threshold: scanned if very few chars
+    except ImportError:
+        print("      [info] PyMuPDF not available for OCR detection, assuming native PDF")
+        return False
+    except Exception as e:
+        print(f"      [warn] OCR detection failed: {e}, assuming native PDF")
+        return False
 
 # ── GLiNER entity extractor (zero-shot, no training needed) ───
 try:
@@ -203,12 +384,39 @@ def _guess_title(markdown: str, fallback: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 # 1. PARSE — Docling → full markdown + section list
 # ═══════════════════════════════════════════════════════════════
-def parse_pdf(pdf_path: Path) -> tuple[str, List[str]]:
-    """Returns (full_markdown, list_of_section_titles)."""
-    converter = DocumentConverter()
+def parse_pdf(
+    pdf_path: Path,
+    auto_detect_ocr: bool = True,
+    force_ocr: bool = False,
+) -> tuple[str, List[str]]:
+    """
+    Returns (full_markdown, list_of_section_titles).
+
+    Args:
+        pdf_path: Path to the PDF file
+        auto_detect_ocr: Automatically detect if OCR is needed (default: True)
+        force_ocr: Force OCR on for scanned PDFs (overrides auto_detect)
+    """
+    # Determine if OCR is needed
+    do_ocr = force_ocr
+    if auto_detect_ocr and not force_ocr:
+        print("      Auto-detecting PDF type...")
+        do_ocr = _needs_ocr(pdf_path)
+        print(f"      OCR: {'enabled' if do_ocr else 'disabled'} (native PDF detected)")
+
+    # Ensure models are downloaded before first conversion
+    _ensure_models_downloaded()
+
+    # Get optimized converter (creates singleton on first call)
+    converter = _get_converter(do_ocr=do_ocr)
+
     result = converter.convert(str(pdf_path))
     markdown = result.document.export_to_markdown()
     sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+
+    # Clear GPU cache after conversion
+    _clear_gpu_cache()
+
     return markdown, sections
 
 
@@ -299,6 +507,8 @@ def ingest(
     pdf_path: str,
     doc_type: str = "document",
     labels_arg: Optional[str] = None,
+    auto_detect_ocr: bool = True,
+    force_ocr: bool = False,
 ) -> str:
     """
     Ingest a PDF document into the corpus.
@@ -307,6 +517,8 @@ def ingest(
         pdf_path: Path to the PDF file
         doc_type: Document type/category
         labels_arg: Label configuration (built-in name or path:key)
+        auto_detect_ocr: Automatically detect if PDF needs OCR
+        force_ocr: Force OCR on (for known scanned PDFs)
 
     Returns:
         Document ID string
@@ -325,7 +537,7 @@ def ingest(
     print(f"      Labels: {len(_current_label_config['labels'])} entity types")
 
     print(f"[1/4] Parsing    {pdf.name}  (docling) ...")
-    markdown, sections = parse_pdf(pdf)
+    markdown, sections = parse_pdf(pdf, auto_detect_ocr=auto_detect_ocr, force_ocr=force_ocr)
 
     print(f"[2/4] Extracting entities  ({NER_BACKEND}) ...")
     entities = extract_entities(markdown)
@@ -359,6 +571,7 @@ Examples:
   %(prog)s papers/ml_paper.pdf research --labels research
   %(prog)s bandi/gara.pdf bando --labels edilizia
   %(prog)s doc.pdf custom --labels /path/to/my_labels.yaml:medical
+  %(prog)s scanned.pdf document --ocr          # force OCR for scanned PDFs
 
 Built-in label sets:
   edilizia  - Italian construction and public tenders
@@ -386,9 +599,53 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
             "(2) 'path/to/config.yaml:key' for custom labels"
         )
     )
+    parser.add_argument(
+        "--ocr",
+        dest="force_ocr",
+        action="store_true",
+        default=False,
+        help="Force OCR on (for scanned/image-based PDFs)"
+    )
+    parser.add_argument(
+        "--no-auto-ocr",
+        dest="auto_detect_ocr",
+        action="store_false",
+        default=True,
+        help="Disable automatic OCR detection (assume native PDF)"
+    )
+    parser.add_argument(
+        "--verify-models",
+        dest="verify_models",
+        action="store_true",
+        default=False,
+        help="Verify docling models are downloaded and exit"
+    )
+    parser.add_argument(
+        "--audit",
+        dest="audit_cache",
+        action="store_true",
+        default=False,
+        help="Audit model cache and show diagnostic information"
+    )
 
     args = parser.parse_args()
-    ingest(args.pdf_path, args.doc_type, args.labels_arg)
+
+    if args.audit_cache:
+        audit_model_cache()
+        return
+
+    if args.verify_models:
+        print("Verifying docling models are cached locally...")
+        _ensure_models_downloaded()
+        return
+
+    ingest(
+        args.pdf_path,
+        args.doc_type,
+        args.labels_arg,
+        auto_detect_ocr=args.auto_detect_ocr,
+        force_ocr=args.force_ocr,
+    )
 
 
 if __name__ == "__main__":
