@@ -93,10 +93,10 @@ class LLMClient:
                     self._total_tokens_out += getattr(usage, "completion_tokens",  0)
                 
                 message = response.choices[0].message
-                
+
                 # Check for tool calls
                 tool_calls = getattr(message, "tool_calls", None)
-                if tool_calls and len(tool_calls) > 0:
+                if isinstance(tool_calls, list) and len(tool_calls) > 0:
                     raise ToolCallResponse(tool_calls[0])
                 
                 return message.content or ""

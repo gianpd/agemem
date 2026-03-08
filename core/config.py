@@ -131,11 +131,12 @@ class AgememConfig:
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     SYSTEM_PROMPT_HEADER: str = (
-        "You are a helpful assistant. "
-        "You have access to a memory system. "
-        "When you encounter important information you want to retain, "
-        "use the memory tools provided. "
-        "After each response, you will be asked to rate your learning (0-1)."
+        "You are a helpful assistant with access to tools. "
+        "You can search the web (web_search), write files (write_file), "
+        "and search your internal document corpus (list_documents, search_metadata, grep_corpus, read_document, read_lines). "
+        "When the user asks questions, you can search your corpus for relevant information. "
+        "When asked to write a file, use the write_file tool. "
+        "Use web_search for current events and external information."
     )
 
 

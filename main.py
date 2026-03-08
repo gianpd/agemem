@@ -73,8 +73,9 @@ WEB_SEARCH_TOOL_SCHEMA = {
     }
 }
 
-# Import corpus tool definitions
+# Import all tool definitions
 from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
+from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
 
 def get_local_client() -> OpenAI:
     """Get the local llama.cpp OpenAI-compatible client."""
@@ -112,8 +113,9 @@ def build_orchestrator() -> Orchestrator:
     
     orch = Orchestrator(llm=llm, config=cfg, ltm_store=ltm_store)
     
-    # Set up tools
-    orch.set_tools([WEB_SEARCH_TOOL_SCHEMA])
+    # Set up tools - combine all tool definitions
+    all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS
+    orch.set_tools(all_tools)
     
     return orch
 
@@ -155,6 +157,7 @@ def print_help():
     """Print help message."""
     print("""
 Available commands:
+  /tools    List all available tools the agent can use.
   /clear    Reset STM context. LTM is retained.
   /memory   Print current LTM snapshot.
   /stats    Print current STM stats.
@@ -162,6 +165,32 @@ Available commands:
   /help     Show this help message.
   Ctrl-C    Exit gracefully.
 """)
+
+
+def print_tools(orch: Orchestrator):
+    """Print available tools."""
+    tools = orch.get_available_tools()
+    if not tools:
+        print("  [No tools available]")
+        return
+
+    print(f"\n  Available Tools ({len(tools)}):")
+    print("  " + "-" * 50)
+
+    for tool in tools:
+        func = tool.get("function", {})
+        name = func.get("name", "unknown")
+        desc = func.get("description", "No description available.")
+        # Get first line of description only
+        desc_first_line = desc.split(".")[0] + "." if "." in desc else desc
+        print(f"    /{name}")
+        print(f"      {desc_first_line[:60]}{'...' if len(desc_first_line) > 60 else ''}")
+
+    print("\n  Use these tools by mentioning them, e.g.:")
+    print('    "Search the web for Python tutorials"  → uses web_search')
+    print('    "List all documents"                   → uses list_documents')
+    print('    "Write this to output.txt"             → uses write_file')
+    print()
 
 
 def print_memory(orch: Orchestrator):
@@ -214,17 +243,17 @@ def cmd_forget(orch: Orchestrator) -> bool:
 def print_banner(orch: Orchestrator):
     """Print startup banner."""
     ltm_count = len(orch.ltm_snapshot())
-    web_status = "enabled" 
-    
+    tools_count = len(orch.get_available_tools())
+
     print(f"""
 AgeMem Chat
   Model   : {LLAMA_MODEL} @ {LLAMA_HOST}
   STM     : {STM_TOKEN_LIMIT} token limit
   LTM     : {LTM_PERSIST_PATH} ({ltm_count} entries loaded)
   Memory  : STM resets on /clear — LTM persists across sessions
-  Web     : web_search {web_status}
+  Tools   : {tools_count} available (type /tools to list)
 """)
-    
+
     print()
 
 
@@ -264,7 +293,11 @@ def main():
         if user_input == "/help":
             print_help()
             continue
-        
+
+        if user_input == "/tools":
+            print_tools(orch)
+            continue
+
         if user_input == "/clear":
             cmd_clear(orch)
             continue

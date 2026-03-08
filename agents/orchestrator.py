@@ -184,12 +184,18 @@ class Orchestrator:
         """Set the available tools for the LLM."""
         self._tools = tools
 
+    def get_available_tools(self) -> list[dict]:
+        """Return the list of available tools."""
+        return self._tools
+
     def _execute_tool(self, name: str, arguments: dict) -> str:
         """
         Execute a tool by name.
 
         Currently supported:
         - web_search: Search the web for current information
+        - write_file: Write content to a file
+        - ingest_document: Ingest a markdown file into the corpus
         - list_documents: List all ingested documents
         - search_metadata: Search document metadata for a keyword
         - grep_corpus: Full-text search across all documents
@@ -204,17 +210,47 @@ class Orchestrator:
                 from tools.web_tools import web_search
                 query = arguments.get("query", "")
                 num_results = arguments.get("num_results", 5)
-                # Run async function synchronously
+                # Run async function synchronously using asyncio.run()
                 import asyncio
                 try:
                     result = asyncio.run(web_search(query, num_results))
                 except RuntimeError:
-                    # If already in an event loop, use a different approach
-                    loop = asyncio.get_event_loop()
-                    result = loop.run_until_complete(web_search(query, num_results))
+                    # If already in an event loop, use nest_asyncio or get existing loop
+                    try:
+                        import nest_asyncio
+                        nest_asyncio.apply()
+                        result = asyncio.run(web_search(query, num_results))
+                    except ImportError:
+                        # Fallback: try to get the running loop
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Create a new loop in a thread
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(asyncio.run, web_search(query, num_results))
+                                result = future.result()
+                        else:
+                            result = loop.run_until_complete(web_search(query, num_results))
                 return result
             except Exception as e:
                 return f"[TOOL ERROR] web_search failed: {e}"
+
+        if name == "write_file":
+            try:
+                from tools.web_tools import write_file
+                path = arguments.get("path", "")
+                content = arguments.get("content", "")
+                return write_file(path, content)
+            except Exception as e:
+                return f"[TOOL ERROR] write_file failed: {e}"
+
+        if name == "ingest_document":
+            try:
+                from tools.web_tools import ingest_document
+                path = arguments.get("path", "")
+                return ingest_document(path)
+            except Exception as e:
+                return f"[TOOL ERROR] ingest_document failed: {e}"
 
         # Corpus tools
         if name == "list_documents":

@@ -93,3 +93,14 @@ class LearningScorer:
             )
         except Exception:
             return None
+            score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
+            return LearningFeedback(
+                score=score,
+                rationale=raw.get("rationale", ""),
+                affected_content=raw.get("affected_content", ""),
+                turn_index=turn_index,
+            )
+        except Exception as e:
+            print(f"[DEBUG] LearningScorer.collect() failed: {e}", flush=True)
+            return None
+            return None

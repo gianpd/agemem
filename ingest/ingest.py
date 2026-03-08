@@ -328,41 +328,109 @@ def get_current_labels() -> Dict[str, Any]:
     return _current_label_config
 
 
-# GLiNER has a ~12k character limit per batch
-GLINER_CHUNK_SIZE = 12_000
-GLINER_CHUNK_OVERLAP = 200
+# GLiNER's underlying transformer has a 384 token limit.
+# Long sentences get truncated, missing entities at the tail.
+# We split at natural boundaries to preserve recall.
+GLINER_MAX_TOKENS = 384
+# Approximate chars per token (conservative for Italian legal text)
+CHARS_PER_TOKEN_ESTIMATE = 4
+# Safe sentence length in characters before splitting
+MAX_SENTENCE_CHARS = GLINER_MAX_TOKENS * CHARS_PER_TOKEN_ESTIMATE  # ~1536
+
+# Split boundaries in order of preference (less semantic disruption)
+SENTENCE_SPLIT_BOUNDARIES = [
+    ';',      # Italian legal text uses semicolons heavily
+    ',',      # Secondary break point
+    ' e ',    # 'and' conjunction (Italian)
+    ' ed ',   # 'and' before vowels (Italian)
+    ' oppure ',  # 'or'
+]
 
 
-def _chunk_text(text: str, chunk_size: int = GLINER_CHUNK_SIZE, overlap: int = GLINER_CHUNK_OVERLAP) -> List[str]:
-    """Split text into overlapping chunks for batch processing."""
-    if len(text) <= chunk_size:
-        return [text]
+def _split_long_sentence(sentence: str, max_chars: int = MAX_SENTENCE_CHARS) -> List[str]:
+    """
+    Split a long sentence at natural boundaries for GLiNER processing.
 
-    chunks = []
-    start = 0
+    GLiNER's tokenizer truncates at 384 tokens, so we proactively split
+    long sentences at semicolons, commas, or conjunctions to preserve entity recall.
 
-    while start < len(text):
-        end = start + chunk_size
+    Args:
+        sentence: A single sentence (no newlines)
+        max_chars: Maximum characters per segment (~4 chars/token)
 
-        if end < len(text):
-            break_point = text.rfind(' ', start + chunk_size - 100, end)
-            if break_point > start:
-                end = break_point
+    Returns:
+        List of sentence segments, each within token limit
+    """
+    if len(sentence) <= max_chars:
+        return [sentence]
 
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
+    segments = []
+    remaining = sentence
 
-        start = end - overlap if end < len(text) else end
-        if start <= 0 or (chunks and start <= len(chunks[-1])):
-            start = end
+    while len(remaining) > max_chars:
+        # Look for split point within the safe zone
+        search_end = min(max_chars + 20, len(remaining))  # small overshoot for better breaks
+        search_region = remaining[:search_end]
 
-    return chunks
+        best_split = -1
+        for boundary in SENTENCE_SPLIT_BOUNDARIES:
+            # Find last occurrence of boundary in search region
+            idx = search_region.rfind(boundary)
+            if idx > max_chars * 0.5:  # Don't split too early (at least 50% of max)
+                split_at = idx + len(boundary)
+                # Prefer semicolons/conjunctions — keep delimiter with left segment
+                if boundary in (';', ','):
+                    best_split = split_at
+                    break  # semicolon/comma are ideal, stop here
+                elif best_split == -1:
+                    best_split = split_at
+
+        if best_split == -1:
+            # No good boundary found; hard split at max_chars
+            best_split = max_chars
+
+        segments.append(remaining[:best_split].strip())
+        remaining = remaining[best_split:].strip()
+
+    if remaining:
+        segments.append(remaining)
+
+    return segments
+
+
+def _split_text_for_gliner(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> List[str]:
+    """
+    Split text into GLiNER-safe segments, respecting sentence boundaries.
+
+    First splits on sentences, then further splits long sentences at
+    semicolons/commas/conjunctions to stay within token limits.
+
+    Args:
+        text: Full text to process
+        max_chars: Maximum characters per segment
+
+    Returns:
+        List of text segments safe for GLiNER inference
+    """
+    # Split into sentences (simple but effective for this use case)
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    segments = []
+    for sentence in sentences:
+        if len(sentence) <= max_chars:
+            segments.append(sentence)
+        else:
+            # Split long sentence at natural boundaries
+            segments.extend(_split_long_sentence(sentence, max_chars))
+
+    return [s for s in segments if s.strip()]
 
 
 def extract_entities(text: str, label_config: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
     """
     Extract named entities from text using GLiNER with the configured labels.
+
+    Uses sentence-aware splitting to avoid truncation at GLiNER's 384 token limit.
 
     Args:
         text: The text to analyze
@@ -377,13 +445,13 @@ def extract_entities(text: str, label_config: Optional[Dict[str, Any]] = None) -
     buckets = {k: set() for k in config["buckets"].keys()}
 
     if NER_BACKEND == "gliner" and _ner is not None:
-        chunks = _chunk_text(text, GLINER_CHUNK_SIZE, GLINER_CHUNK_OVERLAP)
+        segments = _split_text_for_gliner(text)
 
-        for i, chunk in enumerate(chunks):
-            if len(chunks) > 1:
-                print(f"      Processing chunk {i + 1}/{len(chunks)} ({len(chunk):,} chars)...")
+        for i, segment in enumerate(segments):
+            if len(segments) > 1:
+                print(f"      Processing segment {i + 1}/{len(segments)} ({len(segment):,} chars)...")
 
-            hits = _ner.predict_entities(chunk, labels, threshold=0.4)
+            hits = _ner.predict_entities(segment, labels, threshold=0.4)
             for h in hits:
                 bucket = label_map.get(h["label"])
                 if bucket and len(h["text"].strip()) > 2:

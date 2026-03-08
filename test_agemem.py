@@ -423,6 +423,7 @@ class TestOrchestrator(unittest.TestCase):
             LEARNING_SCORE_PROMPT_EVERY_N=1,  # collect every turn
             LTM_PROMOTE_THRESHOLD=0.65,
             LEARNING_SCORE_THRESHOLD_IMMEDIATE=0.85,
+            PERSIST_DIR=None,  # Disable persistence for test isolation
         )
         orch = Orchestrator(llm=llm, config=cfg)
         orch.chat("What is the capital of France?")
