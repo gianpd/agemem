@@ -25,7 +25,9 @@ agemem/
 │   ├── tool_registry.py  # Tool registration and discovery
 │   └── web_tools.py      # Web search implementation
 ├── ingest/
-│   └── ingest.py         # Document ingestion pipeline
+│   ├── ingest.py         # Document ingestion pipeline
+│   ├── gliner_labels.py  # NER label definitions for different domains
+│   └── gliner_config.yaml# YAML label configurations
 ├── test_agemem.py        # 28 offline unit tests
 └── main.py               # REPL entry point
 ```
@@ -45,9 +47,66 @@ python -m unittest test_agemem -v
 # Start interactive chat
 python main.py
 
-# Install dependencies
+# Install dependencies (basic)
 uv pip install -e .
+
+# Install with document ingestion support (includes docling + gliner)
+uv pip install -e ".[ingest]"
 ```
+
+## Document Ingestion
+
+The `ingest/` module provides PDF-to-markdown conversion with configurable NER extraction:
+
+```bash
+# Requires: uv pip install -e ".[ingest]"
+python ingest/ingest.py report.pdf [doc_type]
+
+# Use built-in label sets for different domains
+python ingest/ingest.py paper.pdf research --labels research
+python ingest/ingest.py contract.pdf legal --labels legal
+python ingest/ingest.py gara.pdf bando --labels edilizia
+
+# Use custom labels from YAML config
+python ingest/ingest.py doc.pdf custom --labels /path/to/config.yaml:medical
+```
+
+### Built-in Label Sets
+
+| Set | Description | Use Case |
+|-----|-------------|----------|
+| `edilizia` | Italian construction/tenders (CIG, CUP, appalti) | Public procurement documents |
+| `research` | Scientific papers (datasets, algorithms, citations) | Academic publications |
+| `legal` | Contracts and legal documents (parties, clauses) | Legal text analysis |
+
+### Custom Label Configuration
+
+Create a YAML file (see `ingest/gliner_config.yaml` for examples):
+
+```yaml
+my_domain:
+  description: "Custom domain labels"
+  labels:
+    - person
+    - organization
+    - custom_entity
+  label_map:
+    person: people
+    organization: orgs
+    custom_entity: custom
+  buckets:
+    - people
+    - orgs
+    - custom
+```
+
+Then reference it: `--labels /path/to/config.yaml:my_domain`
+
+| Feature | Package | Purpose |
+|---------|---------|---------|
+| PDF parsing | `docling` | Convert PDFs to markdown |
+| Entity extraction | `gliner` | Zero-shot NER with domain-specific labels |
+| Frontmatter | `PyYAML` | Metadata in YAML format |
 
 ## Key Configuration
 

@@ -1,0 +1,344 @@
+# GLiNER Label Configuration File
+# =================================
+#
+# This file defines custom label sets for Named Entity Recognition (NER)
+# using the GLiNER model. Each label set specifies:
+#   - labels: List of entity labels to extract
+#   - label_map: Mapping from GLiNER labels to output bucket names
+#   - buckets: Empty buckets for organizing extracted entities
+#
+# Usage in ingest.py:
+#   python ingest.py doc.pdf --labels gliner_config.yaml:edilizia
+#
+# Or use built-in label sets without a config file:
+#   python ingest.py doc.pdf --labels edilizia
+#   python ingest.py doc.pdf --labels research
+#   python ingest.py doc.pdf --labels legal
+
+# ═══════════════════════════════════════════════════════════════
+# Built-in: Edilizia (Italian Construction & Public Tenders)
+# ═══════════════════════════════════════════════════════════════
+edilizia:
+  description: "Italian construction and public tenders (CIG, CUP, appalti)"
+  labels:
+    # Base entities
+    - person
+    - organization
+    - date
+    - financial value
+    - location
+    - articles
+    # Gara e Appalto
+    - tender code
+    - tender type
+    - contract type
+    - award criterion
+    # Soggetti e Ruoli
+    - public administration
+    - professional role
+    - professional title
+    - contractor
+    # Opere e Interventi
+    - work type
+    - building type
+    - construction material
+    - construction phase
+    # Tecnico-Normativo
+    - technical standard
+    - law or regulation
+    - safety standard
+    - permit type
+    - classification code
+    # Finanziario
+    - budget category
+    - funding source
+    - guarantee
+    # Temporal
+    - deadline
+    - duration
+  label_map:
+    # Base
+    person: people
+    organization: orgs
+    date: dates
+    financial value: values
+    location: locations
+    articles: articles
+    # Gara
+    tender code: codes
+    tender type: gara
+    contract type: gara
+    award criterion: gara
+    # Soggetti
+    public administration: orgs
+    professional role: roles
+    professional title: roles
+    contractor: orgs
+    # Opere
+    work type: opere
+    building type: opere
+    construction material: materiali
+    construction phase: fasi
+    # Normativo
+    technical standard: norme
+    law or regulation: norme
+    safety standard: norme
+    permit type: autorizzazioni
+    classification code: codes
+    # Finanziario
+    budget category: valori
+    funding source: finanziamenti
+    guarantee: garanzie
+    # Temporal
+    deadline: scadenze
+    duration: durate
+  buckets:
+    - people
+    - orgs
+    - dates
+    - values
+    - locations
+    - articles
+    - codes
+    - gara
+    - roles
+    - opere
+    - materiali
+    - fasi
+    - norme
+    - autorizzazioni
+    - finanziamenti
+    - garanzie
+    - scadenze
+    - durate
+
+# ═══════════════════════════════════════════════════════════════
+# Built-in: Research (Science Papers & Academic Publications)
+# ═══════════════════════════════════════════════════════════════
+research:
+  description: "Research papers and scientific publications"
+  labels:
+    # Base
+    - person
+    - organization
+    - location
+    - date
+    # Academic/Research
+    - research field
+    - research method
+    - dataset
+    - metric
+    - algorithm
+    - model architecture
+    - hyperparameter
+    # Scientific
+    - chemical compound
+    - biological entity
+    - physical quantity
+    - unit of measurement
+    - mathematical concept
+    # Publication
+    - journal name
+    - conference name
+    - publication type
+    - citation
+    - funding source
+    - grant number
+    # Technical
+    - software
+    - hardware
+    - programming language
+    - file format
+  label_map:
+    # Base
+    person: people
+    organization: orgs
+    location: locations
+    date: dates
+    # Academic
+    research field: fields
+    research method: methods
+    dataset: datasets
+    metric: metrics
+    algorithm: algorithms
+    model architecture: models
+    hyperparameter: hyperparams
+    # Scientific
+    chemical compound: compounds
+    biological entity: bio_entities
+    physical quantity: quantities
+    unit of measurement: units
+    mathematical concept: math_concepts
+    # Publication
+    journal name: venues
+    conference name: venues
+    publication type: pub_types
+    citation: citations
+    funding source: funding
+    grant number: grants
+    # Technical
+    software: software
+    hardware: hardware
+    programming language: languages
+    file format: formats
+  buckets:
+    - people
+    - orgs
+    - locations
+    - dates
+    - fields
+    - methods
+    - datasets
+    - metrics
+    - algorithms
+    - models
+    - hyperparams
+    - compounds
+    - bio_entities
+    - quantities
+    - units
+    - math_concepts
+    - venues
+    - pub_types
+    - citations
+    - funding
+    - grants
+    - software
+    - hardware
+    - languages
+    - formats
+
+# ═══════════════════════════════════════════════════════════════
+# Built-in: Legal (General Legal Documents & Contracts)
+# ═══════════════════════════════════════════════════════════════
+legal:
+  description: "Legal documents and contracts"
+  labels:
+    # Base
+    - person
+    - organization
+    - date
+    - financial value
+    - location
+    # Legal Parties
+    - plaintiff
+    - defendant
+    - judge
+    - attorney
+    - witness
+    - expert
+    # Legal Documents
+    - contract type
+    - clause type
+    - legal reference
+    - statute
+    - regulation
+    # Legal Terms
+    - jurisdiction
+    - court
+    - case number
+    - liability type
+    - remedy
+    - obligation
+  label_map:
+    # Base
+    person: people
+    organization: orgs
+    date: dates
+    financial value: values
+    location: locations
+    # Parties
+    plaintiff: parties
+    defendant: parties
+    judge: judicial
+    attorney: legal_repr
+    witness: witnesses
+    expert: experts
+    # Documents
+    contract type: doc_types
+    clause type: clauses
+    legal reference: references
+    statute: statutes
+    regulation: regulations
+    # Terms
+    jurisdiction: jurisdictions
+    court: courts
+    case number: case_ids
+    liability type: liabilities
+    remedy: remedies
+    obligation: obligations
+  buckets:
+    - people
+    - orgs
+    - dates
+    - values
+    - locations
+    - parties
+    - judicial
+    - legal_repr
+    - witnesses
+    - experts
+    - doc_types
+    - clauses
+    - references
+    - statutes
+    - regulations
+    - jurisdictions
+    - courts
+    - case_ids
+    - liabilities
+    - remedies
+    - obligations
+
+# ═══════════════════════════════════════════════════════════════
+# Custom: Example - Medical Documents
+# ═══════════════════════════════════════════════════════════════
+medical:
+  description: "Medical records and clinical documents"
+  labels:
+    - person
+    - date
+    - organization
+    - medical condition
+    - symptom
+    - medication
+    - dosage
+    - procedure
+    - body part
+    - diagnosis code
+    - test result
+    - vital sign
+    - allergy
+    - physician
+    - hospital
+  label_map:
+    person: patients
+    date: dates
+    organization: facilities
+    medical condition: conditions
+    symptom: symptoms
+    medication: medications
+    dosage: dosages
+    procedure: procedures
+    body part: anatomy
+    diagnosis code: codes
+    test result: results
+    vital sign: vitals
+    allergy: allergies
+    physician: doctors
+    hospital: facilities
+  buckets:
+    - patients
+    - dates
+    - facilities
+    - conditions
+    - symptoms
+    - medications
+    - dosages
+    - procedures
+    - anatomy
+    - codes
+    - results
+    - vitals
+    - allergies
+    - doctors

@@ -1,199 +1,419 @@
-Here is a well-scoped internal dev ticket.
+# Docling Optimization Guide
+### Target: 350-page PDF → Markdown | CPU + 8 GB GPU + 32 GB RAM
 
 ---
 
-# Dev Ticket: AgeMem Interactive Chat — `main.py`
+## 1. How Docling Works Internally
 
-**Reference implementations:** `example_usage.py`, `ask.py` (tri-tier swarm)
-**Target system:** AgeMem-hybrid (`agents/orchestrator.py` and supporting modules)
+Docling uses a pipeline of AI models to parse PDFs. Understanding what runs under the hood is essential before optimizing.
 
----
+| Stage | Model / Tool | Purpose |
+|---|---|---|
+| **Layout Detection** | `DocLayNet` (RT-DETR / DINO-based) | Detects page regions: text, table, figure, title |
+| **Table Structure** | `TableFormer` | Reconstructs rows/columns from detected table regions |
+| **OCR (optional)** | `EasyOCR` or `Tesseract` | Used only on scanned/image-based PDFs |
+| **Reading Order** | Rule-based heuristic | Orders detected blocks into logical flow |
+| **Markdown export** | Docling serializer | Converts internal DocItem tree → Markdown |
 
-## Context
-
-The AgeMem-hybrid system currently has no entry point for interactive use. `example_usage.py` demonstrates the `Orchestrator` API with a hardcoded turn list and exits. This ticket implements `main.py`: a persistent REPL where a user chats with a local Qwen model (via llama.cpp), the full STM/LTM memory cycle runs on every turn, and web search is available as a tool.
-
-Study `example_usage.py` before starting — it shows the correct way to construct `AgememConfig`, wire `LLMClient`, and call `Orchestrator.chat()`. Do not bypass the Orchestrator to call the LLM directly.
-
----
-
-## Scope
-
-Single file: `main.py` at the project root, alongside `example_usage.py`.
-
-No new modules. No changes to `core/`, `memory/`, `triggers/`, or `agents/` unless a genuine bug is found — in that case open a separate ticket.
+The default `DocumentConverter()` **auto-downloads all models** on first run into the HuggingFace cache. No models = no conversion.
 
 ---
 
-## Functional Requirements
+## 2. Where to Find Installed Models
 
-### F1 — LLM Backend: llama.cpp via OpenAI-compatible API
+Docling stores models in the standard HuggingFace Hub cache and its own artifact directory. Check these locations in order:
 
-The local Qwen model is served by llama.cpp at a configurable host. The client must be an `openai.OpenAI` instance pointed at the llama.cpp `/v1` endpoint, passed into `LLMClient` exactly as shown in `example_usage.py`'s `build_orchestrator()`.
+### 2.1 Primary Cache Locations
 
-Environment variables (all optional, with defaults):
+```bash
+# HuggingFace Hub cache (main location)
+~/.cache/huggingface/hub/
 
-```
-LLAMA_HOST        default: http://localhost:8080
-LLAMA_MODEL       default: qwen3-4b
-LLAMA_MAX_TOKENS  default: 2048
-LLAMA_TEMPERATURE default: 0.2
-```
+# Docling's dedicated artifact path (newer versions)
+~/.cache/docling/models/
 
-On startup, verify the server is reachable before entering the REPL. If unreachable, print a clear error with the start command and exit. Do not silently proceed with a broken client.
+# Alternative if HF_HOME env var is set
+$HF_HOME/hub/
 
-### F2 — Web Search Tool
-
-The agent must have access to a `web_search` tool. This is a new capability not present in the current AgeMem codebase.
-
-The tool must be integrated into the Orchestrator's LLM call, not called outside it. Concretely: the messages list passed to `LLMClient.chat()` must include the tool schema, and tool call responses must be appended to the STM context before the next LLM call.
-
-This requires a targeted extension to `LLMClient.chat()` and `Orchestrator.chat()` to support tool schemas and tool result injection. The extension must be backward-compatible — existing callers that pass no tools must continue to work unchanged.
-
-Implementation of `web_search` itself: use `duckduckgo-search` (no API key required). Cap results at `TOOL_RESULT_MAX_CHARS` characters. Return title, URL, and snippet for each result.
-
-```
-WEB_SEARCH_MAX_RESULTS  default: 5
-TOOL_RESULT_MAX_CHARS   default: 4000
+# Root user (Docker/server environments)
+/root/.cache/huggingface/hub/
+/root/.cache/docling/models/
 ```
 
-### F3 — Memory: Full STM + LTM Cycle
+### 2.2 Quick Diagnostic Script
 
-The Orchestrator already manages STM and LTM. `main.py` must not re-implement any memory logic. The requirements here are about configuration and session behaviour.
-
-**LTM persistence.** Pass a `persist_path` to `LTMStore` so memories survive process restarts. Default path: `agent_memory/ltm_store.json`. The Orchestrator constructor accepts an optional `ltm_store` argument — construct the `LTMStore` with the path before passing it in.
-
-**STM reset on `/clear`.** When the user types `/clear`, reset the STM context to its initial state (system prompt only) without touching the LTM. The LTM must survive a `/clear` — it is session-persistent, not turn-persistent.
-
-**No session cap.** There is no `MAX_STEPS` or turn limit. The session runs until the user exits. The STM overflow guards in `STMContext.force_fit()` are the only context management mechanism — do not add an outer turn counter.
-
-### F4 — REPL Commands
-
-```
-/clear    Reset STM context. Print confirmation. LTM is retained.
-/memory   Print current LTM snapshot (all entries, score, content).
-/stats    Print current STM stats (tokens, utilisation %, message count).
-/forget   Wipe LTM store from disk and memory. Prompt for confirmation.
-/help     List available commands.
-Ctrl-C    Exit gracefully.
-```
-
-### F5 — Session Startup Banner
-
-On launch, print:
-
-```
-AgeMem Chat
-  Model   : <LLAMA_MODEL> @ <LLAMA_HOST>
-  STM     : <STM_TOKEN_LIMIT> token limit
-  LTM     : <path> (<N> entries loaded)
-  Memory  : STM resets on /clear — LTM persists across sessions
-  Web     : web_search enabled
-```
-
-### F6 — Per-turn Diagnostics
-
-After each assistant response, print a compact status line:
-
-```
-  [STM ██████░░░░ 61% ~3700tok | LTM 12 entries | turn 7]
-```
-
-Format: progress bar (10 chars, `█`/`░`), utilisation %, token estimate, LTM entry count, turn index. This mirrors the bar in `ask.py`'s REPL and gives the user visibility into memory pressure without reading logs.
-
-If any memory ops fired during the turn (from `trace.ops_applied`), print them below the bar:
-
-```
-  [MEM] SUMMARY triggered by system_rule — Compressed 8 messages (~640 tokens saved)
-  [MEM] ADD triggered by learning_score — Stored entry a3f9c1
-```
-
-Only print ops where `op.success == True`.
-
----
-
-## Non-Functional Requirements
-
-### N1 — No MAX_STEPS enforcement in main.py
-
-The `LLAMA_MAX_STEPS` pattern from `ask.py` must not appear. AgeMem's overflow guards are the only context management. If the developer finds the Orchestrator needs a step budget for tool-calling loops, that belongs in the Orchestrator, not in `main.py`.
-
-### N2 — Async not required
-
-`ask.py` is fully async because the Archivist runs in the background. AgeMem's Orchestrator is synchronous. `main.py` must be synchronous. Do not introduce `asyncio` unless the web search backend strictly requires it — if so, use `asyncio.run()` at the call site only, not propagated upward.
-
-### N3 — Config in one place
-
-All tuneable values must be read from environment variables at the top of `main.py`, with explicit defaults. No magic numbers inline. Mirror the pattern from `ask.py`'s config block.
-
-### N4 — Graceful degradation
-
-If `gliner` or `duckduckgo-search` are not installed, warn at startup and disable the affected feature rather than crashing. Web search being unavailable must not prevent the REPL from starting.
-
-### N5 — Import hygiene
-
-`main.py` imports from the AgeMem package only via its public API:
+Run this to confirm which models are present:
 
 ```python
-from core.config import AgememConfig
-from core.types import MemoryOp, TriggerKind
-from agents.llm_client import LLMClient
-from agents.orchestrator import Orchestrator
-from memory.ltm_store import LTMStore
+import os
+import pathlib
+
+CACHE_DIRS = [
+    os.path.expanduser("~/.cache/huggingface/hub"),
+    os.path.expanduser("~/.cache/docling/models"),
+    os.path.expanduser("~/.cache/docling"),
+    os.environ.get("HF_HOME", ""),
+]
+
+DOCLING_MODEL_REPOS = [
+    "ds4sd--docling-models",       # Layout + TableFormer
+    "ds4sd--DocLayNet",            # Layout detection weights
+    "ds4sd--TableFormer",          # Table structure
+    "easyocr",                     # OCR (only if scanned PDF)
+]
+
+print("=== Docling Model Cache Audit ===\n")
+for base in CACHE_DIRS:
+    if not base or not os.path.exists(base):
+        print(f"  [MISSING]  {base}")
+        continue
+    p = pathlib.Path(base)
+    dirs = [d.name for d in p.iterdir() if d.is_dir()]
+    matched = [d for d in dirs if any(m in d for m in DOCLING_MODEL_REPOS)]
+    print(f"  [FOUND]    {base}")
+    if matched:
+        for m in matched:
+            size = sum(f.stat().st_size for f in (p/m).rglob("*") if f.is_file())
+            print(f"             ✓ {m}  ({size/1e9:.2f} GB)")
+    else:
+        print("             — no docling models found here")
+
+# Also check environment
+print("\n=== Relevant Environment Variables ===")
+for k in ["HF_HOME", "TRANSFORMERS_CACHE", "DOCLING_ARTIFACTS_PATH",
+          "CUDA_VISIBLE_DEVICES", "TORCH_HOME"]:
+    print(f"  {k} = {os.environ.get(k, '(not set)')}")
 ```
 
-No direct imports from `memory/stm_context.py` internals or `triggers/system_rules.py`. If something needed by `main.py` is not reachable via these imports, the fix is to expose it through the existing public interface, not to reach into internals.
-
----
-
-## Integration Points Requiring Orchestrator Extension
-
-Two small extensions to existing files are in scope for this ticket because they are prerequisites. Both must be backward-compatible.
-
-**E1 — Tool support in `LLMClient.chat()`.**
-
-Add an optional `tools` parameter:
+### 2.3 Force a Specific Cache Path
 
 ```python
-def chat(
-    self,
-    messages: list[dict],
-    tools: list[dict] | None = None,   # ← add this
-    model: str | None = None,
-    ...
-) -> str:
+import os
+os.environ["HF_HOME"] = "/data/models/hf_cache"          # custom HF path
+os.environ["DOCLING_ARTIFACTS_PATH"] = "/data/models/docling"  # custom docling path
 ```
 
-When `tools` is not None, include it in the API call. When a tool call is returned instead of text content, return a structured sentinel or raise a typed exception — do not silently return empty string. The caller (`Orchestrator`) is responsible for detecting and handling tool calls.
+Set these **before** importing docling.
 
-**E2 — Tool call handling in `Orchestrator.chat()`.**
+### 2.4 Pre-download Models (Offline / Air-gapped systems)
 
-When the LLM returns a tool call rather than a final answer, the Orchestrator must:
-1. Parse the tool name and arguments
-2. Execute the tool (dispatch table, starting with `web_search`)
-3. Append the tool result as a `tool` role message to STM
-4. Loop back to the LLM call
-5. Record all tool calls in `TurnTrace.ops_applied` with `TriggerKind.MAIN_AGENT`
+```bash
+# Download docling models explicitly before first use
+python -c "
+from docling.utils.model_downloader import download_models_hf
+download_models_hf(force=False)  # skip if already present
+"
 
-This loop has no hard iteration cap (N1), but must be protected against the same duplicate-call pattern as `ask.py`'s `LoopGuard`. Implement a lightweight per-turn call tracker: if the same tool is called with identical arguments twice in one turn, inject a system message telling the agent to try a different approach rather than silently looping.
-
----
-
-## Out of Scope
-
-- Oracle / Archivist pattern from `ask.py` — AgeMem does not have a background writer
-- Corpus ingestion (`ingest.py`) — not relevant to chat mode
-- Multi-agent escalation — single model only
-- Streaming responses — not supported by the current `LLMClient`
-- GUI or web interface
+# Or use HF CLI
+pip install huggingface_hub
+huggingface-cli download ds4sd/docling-models
+huggingface-cli download ds4sd/DocLayNet-base
+```
 
 ---
 
-## Acceptance Criteria
+## 3. Optimized Converter for Your Hardware
 
-1. `python main.py` starts, prints the banner, and enters the REPL
-2. A conversation of 30+ turns does not crash or exceed `STM_TOKEN_LIMIT` (verified by `/stats`)
-3. After `/clear`, `/stats` shows message count reset to 1 (system prompt only); `/memory` still shows entries from before the clear
-4. After process restart, `/memory` shows the same entries as before restart (LTM persisted to disk)
-5. Typing a query that requires current information (e.g. "what happened in the news today") results in a `web_search` tool call visible in the diagnostics line
-6. All existing tests in `tests/test_agemem.py` still pass — the 28-test suite must be green before the PR is opened
+### Hardware Profile
+- **CPU**: Available (main processing)
+- **GPU**: 8 GB VRAM (enough for layout + TableFormer inference)
+- **RAM**: 32 GB (ample for 350-page batch)
+
+### 3.1 Full Optimized Implementation
+
+```python
+import re
+import gc
+import torch
+from pathlib import Path
+from typing import List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+    AcceleratorOptions,
+    AcceleratorDevice,
+    TableFormerMode,
+)
+from docling.datamodel.base_models import InputFormat
+
+
+def build_optimized_converter() -> DocumentConverter:
+    """
+    Optimized converter for: CPU + 8GB GPU + 32GB RAM.
+    Targets 350-page PDF → Markdown with maximum throughput.
+    """
+    accelerator = AcceleratorOptions(
+        num_threads=8,                          # CPU threads (tune to your core count)
+        device=AcceleratorDevice.AUTO,          # uses CUDA if available, else CPU
+    )
+
+    pipeline_options = PdfPipelineOptions(
+        # --- Model acceleration ---
+        accelerator_options=accelerator,
+
+        # --- Table detection ---
+        # ACCURATE = full TableFormer (best quality, moderate GPU use)
+        # FAST = lighter mode (faster, slightly lower accuracy)
+        table_structure_options={"mode": TableFormerMode.ACCURATE},
+
+        # --- OCR: disable for native PDFs (major speed gain) ---
+        # Set to True ONLY if your PDF is a scanned image
+        do_ocr=False,
+
+        # --- Page image resolution ---
+        # 144 DPI is the docling default; lower = faster, higher = better tables
+        images_scale=1.0,                       # 1.0 = 72 DPI, 2.0 = 144 DPI (default)
+
+        # --- Generation options ---
+        generate_page_images=False,             # skip page image export (saves RAM)
+        generate_picture_images=False,          # skip figure extraction
+        generate_table_images=False,            # skip table image export
+    )
+
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
+    return converter
+
+
+def parse_pdf(pdf_path: Path) -> Tuple[str, List[str]]:
+    """
+    Returns (full_markdown, list_of_section_titles).
+    Drop-in replacement for the base method with optimized settings.
+    """
+    converter = build_optimized_converter()
+    result = converter.convert(str(pdf_path))
+    markdown = result.document.export_to_markdown()
+    sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+    return markdown, sections
+
+
+def parse_pdf_chunked(
+    pdf_path: Path,
+    chunk_size: int = 50,
+) -> Tuple[str, List[str]]:
+    """
+    Process large PDFs in page chunks to avoid OOM errors.
+    Recommended for 350+ page documents on 8 GB GPU.
+    """
+    converter = build_optimized_converter()
+
+    # Get total page count first
+    import fitz  # PyMuPDF — lightweight, no GPU needed
+    doc = fitz.open(str(pdf_path))
+    total_pages = doc.page_count
+    doc.close()
+
+    all_markdown_parts = []
+    all_sections = []
+
+    print(f"Processing {total_pages} pages in chunks of {chunk_size}...")
+
+    for start in range(0, total_pages, chunk_size):
+        end = min(start + chunk_size, total_pages)
+        print(f"  Pages {start+1}–{end} / {total_pages}")
+
+        result = converter.convert(
+            str(pdf_path),
+            page_range=(start, end - 1),   # 0-indexed, inclusive
+        )
+        md_chunk = result.document.export_to_markdown()
+        all_markdown_parts.append(md_chunk)
+
+        chunk_sections = re.findall(r'^#{1,2}\s+(.+)$', md_chunk, re.MULTILINE)
+        all_sections.extend(chunk_sections)
+
+        # Free GPU memory between chunks
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    full_markdown = "\n\n---\n\n".join(all_markdown_parts)
+    return full_markdown, all_sections
+```
+
+---
+
+## 4. Key Optimization Levers
+
+### 4.1 OCR — The Biggest Decision
+
+```python
+# Native/digital PDF (text layer present) → OCR OFF
+do_ocr=False   # ← saves ~60% of processing time
+
+# Scanned PDF (image only) → OCR ON
+do_ocr=True
+ocr_options=EasyOcrOptions(lang=["en"], use_gpu=True)
+```
+
+**How to detect automatically:**
+
+```python
+import fitz  # PyMuPDF
+
+def needs_ocr(pdf_path: Path, sample_pages: int = 5) -> bool:
+    """Returns True if PDF appears to be scanned (no text layer)."""
+    doc = fitz.open(str(pdf_path))
+    text_chars = 0
+    pages_checked = min(sample_pages, doc.page_count)
+    for i in range(pages_checked):
+        text_chars += len(doc[i].get_text())
+    doc.close()
+    avg_chars_per_page = text_chars / pages_checked
+    return avg_chars_per_page < 100   # threshold: scanned if very few chars
+```
+
+### 4.2 GPU Memory Management (8 GB VRAM)
+
+The two GPU-resident models are:
+- **Layout model** (DocLayNet): ~1.5–2 GB VRAM
+- **TableFormer**: ~1–2 GB VRAM
+
+Both fit comfortably in 8 GB. However, large batches can spike usage. Mitigation:
+
+```python
+# Option A: Reduce image resolution (less GPU memory per page)
+images_scale=1.5   # instead of 2.0 — good balance of quality vs. memory
+
+# Option B: Disable table reconstruction for non-tabular PDFs
+from docling.datamodel.pipeline_options import TableStructureOptions
+table_structure_options=TableStructureOptions(do_cell_matching=False)
+
+# Option C: Force CPU-only if GPU keeps OOMing
+device=AcceleratorDevice.CPU
+```
+
+### 4.3 Threading
+
+```python
+# Set num_threads to physical core count (not hyperthreads)
+import os
+num_threads = os.cpu_count() // 2   # conservative; use full count if CPU is idle
+accelerator_options=AcceleratorOptions(num_threads=num_threads, device=AcceleratorDevice.AUTO)
+```
+
+### 4.4 What to Disable When You Don't Need It
+
+```python
+PdfPipelineOptions(
+    generate_page_images=False,      # -30% memory if you only need text
+    generate_picture_images=False,   # skips figure crops
+    generate_table_images=False,     # skips table image export
+    do_table_structure=False,        # skip TableFormer entirely (only if no tables)
+)
+```
+
+---
+
+## 5. Expected Performance on Your Hardware
+
+| Configuration | Est. Time (350 pages) | VRAM Usage |
+|---|---|---|
+| Default (GPU + OCR off) | ~8–15 min | ~3–4 GB |
+| Chunked (50 pages/batch) | ~10–18 min | ~2–3 GB peak |
+| CPU only | ~35–60 min | 0 GB VRAM |
+| OCR enabled (scanned) | ~40–80 min | ~4–5 GB |
+
+Estimates assume a modern CPU (8+ cores) and CUDA 11.8+ with PyTorch.
+
+---
+
+## 6. Complete Drop-in Replacement for Base Method
+
+```python
+import re
+import gc
+import os
+import torch
+from pathlib import Path
+from typing import List, Tuple
+
+# Set cache paths before any docling import
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+os.environ.setdefault("DOCLING_ARTIFACTS_PATH", os.path.expanduser("~/.cache/docling/models"))
+
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import (
+    PdfPipelineOptions,
+    AcceleratorOptions,
+    AcceleratorDevice,
+)
+from docling.datamodel.base_models import InputFormat
+
+
+_CONVERTER: DocumentConverter | None = None  # module-level singleton
+
+
+def _get_converter() -> DocumentConverter:
+    """Lazy singleton — build once, reuse across calls."""
+    global _CONVERTER
+    if _CONVERTER is None:
+        opts = PdfPipelineOptions(
+            accelerator_options=AcceleratorOptions(
+                num_threads=min(8, os.cpu_count() or 4),
+                device=AcceleratorDevice.AUTO,
+            ),
+            do_ocr=False,
+            generate_page_images=False,
+            generate_picture_images=False,
+            generate_table_images=False,
+        )
+        _CONVERTER = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+        )
+    return _CONVERTER
+
+
+def parse_pdf(pdf_path: Path) -> Tuple[str, List[str]]:
+    """
+    Returns (full_markdown, list_of_section_titles).
+    Optimized for CPU + 8 GB GPU + 32 GB RAM, 350-page PDFs.
+    """
+    converter = _get_converter()
+    result = converter.convert(str(pdf_path))
+    markdown = result.document.export_to_markdown()
+    sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+
+    # Release GPU cache after conversion
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    return markdown, sections
+```
+
+---
+
+## 7. Troubleshooting Checklist
+
+| Problem | Likely Cause | Fix |
+|---|---|---|
+| Slow first run | Models downloading | Pre-download with `download_models_hf()` |
+| `CUDA out of memory` | VRAM spike | Use `images_scale=1.5`, chunked processing |
+| Empty markdown output | Scanned PDF | Enable `do_ocr=True` |
+| Missing tables | Tables rendered as images | Ensure `do_table_structure=True` (default) |
+| Models not found offline | Cache path wrong | Set `DOCLING_ARTIFACTS_PATH` explicitly |
+| Slow on CPU despite GPU available | CUDA not installed | `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
+
+---
+
+## 8. Install Command Reference
+
+```bash
+# Base install
+pip install docling
+
+# With GPU support (CUDA 11.8)
+pip install docling torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Pre-download all models
+python -c "from docling.utils.model_downloader import download_models_hf; download_models_hf()"
+
+# Check GPU availability
+python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+```

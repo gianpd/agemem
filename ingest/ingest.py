@@ -5,17 +5,26 @@
 #   python ingest.py report.pdf [doc_type]
 #   python ingest.py contracts/acme.pdf contract
 #   python ingest.py bandi/gara_2024.pdf bando
+#
+# With custom labels:
+#   python ingest.py paper.pdf research --labels research
+#   python ingest.py bando.pdf bando --labels edilizia
+#   python ingest.py doc.pdf custom --labels /path/to/config.yaml:medical
 
-import yaml, hashlib, re, sys
+import yaml
+import hashlib
+import re
+import sys
+import argparse
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, List, Any, Optional
+
 from docling.document_converter import DocumentConverter
 
 CORPUS = Path("corpus")
 
 # ── GLiNER entity extractor (zero-shot, no training needed) ───
-# Replaces spacy en_core_web_sm — handles niche industry entities,
-# non-English names, and custom label sets out of the box.
 try:
     from gliner import GLiNER
     _ner = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
@@ -26,212 +35,157 @@ except ImportError:
     print("[warn] gliner not installed — entity extraction disabled.")
     print("       pip install gliner")
 
-GLINER_LABELS = [
-    # ── Base entities ─────────────────────────────────────────
-    "person",
-    "organization",
-    "date",
-    "financial value",
-    "location",
-    "articles",
 
-    # ── Gara e Appalto (Tender/Contract) ──────────────────────
-    "tender code",           # CIG, CUP
-    "tender type",           # asta pubblica, trattativa privata
-    "contract type",         # appalto, concessione
-    "award criterion",       # offerta più vantaggiosa, prezzo più basso
+# ═══════════════════════════════════════════════════════════════
+# Label Configuration Loading
+# ═══════════════════════════════════════════════════════════════
 
-    # ── Soggetti e Ruoli (Subjects/Roles) ─────────────────────
-    "public administration", # Comune, Regione, ASL
-    "professional role",     # Direttore Lavori, RUP
-    "professional title",    # Ingegnere, Architetto, Geometra
-    "contractor",            # Impresa esecutrice
+def load_labels_from_yaml(config_path: Path, key: str) -> Dict[str, Any]:
+    """Load a label set from a YAML configuration file."""
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    # ── Opere e Interventi (Works) ───────────────────────────
-    "work type",             # ristrutturazione, nuova costruzione
-    "building type",         # scuola, ospedale, ponte
-    "construction material", # cemento, acciaio
-    "construction phase",    # progettazione, cantiere, collaudo
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
 
-    # ── Tecnico-Normativo (Technical/Regulatory) ─────────────
-    "technical standard",    # UNI, ISO, Eurocodice
-    "law or regulation",     # D.Lgs., D.M., Legge
-    "safety standard",       # D.Lgs. 81/2008
-    "permit type",           # concessione, SCIA
-    "classification code",   # CPV, ATECO
+    if key not in config:
+        available = ", ".join(config.keys())
+        raise ValueError(f"Label set '{key}' not found in {config_path}. Available: {available}")
 
-    # ── Finanziario (Financial) ──────────────────────────────
-    "budget category",       # base d'asta, oneri sicurezza
-    "funding source",        # PNRR, fondi europei
-    "guarantee",             # cauzione, polizza fideiussoria
+    label_config = config[key]
 
-    # ── Temporal ─────────────────────────────────────────────
-    "deadline",              # termine presentazione
-    "duration",              # giorni, mesi
-]
-
-LABEL_MAP = {
-    # ── Base entities ─────────────────────────────────────────
-    "person":                 "people",
-    "organization":           "orgs",
-    "date":                   "dates",
-    "financial value":        "values",
-    "location":               "locations",
-    "articles":               "articles",
-
-    # ── Gara e Appalto ───────────────────────────────────────
-    "tender code":            "codes",
-    "tender type":            "gara",
-    "contract type":          "gara",
-    "award criterion":        "gara",
-
-    # ── Soggetti e Ruoli ─────────────────────────────────────
-    "public administration":  "orgs",
-    "professional role":      "roles",
-    "professional title":     "roles",
-    "contractor":             "orgs",
-
-    # ── Opere e Interventi ───────────────────────────────────
-    "work type":              "opere",
-    "building type":          "opere",
-    "construction material":  "materiali",
-    "construction phase":     "fasi",
-
-    # ── Tecnico-Normativo ────────────────────────────────────
-    "technical standard":     "norme",
-    "law or regulation":      "norme",
-    "safety standard":        "norme",
-    "permit type":            "autorizzazioni",
-    "classification code":    "codes",
-
-    # ── Finanziario ──────────────────────────────────────────
-    "budget category":        "valori",
-    "funding source":         "finanziamenti",
-    "guarantee":              "garanzie",
-
-    # ── Temporal ─────────────────────────────────────────────
-    "deadline":               "scadenze",
-    "duration":               "durate",
-
-    # ── Legacy/compatibility ─────────────────────────────────
-    "software vulnerability": "values",
-    "product":                "orgs",
-}
+    return {
+        "labels": label_config["labels"],
+        "label_map": label_config["label_map"],
+        "buckets": {bucket: [] for bucket in label_config["buckets"]},
+        "description": label_config.get("description", "Custom label set"),
+    }
 
 
-# ══════════════════════════════════════════════════════════════
-# 1. PARSE — Docling → full markdown + section list
-# ══════════════════════════════════════════════════════════════
-def parse_pdf(pdf_path: Path) -> tuple[str, list[str]]:
-    """Returns (full_markdown, list_of_section_titles)."""
-    converter = DocumentConverter()
-    result    = converter.convert(str(pdf_path))
-    markdown  = result.document.export_to_markdown()
-    sections  = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
-    return markdown, sections
+def load_labels(labels_arg: Optional[str]) -> Dict[str, Any]:
+    """
+    Load label configuration from argument.
+
+    Args:
+        labels_arg: Can be:
+            - None: use default 'edilizia' built-in
+            - 'edilizia', 'research', 'legal': use built-in
+            - 'path/to/config.yaml:key': load from YAML file
+
+    Returns:
+        Dictionary with 'labels', 'label_map', 'buckets', 'description'
+    """
+    # Import built-in labels
+    from gliner_labels.gliner_labels import get_builtin_labels, BUILTIN_LABEL_SETS
+
+    if labels_arg is None:
+        # Default to edilizia
+        return get_builtin_labels("edilizia")
+
+    # Check if it's a built-in label set
+    if labels_arg in BUILTIN_LABEL_SETS:
+        return get_builtin_labels(labels_arg)
+
+    # Check if it's a path:key format
+    if ":" in labels_arg:
+        parts = labels_arg.rsplit(":", 1)
+        config_path = Path(parts[0]).expanduser().resolve()
+        key = parts[1]
+        return load_labels_from_yaml(config_path, key)
+
+    # Check if it's a YAML file without key (assume 'default' key)
+    potential_path = Path(labels_arg).expanduser()
+    if potential_path.exists() and potential_path.suffix in ('.yaml', '.yml'):
+        return load_labels_from_yaml(potential_path, "default")
+
+    # Unknown format
+    raise ValueError(
+        f"Invalid --labels argument: {labels_arg}\n"
+        f"Use a built-in label set ({', '.join(BUILTIN_LABEL_SETS.keys())}), "
+        f"or 'path/to/config.yaml:key' for custom labels."
+    )
 
 
-# ══════════════════════════════════════════════════════════════
-# 2. ENTITIES — GLiNER zero-shot extraction
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# Global label configuration (set during ingest)
+# ═══════════════════════════════════════════════════════════════
+_current_label_config: Optional[Dict[str, Any]] = None
+
+
+def get_current_labels() -> Dict[str, Any]:
+    """Get the current label configuration."""
+    if _current_label_config is None:
+        raise RuntimeError("Label configuration not set. Call load_labels() first.")
+    return _current_label_config
+
 
 # GLiNER has a ~12k character limit per batch
 GLINER_CHUNK_SIZE = 12_000
-# Overlap between chunks to avoid missing entities at boundaries
 GLINER_CHUNK_OVERLAP = 200
 
 
-def _chunk_text(text: str, chunk_size: int = GLINER_CHUNK_SIZE, overlap: int = GLINER_CHUNK_OVERLAP) -> list[str]:
-    """
-    Split text into overlapping chunks for batch processing.
-    
-    Args:
-        text: The input text to chunk
-        chunk_size: Maximum size of each chunk (default 12,000 chars)
-        overlap: Number of characters to overlap between chunks (default 200)
-    
-    Returns:
-        List of text chunks
-    """
+def _chunk_text(text: str, chunk_size: int = GLINER_CHUNK_SIZE, overlap: int = GLINER_CHUNK_OVERLAP) -> List[str]:
+    """Split text into overlapping chunks for batch processing."""
     if len(text) <= chunk_size:
         return [text]
-    
+
     chunks = []
     start = 0
-    
+
     while start < len(text):
         end = start + chunk_size
-        
-        # If not the last chunk, try to break at a word boundary
+
         if end < len(text):
-            # Look for a good break point (space, newline, punctuation)
             break_point = text.rfind(' ', start + chunk_size - 100, end)
             if break_point > start:
                 end = break_point
-        
+
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        
-        # Move start forward, accounting for overlap
+
         start = end - overlap if end < len(text) else end
-        
-        # Prevent infinite loop if overlap is too large
-        if start <= len(chunks[-1]) if chunks else 0:
+        if start <= 0 or (chunks and start <= len(chunks[-1])):
             start = end
-    
+
     return chunks
 
 
-def extract_entities(text: str) -> dict:
+def extract_entities(text: str, label_config: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
     """
-    Extract named entities from text using GLiNER with automatic batching.
-    
-    Handles texts longer than 12k characters by splitting into overlapping chunks,
-    processing each chunk, and merging results with deduplication.
+    Extract named entities from text using GLiNER with the configured labels.
+
+    Args:
+        text: The text to analyze
+        label_config: Optional label configuration (uses current if not provided)
+
+    Returns:
+        Dictionary of entity buckets with extracted values
     """
-    buckets: dict[str, set] = {
-        # Base entities
-        "people": set(),
-        "orgs": set(),
-        "dates": set(),
-        "values": set(),
-        "locations": set(),
-        "articles": set(),
-        # Edilizia e Lavori Pubblici specific
-        "codes": set(),          # CIG, CUP, CPV
-        "gara": set(),           # Tipo gara, criteri
-        "roles": set(),          # Ruoli professionali
-        "opere": set(),          # Tipo opere
-        "materiali": set(),      # Materiali
-        "fasi": set(),           # Fasi lavori
-        "norme": set(),          # Norme e regolamenti
-        "autorizzazioni": set(), # Permessi
-        "finanziamenti": set(),  # Fonti finanziamento
-        "garanzie": set(),       # Garanzie
-        "scadenze": set(),       # Deadline
-        "durate": set(),         # Durate
-    }
+    config = label_config or get_current_labels()
+    labels = config["labels"]
+    label_map = config["label_map"]
+    buckets = {k: set() for k in config["buckets"].keys()}
 
     if NER_BACKEND == "gliner" and _ner is not None:
-        # Chunk text if it exceeds GLiNER's limit
         chunks = _chunk_text(text, GLINER_CHUNK_SIZE, GLINER_CHUNK_OVERLAP)
-        
+
         for i, chunk in enumerate(chunks):
             if len(chunks) > 1:
                 print(f"      Processing chunk {i + 1}/{len(chunks)} ({len(chunk):,} chars)...")
-            
-            hits = _ner.predict_entities(chunk, GLINER_LABELS, threshold=0.4)
+
+            hits = _ner.predict_entities(chunk, labels, threshold=0.4)
             for h in hits:
-                bucket = LABEL_MAP.get(h["label"])
+                bucket = label_map.get(h["label"])
                 if bucket and len(h["text"].strip()) > 2:
                     buckets[bucket].add(h["text"].strip())
 
-    # Deduplicate + cap each bucket
+    # Convert sets to sorted lists and cap each bucket
     return {k: sorted(v)[:15] for k, v in buckets.items() if v}
 
 
-def detect_doc_date(text: str, entities: dict) -> str | None:
+def detect_doc_date(text: str, entities: Dict[str, List[str]]) -> Optional[str]:
+    """Detect document date from text or extracted entities."""
     iso = re.search(r'\b(20\d{2}-\d{2}-\d{2})\b', text)
     if iso:
         return iso.group(1)
@@ -240,45 +194,66 @@ def detect_doc_date(text: str, entities: dict) -> str | None:
     return None
 
 
-# ══════════════════════════════════════════════════════════════
-# 3. WRITE — YAML frontmatter + full markdown body
-# ══════════════════════════════════════════════════════════════
+def _guess_title(markdown: str, fallback: str) -> str:
+    """Extract title from markdown or use fallback."""
+    m = re.search(r'^#\s+(.+)$', markdown, re.MULTILINE)
+    return m.group(1).strip() if m else fallback.replace('_', ' ').title()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 1. PARSE — Docling → full markdown + section list
+# ═══════════════════════════════════════════════════════════════
+def parse_pdf(pdf_path: Path) -> tuple[str, List[str]]:
+    """Returns (full_markdown, list_of_section_titles)."""
+    converter = DocumentConverter()
+    result = converter.convert(str(pdf_path))
+    markdown = result.document.export_to_markdown()
+    sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+    return markdown, sections
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2. WRITE — YAML frontmatter + full markdown body
+# ═══════════════════════════════════════════════════════════════
 def write_document(
     pdf: Path,
     markdown: str,
-    sections: list[str],
-    entities: dict,
+    sections: List[str],
+    entities: Dict[str, List[str]],
     doc_type: str,
+    label_config: Dict[str, Any],
 ) -> Path:
+    """Write document with frontmatter to corpus directory."""
     # Hash-safe doc_id: stem + 6-char md5 to prevent collisions
-    # e.g. contracts/acme.pdf → acme_3f9a1c.md
-    raw_bytes  = pdf.read_bytes()
-    safe_stem  = re.sub(r'\W+', '_', pdf.stem.lower()).strip('_')
+    raw_bytes = pdf.read_bytes()
+    safe_stem = re.sub(r'\W+', '_', pdf.stem.lower()).strip('_')
     short_hash = hashlib.md5(raw_bytes).hexdigest()[:6]
-    doc_id     = f"{safe_stem}_{short_hash}"
+    doc_id = f"{safe_stem}_{short_hash}"
 
-    src_hash   = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()[:16]
-    doc_date   = detect_doc_date(markdown, entities)
+    src_hash = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()[:16]
+    doc_date = detect_doc_date(markdown, entities)
     page_count = len(re.findall(r'<!-- page \d+ -->', markdown)) or None
 
     frontmatter = {
         # ── identity ──────────────────────────────────────────
-        "doc_id":      doc_id,
-        "doc_title":   _guess_title(markdown, pdf.stem),
-        "doc_type":    doc_type,
+        "doc_id": doc_id,
+        "doc_title": _guess_title(markdown, pdf.stem),
+        "doc_type": doc_type,
         "source_file": str(pdf),
         "source_hash": src_hash,
-        "doc_date":    doc_date,
+        "doc_date": doc_date,
         "ingested_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        # ── NER configuration ─────────────────────────────────
+        "ner_config": label_config.get("description", "custom"),
         # ── named entities (primary search surface) ───────────
-        "entities":    entities,
+        "entities": entities,
         # ── structure ─────────────────────────────────────────
-        "page_count":  page_count,
-        "has_tables":  bool(re.search(r'\|.+\|.+\|', markdown)),
+        "page_count": page_count,
+        "has_tables": bool(re.search(r'\|.+\|.+\|', markdown)),
         "has_figures": bool(re.search(r'(figure|fig\.)\s*\d+', markdown, re.I)),
-        "has_code":    "```" in markdown,
-        "language":    "it",
-        "sections":    sections[:25],
+        "has_code": "```" in markdown,
+        "language": "it",
+        "sections": sections[:25],
     }
 
     CORPUS.mkdir(parents=True, exist_ok=True)
@@ -297,18 +272,19 @@ def write_document(
 
 # ── index ──────────────────────────────────────────────────────
 def update_index(doc_id: str, title: str, doc_type: str,
-                 doc_date: str | None, filepath: Path):
+                 doc_date: Optional[str], filepath: Path):
+    """Update the corpus index with document metadata."""
     idx_path = CORPUS / "_index.yaml"
-    index: dict = {}
+    index: Dict = {}
     if idx_path.exists():
         with open(idx_path) as f:
             index = yaml.safe_load(f) or {}
 
     index[doc_id] = {
-        "title":    title,
-        "type":     doc_type,
-        "date":     doc_date,
-        "file":     str(filepath),
+        "title": title,
+        "type": doc_type,
+        "date": doc_date,
+        "file": str(filepath),
         "added_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
@@ -316,19 +292,37 @@ def update_index(doc_id: str, title: str, doc_type: str,
         yaml.dump(index, f, allow_unicode=True, sort_keys=False)
 
 
-def _guess_title(markdown: str, fallback: str) -> str:
-    m = re.search(r'^#\s+(.+)$', markdown, re.MULTILINE)
-    return m.group(1).strip() if m else fallback.replace('_', ' ').title()
-
-
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # 4. INGEST — orchestrate
-# ══════════════════════════════════════════════════════════════
-def ingest(pdf_path: str, doc_type: str = "document"):
+# ═══════════════════════════════════════════════════════════════
+def ingest(
+    pdf_path: str,
+    doc_type: str = "document",
+    labels_arg: Optional[str] = None,
+) -> str:
+    """
+    Ingest a PDF document into the corpus.
+
+    Args:
+        pdf_path: Path to the PDF file
+        doc_type: Document type/category
+        labels_arg: Label configuration (built-in name or path:key)
+
+    Returns:
+        Document ID string
+    """
+    global _current_label_config
+
     pdf = Path(pdf_path)
     if not pdf.exists():
         print(f"[error] File not found: {pdf_path}")
         sys.exit(1)
+
+    # Load label configuration
+    print(f"[0/4] Loading labels configuration...")
+    _current_label_config = load_labels(labels_arg)
+    print(f"      Using: {_current_label_config['description']}")
+    print(f"      Labels: {len(_current_label_config['labels'])} entity types")
 
     print(f"[1/4] Parsing    {pdf.name}  (docling) ...")
     markdown, sections = parse_pdf(pdf)
@@ -337,10 +331,10 @@ def ingest(pdf_path: str, doc_type: str = "document"):
     entities = extract_entities(markdown)
 
     print(f"[3/4] Writing markdown ...")
-    out_path = write_document(pdf, markdown, sections, entities, doc_type)
+    out_path = write_document(pdf, markdown, sections, entities, doc_type, _current_label_config)
 
-    doc_id   = out_path.stem
-    title    = _guess_title(markdown, pdf.stem)
+    doc_id = out_path.stem
+    title = _guess_title(markdown, pdf.stem)
     doc_date = detect_doc_date(markdown, entities)
 
     print(f"[4/4] Updating   _index.yaml ...")
@@ -350,9 +344,52 @@ def ingest(pdf_path: str, doc_type: str = "document"):
     print(f"   doc_id : {doc_id}")
     print(f"   entities found : { {k: len(v) for k, v in entities.items()} }")
 
+    return doc_id
+
+
+def main():
+    """Main entry point with argument parsing."""
+    parser = argparse.ArgumentParser(
+        description="Ingest PDF documents into the corpus with NER extraction.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s report.pdf
+  %(prog)s contracts/acme.pdf contract --labels legal
+  %(prog)s papers/ml_paper.pdf research --labels research
+  %(prog)s bandi/gara.pdf bando --labels edilizia
+  %(prog)s doc.pdf custom --labels /path/to/my_labels.yaml:medical
+
+Built-in label sets:
+  edilizia  - Italian construction and public tenders
+  research  - Scientific papers and academic publications
+  legal     - Legal documents and contracts
+
+For custom labels, create a YAML file with the same structure as
+ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
+        """
+    )
+    parser.add_argument("pdf_path", help="Path to the PDF file to ingest")
+    parser.add_argument(
+        "doc_type",
+        nargs="?",
+        default="document",
+        help="Document type/category (default: document)"
+    )
+    parser.add_argument(
+        "--labels",
+        dest="labels_arg",
+        default=None,
+        help=(
+            "Label configuration to use. Can be: "
+            "(1) a built-in name (edilizia, research, legal), "
+            "(2) 'path/to/config.yaml:key' for custom labels"
+        )
+    )
+
+    args = parser.parse_args()
+    ingest(args.pdf_path, args.doc_type, args.labels_arg)
+
 
 if __name__ == "__main__":
-    ingest(
-        sys.argv[1],
-        sys.argv[2] if len(sys.argv) > 2 else "document",
-    )
+    main()

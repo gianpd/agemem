@@ -187,10 +187,15 @@ class Orchestrator:
     def _execute_tool(self, name: str, arguments: dict) -> str:
         """
         Execute a tool by name.
-        
+
         Currently supported:
         - web_search: Search the web for current information
-        
+        - list_documents: List all ingested documents
+        - search_metadata: Search document metadata for a keyword
+        - grep_corpus: Full-text search across all documents
+        - read_document: Read full document content
+        - read_lines: Read specific lines from a document
+
         Returns the tool result as a string.
         """
         if name == "web_search":
@@ -210,7 +215,50 @@ class Orchestrator:
                 return result
             except Exception as e:
                 return f"[TOOL ERROR] web_search failed: {e}"
-        
+
+        # Corpus tools
+        if name == "list_documents":
+            try:
+                from tools.corpus import list_documents
+                return list_documents()
+            except Exception as e:
+                return f"[TOOL ERROR] list_documents failed: {e}"
+
+        if name == "search_metadata":
+            try:
+                from tools.corpus import search_metadata
+                keyword = arguments.get("keyword", "")
+                return search_metadata(keyword)
+            except Exception as e:
+                return f"[TOOL ERROR] search_metadata failed: {e}"
+
+        if name == "grep_corpus":
+            try:
+                from tools.corpus import grep_corpus
+                pattern = arguments.get("pattern", "")
+                context_lines = arguments.get("context_lines", 3)
+                return grep_corpus(pattern, context_lines)
+            except Exception as e:
+                return f"[TOOL ERROR] grep_corpus failed: {e}"
+
+        if name == "read_document":
+            try:
+                from tools.corpus import read_document
+                doc_id = arguments.get("doc_id", "")
+                return read_document(doc_id)
+            except Exception as e:
+                return f"[TOOL ERROR] read_document failed: {e}"
+
+        if name == "read_lines":
+            try:
+                from tools.corpus import read_lines
+                doc_id = arguments.get("doc_id", "")
+                start_line = arguments.get("start_line", 1)
+                end_line = arguments.get("end_line", 75)
+                return read_lines(doc_id, start_line, end_line)
+            except Exception as e:
+                return f"[TOOL ERROR] read_lines failed: {e}"
+
         return f"[TOOL ERROR] Unknown tool: {name}"
 
     # ── Main public API ───────────────────────────────────────────────────────

@@ -10,6 +10,13 @@ dependencies = [
     "httpx>=0.25.0",
 ]
 
+[project.optional-dependencies]
+ingest = [
+    "docling>=2.0.0",
+    "gliner>=0.2.0",
+    "PyYAML>=6.0.0",
+]
+
 [project.scripts]
 agemem = "main:main"
 

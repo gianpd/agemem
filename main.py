@@ -73,6 +73,9 @@ WEB_SEARCH_TOOL_SCHEMA = {
     }
 }
 
+# Import corpus tool definitions
+from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
+
 def get_local_client() -> OpenAI:
     """Get the local llama.cpp OpenAI-compatible client."""
     return OpenAI(api_key="not-needed", base_url=f"{LLAMA_HOST}/v1")
