@@ -1,0 +1,95 @@
+"""
+agents/learning_scorer.py
+──────────────────────────
+Collects LearningFeedback from the main agent after a turn.
+
+Protocol
+────────
+After every LEARNING_SCORE_PROMPT_EVERY_N turns (or immediately on a
+learning spike), the Orchestrator calls `collect()`.
+
+The LLM is asked: "On a 0–1 scale, how much new, reusable information did
+you just encounter?  Return JSON: {score, rationale, affected_content}."
+
+Design note — why ask the *main* agent and not a separate call?
+───────────────────────────────────────────────────────────────
+The main agent has already processed the last exchange and has the
+richest signal about what was novel.  A separate meta-call would duplicate
+context.  We therefore append a lightweight self-assessment prompt to the
+existing message list (without storing it in STM).
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from core.types import LearningFeedback
+from core.config import AgememConfig, DEFAULT_CONFIG
+from agents.llm_client import LLMClient
+
+
+_LEARNING_PROMPT = """\
+You just responded to a user. Now evaluate your own response from a memory perspective.
+
+Return ONLY valid JSON with these fields:
+{
+  "score": <float 0.0 to 1.0>,
+  "rationale": "<one sentence>",
+  "affected_content": "<quote the specific new fact or concept you encountered, or empty string>"
+}
+
+Scoring guide:
+  1.0  — Highly novel, specific, reusable fact (e.g. user's name, project details, preference)
+  0.7  — Useful context likely needed later in this session
+  0.4  — Potentially relevant but uncertain
+  0.1  — Routine exchange, no new persistent knowledge
+  0.0  — Pure procedural step, nothing to retain
+
+Be honest and calibrated. Do not inflate scores.
+"""
+
+
+class LearningScorer:
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        config: AgememConfig = DEFAULT_CONFIG,
+    ) -> None:
+        self._llm = llm
+        self._config = config
+        self._turns_since_last_collect: int = 0
+
+    def should_collect(self, turn_index: int) -> bool:
+        """Returns True if it is time to ask for feedback this turn."""
+        n = self._config.LEARNING_SCORE_PROMPT_EVERY_N
+        return n > 0 and turn_index > 0 and turn_index % n == 0
+
+    def collect(
+        self,
+        context_messages: list[dict],
+        turn_index: int,
+    ) -> Optional[LearningFeedback]:
+        """
+        Append the scoring prompt to the existing context and ask the LLM.
+        Does NOT modify the caller's context list.
+
+        Returns None on failure so callers can safely ignore errors.
+        """
+        probe_messages = list(context_messages) + [
+            {"role": "user", "content": _LEARNING_PROMPT}
+        ]
+        try:
+            raw = self._llm.chat_json(
+                messages=probe_messages,
+                max_tokens=200,
+            )
+            score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
+            return LearningFeedback(
+                score=score,
+                rationale=raw.get("rationale", ""),
+                affected_content=raw.get("affected_content", ""),
+                turn_index=turn_index,
+            )
+        except Exception:
+            return None

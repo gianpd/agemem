@@ -1,0 +1,466 @@
+"""
+agents/orchestrator.py
+───────────────────────
+The central coordinator of the AgeMem-hybrid system.
+
+Turn lifecycle
+──────────────
+  1. Pre-turn:
+     a. STM.force_fit()             — guarantee no overflow before LLM call
+     b. LTM.search(user_query)      — retrieve relevant memories into STM
+
+  2. Main turn:
+     a. Build message list (system prompt + STM + retrieved memories)
+     b. Call main LLM → get assistant response
+     c. Append response to STM
+
+  3. Post-turn:
+     a. LearningScorer.collect()    — get agent self-rating (every N turns)
+     b. SystemRules.evaluate()      — check deterministic triggers
+     c. Execute triggered ops       — SUMMARY / FILTER if needed
+     d. MemoryAgent.review()        — if periodic review or learning spike
+     e. Apply MemoryAgent decisions — ADD / UPDATE / DELETE on LTM, score STM
+     f. Increment turn counter
+
+The Orchestrator is the *only* place that writes to LTM or STM.  All other
+components are pure analysis / computation.
+
+Acceptance criteria mapping
+────────────────────────────
+  AC-1 (no context explosion)  → step 1a + SystemRules R1/R2 + STMContext.force_fit
+  AC-2 (learning score drives memory) → LearningScorer + SystemRules R4 +
+                                         MemoryAgent.review on spike/periodic
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Any
+
+from core.types import (
+    ContextMessage,
+    ContextStats,
+    LearningFeedback,
+    MemoryOp,
+    MemoryOpResult,
+    TriggerKind,
+)
+from core.config import AgememConfig, DEFAULT_CONFIG
+from memory.ltm_store import LTMStore
+from memory.stm_context import STMContext
+from triggers.system_rules import SystemRules, RuleID
+from agents.llm_client import LLMClient, ToolCallResponse
+from agents.memory_agent import MemoryAgent
+from agents.learning_scorer import LearningScorer
+
+
+# ── Tool Call Tracking (LoopGuard) ───────────────────────────────────────────
+
+@dataclass
+class ToolCall:
+    """Represents a tool call with name and arguments."""
+    name: str
+    arguments: dict
+    
+    def key(self) -> str:
+        """Unique key for deduplication."""
+        args_str = str(sorted(self.arguments.items()))
+        return f"{self.name}:{args_str}"
+
+
+class ToolCallTracker:
+    """Per-turn tracker to prevent duplicate tool calls (LoopGuard pattern)."""
+    
+    def __init__(self):
+        self._calls: set[str] = set()
+    
+    def record(self, call: ToolCall) -> bool:
+        """
+        Record a tool call. Returns True if this is a duplicate.
+        """
+        key = call.key()
+        if key in self._calls:
+            return True
+        self._calls.add(key)
+        return False
+    
+    def reset(self):
+        """Reset the tracker for a new turn."""
+        self._calls.clear()
+
+
+@dataclass
+class TurnTrace:
+    """
+    Full audit record for one conversation turn.
+    Useful for debugging and offline analysis.
+    """
+    turn_index: int
+    user_input: str
+    assistant_response: str
+    stm_stats_before: ContextStats
+    stm_stats_after: ContextStats
+    ops_applied: list[MemoryOpResult] = field(default_factory=list)
+    feedback: Optional[LearningFeedback] = None
+    memory_agent_rationale: str = ""
+    latency_ms: float = 0.0
+
+
+class Orchestrator:
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        config: AgememConfig = DEFAULT_CONFIG,
+        ltm_store: Optional[LTMStore] = None,
+        stm_context: Optional[STMContext] = None,
+    ) -> None:
+        self._config = config
+        self._llm = llm
+
+        # Resolve persistence paths
+        self._persist_dir: Optional[Path] = None
+        if config.PERSIST_DIR:
+            self._persist_dir = Path(config.PERSIST_DIR)
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
+
+        ltm_path = (
+            self._persist_dir / config.LTM_PERSIST_FILENAME
+            if self._persist_dir else None
+        )
+        stm_path = (
+            self._persist_dir / config.STM_PERSIST_FILENAME
+            if self._persist_dir else None
+        )
+
+        # LTM — pass persist_path so _maybe_persist() is active
+        self._ltm = ltm_store or LTMStore(config, persist_path=ltm_path)
+
+        # Memory agent and scorer
+        self._memory_agent = MemoryAgent(llm, config)
+        self._scorer = LearningScorer(llm, config)
+        self._rules = SystemRules(config)
+
+        # STM — restore from disk if available
+        self._stm = stm_context or STMContext(
+            config=config,
+            summary_fn=self._memory_agent.summarise_context,
+        )
+        if stm_context and stm_context._summary_fn is None:
+            stm_context._summary_fn = self._memory_agent.summarise_context
+
+        if stm_path:
+            self._stm.load(stm_path)
+            # Revalidate context size against current config
+            # (config may have changed between sessions)
+            self._stm.force_fit()
+
+        # Only add the pinned system prompt if STM was empty after load
+        # (avoids duplicating it on every restart)
+        has_system = any(
+            m.role == "system" and m.is_pinned
+            for m in self._stm.messages()
+        )
+        if not has_system:
+            self._stm.add_message(
+                role="system",
+                content=config.SYSTEM_PROMPT_HEADER,
+                is_pinned=True,
+            )
+
+        self._stm_persist_path = stm_path
+        self._traces: list[TurnTrace] = []
+        
+        # Tool support
+        self._tools: list[dict] = []
+        self._tool_tracker = ToolCallTracker()
+
+    # ── Tool Configuration ────────────────────────────────────────────────────
+
+    def set_tools(self, tools: list[dict]) -> None:
+        """Set the available tools for the LLM."""
+        self._tools = tools
+
+    def _execute_tool(self, name: str, arguments: dict) -> str:
+        """
+        Execute a tool by name.
+        
+        Currently supported:
+        - web_search: Search the web for current information
+        
+        Returns the tool result as a string.
+        """
+        if name == "web_search":
+            # Import here to avoid circular dependencies
+            try:
+                from tools.web_tools import web_search
+                query = arguments.get("query", "")
+                num_results = arguments.get("num_results", 5)
+                # Run async function synchronously
+                import asyncio
+                try:
+                    result = asyncio.run(web_search(query, num_results))
+                except RuntimeError:
+                    # If already in an event loop, use a different approach
+                    loop = asyncio.get_event_loop()
+                    result = loop.run_until_complete(web_search(query, num_results))
+                return result
+            except Exception as e:
+                return f"[TOOL ERROR] web_search failed: {e}"
+        
+        return f"[TOOL ERROR] Unknown tool: {name}"
+
+    # ── Main public API ───────────────────────────────────────────────────────
+
+    def chat(self, user_input: str) -> str:
+        """
+        Process one user turn end-to-end.
+        Returns the assistant's response text.
+        """
+        t0 = time.time()
+        turn = self._stm.current_turn()
+        stats_before = self._stm.stats()
+        
+        # Reset tool tracker for this turn
+        self._tool_tracker.reset()
+
+        ops: list[MemoryOpResult] = []
+
+        # ── 1a. Prevent overflow before any LLM call ──────────────────────────
+        overflow_ops = self._stm.force_fit()
+        ops.extend(overflow_ops)
+
+        # ── 1b. Retrieve relevant LTM entries into STM ───────────────────────
+        relevant = self._ltm.search(user_input, top_k=3)
+        if relevant:
+            retrieve_op = self._stm.retrieve(relevant, trigger=TriggerKind.SYSTEM_RULE)
+            ops.append(retrieve_op)
+
+        # ── 2. Main LLM call with tool support ────────────────────────────────
+        self._stm.add_message(role="user", content=user_input, relevance_score=1.0)
+        
+        # Tool call loop - no hard iteration cap, but protected by LoopGuard
+        assistant_text = ""
+        
+        while True:
+            messages = self._stm.openai_messages()
+            
+            try:
+                # Call LLM with tools if available
+                assistant_text = self._llm.chat(
+                    messages=messages,
+                    max_tokens=self._config.DEFAULT_MAX_TOKENS,
+                    temperature=self._config.DEFAULT_TEMPERATURE,
+                    tools=self._tools if self._tools else None,
+                )
+                # If we get here, no tool call was made - we have a text response
+                break
+                
+            except ToolCallResponse as e:
+                # Parse tool call
+                tool_call = e.tool_call
+                tool_name = tool_call.function.name
+                try:
+                    tool_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    tool_args = {}
+                
+                # Check for duplicate calls (LoopGuard)
+                call = ToolCall(name=tool_name, arguments=tool_args)
+                if self._tool_tracker.record(call):
+                    # Duplicate detected - inject system message and break
+                    self._stm.add_message(
+                        role="system",
+                        content="[SYSTEM] Duplicate tool call detected. You already called this tool with the same arguments. Please try a different approach or provide a final answer.",
+                        relevance_score=1.0,
+                    )
+                    continue
+                
+                # Execute the tool
+                tool_result = self._execute_tool(tool_name, tool_args)
+                
+                # Record the tool call in ops_applied with TriggerKind.MAIN_AGENT
+                ops.append(MemoryOpResult(
+                    op=MemoryOp.RETRIEVE,  # Using RETRIEVE as the closest match for tool execution
+                    success=True,
+                    trigger=TriggerKind.MAIN_AGENT,
+                    detail=f"Tool '{tool_name}' executed with args: {tool_args}",
+                ))
+                
+                # Add tool call and result to STM as system messages
+                # The assistant "requested" the tool call
+                self._stm.add_message(
+                    role="assistant",
+                    content=f"",
+                    relevance_score=0.8,
+                )
+                # Add the tool result
+                self._stm.add_message(
+                    role="system",
+                    content=f"[TOOL RESULT: {tool_name}] {tool_result}",
+                    relevance_score=0.9,
+                )
+                
+                # Loop back to LLM call with the tool result
+                continue
+        
+        self._stm.add_message(role="assistant", content=assistant_text, relevance_score=0.8)
+        self._stm.increment_turn()
+        turn_after = self._stm.current_turn()
+
+        # Post-response overflow guard: the assistant reply may have pushed us over
+        post_ops = self._stm.force_fit()
+        ops.extend(post_ops)
+
+        # ── 3a. Collect learning feedback ─────────────────────────────────────
+        feedback: Optional[LearningFeedback] = None
+        if self._scorer.should_collect(turn_after):
+            feedback = self._scorer.collect(
+                context_messages=self._stm.openai_messages(),
+                turn_index=turn_after,
+            )
+            if feedback:
+                feedback.turn_index = turn_after
+
+        # ── 3b. Evaluate system rules ─────────────────────────────────────────
+        current_stats = self._stm.stats()
+        decisions = self._rules.evaluate(current_stats, turn_after, feedback)
+
+        ma_rationale = ""
+        should_run_memory_agent = False
+
+        for decision in decisions:
+            if decision.rule_id in (RuleID.OVERFLOW_CRITICAL,):
+                filter_op = self._stm.filter(trigger=TriggerKind.SYSTEM_RULE)
+                ops.append(filter_op)
+                summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
+                ops.append(summary_op)
+
+            elif decision.rule_id == RuleID.OVERFLOW_WARN:
+                summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
+                ops.append(summary_op)
+
+            elif decision.rule_id in (RuleID.PERIODIC_REVIEW, RuleID.LEARNING_SPIKE):
+                should_run_memory_agent = True
+
+        # ── 3c. Immediately promote to LTM on learning spike ─────────────────
+        if (
+            feedback
+            and feedback.score >= self._config.LTM_PROMOTE_THRESHOLD
+            and feedback.affected_content
+        ):
+            add_op = self._ltm.add(
+                content=feedback.affected_content,
+                learning_score=feedback.score,
+                source_turn=turn_after,
+                trigger=TriggerKind.LEARNING_SCORE,
+            )
+            ops.append(add_op)
+
+        # ── 3d–e. Memory agent review ─────────────────────────────────────────
+        if should_run_memory_agent:
+            decision_obj = self._memory_agent.review(
+                recent_messages=self._stm.messages(),
+                ltm_entries=self._ltm.all_entries(),
+                feedback=feedback,
+            )
+            ma_rationale = decision_obj.rationale
+            ops.extend(self._apply_memory_agent_decision(decision_obj, turn_after, feedback))
+
+        stats_after = self._stm.stats()
+
+        # ── Persist STM after every turn ──────────────────────────────────────
+        # LTM already persists inside LTMStore._maybe_persist() on every write
+        self._persist_stm()
+
+        # ── Trace ─────────────────────────────────────────────────────────────
+        self._traces.append(TurnTrace(
+            turn_index=turn_after,
+            user_input=user_input,
+            assistant_response=assistant_text,
+            stm_stats_before=stats_before,
+            stm_stats_after=stats_after,
+            ops_applied=ops,
+            feedback=feedback,
+            memory_agent_rationale=ma_rationale,
+            latency_ms=(time.time() - t0) * 1000,
+        ))
+
+        return assistant_text
+
+    # ── Inspection helpers ────────────────────────────────────────────────────
+
+    def last_trace(self) -> Optional[TurnTrace]:
+        return self._traces[-1] if self._traces else None
+
+    def all_traces(self) -> list[TurnTrace]:
+        return list(self._traces)
+
+    def ltm_snapshot(self) -> list[dict]:
+        return [e.to_dict() for e in self._ltm.all_entries()]
+
+    def stm_stats(self) -> ContextStats:
+        return self._stm.stats()
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _persist_stm(self) -> None:
+        """Persist STM to disk if persistence is enabled."""
+        if self._stm_persist_path:
+            self._stm.save(self._stm_persist_path)
+
+    def _apply_memory_agent_decision(
+        self,
+        decision,
+        turn_index: int,
+        feedback: Optional[LearningFeedback],
+    ) -> list[MemoryOpResult]:
+        ops: list[MemoryOpResult] = []
+
+        for ltm_op in decision.ltm_operations:
+            # Only apply high-confidence operations
+            if ltm_op.confidence < 0.6:
+                continue
+
+            score = feedback.score if feedback else ltm_op.confidence
+
+            if ltm_op.op == MemoryOp.ADD:
+                result = self._ltm.add(
+                    content=ltm_op.content,
+                    learning_score=score,
+                    tags=ltm_op.tags,
+                    source_turn=turn_index,
+                    trigger=TriggerKind.MEMORY_AGENT,
+                )
+                ops.append(result)
+
+            elif ltm_op.op == MemoryOp.UPDATE and ltm_op.entry_id:
+                result = self._ltm.update(
+                    entry_id=ltm_op.entry_id,
+                    content=ltm_op.content,
+                    learning_score=score,
+                    trigger=TriggerKind.MEMORY_AGENT,
+                )
+                ops.append(result)
+
+            elif ltm_op.op == MemoryOp.DELETE and ltm_op.entry_id:
+                result = self._ltm.delete(
+                    entry_id=ltm_op.entry_id,
+                    trigger=TriggerKind.MEMORY_AGENT,
+                )
+                ops.append(result)
+
+        # Apply context relevance scores from MemoryAgent to STM messages
+        if decision.context_relevance:
+            for msg in self._stm.messages():
+                if msg.turn_index in decision.context_relevance:
+                    msg.relevance_score = decision.context_relevance[msg.turn_index]
+
+        # SUMMARY if MemoryAgent requested it
+        if decision.summary_needed:
+            ops.append(self._stm.summary(trigger=TriggerKind.MEMORY_AGENT))
+
+        return ops
