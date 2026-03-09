@@ -35,7 +35,7 @@ Return ONLY valid JSON with these fields:
 {
   "score": <float 0.0 to 1.0>,
   "rationale": "<one sentence>",
-  "affected_content": "<quote the specific new fact or concept you encountered, or empty string>"
+  "affected_content": "<quote the specific new fact or concept to remember>"
 }
 
 Scoring guide:
@@ -44,6 +44,11 @@ Scoring guide:
   0.4  — Potentially relevant but uncertain
   0.1  — Routine exchange, no new persistent knowledge
   0.0  — Pure procedural step, nothing to retain
+
+IMPORTANT:
+- If score >= 0.65: affected_content MUST contain the specific fact/concept (truncated if needed)
+- If score < 0.65: affected_content can be brief or empty
+- Never return empty affected_content when score is high
 
 Be honest and calibrated. Do not inflate scores.
 """

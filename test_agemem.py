@@ -25,6 +25,7 @@ T17  MemoryAgentDecision.from_dict – tolerates malformed ops
 T18  Orchestrator – full turn with mock LLM, ops recorded in trace
 T19  Orchestrator – LTM ADD triggered when feedback.score >= threshold
 T20  Orchestrator – no overflow: force_fit called before LLM
+T21  Orchestrator – LTM promotes with fallback content when affected_content empty
 """
 
 import sys
@@ -458,6 +459,50 @@ class TestOrchestrator(unittest.TestCase):
             cfg.STM_CRITICAL_THRESHOLD + 0.05,  # small tolerance for framing tokens
             f"STM should stay near or below critical threshold, got {stats.utilisation_ratio:.2%}"
         )
+
+    def test_T21_ltm_promotes_with_fallback_content(self):
+        """
+        REGRESSION TEST: Empty affected_content should not block LTM promotion.
+        When the LLM returns a high score but empty affected_content, the
+        orchestrator should fallback to the assistant's response content.
+        """
+        import json
+        main_resp = "The user likes Python programming."
+        score_resp = json.dumps({
+            "score": 0.90,  # High score
+            "rationale": "Learned user preference",
+            "affected_content": ""  # Empty! Should fallback to assistant response
+        })
+
+        mock_client = MagicMock()
+        responses = [main_resp, score_resp]
+        call_count = [0]
+
+        def side_effect(**kwargs):
+            resp = responses[min(call_count[0], len(responses) - 1)]
+            call_count[0] += 1
+            choice = MagicMock()
+            choice.message.content = resp
+            return MagicMock(
+                choices=[choice],
+                usage=MagicMock(prompt_tokens=10, completion_tokens=5)
+            )
+
+        mock_client.chat.completions.create.side_effect = side_effect
+        llm = LLMClient(mock_client, default_model="test")
+
+        cfg = _cfg(
+            LEARNING_SCORE_PROMPT_EVERY_N=1,
+            LTM_PROMOTE_THRESHOLD=0.65,
+            PERSIST_DIR=None,
+        )
+        orch = Orchestrator(llm=llm, config=cfg)
+        orch.chat("I love Python programming")
+
+        trace = orch.last_trace()
+        add_ops = [op for op in trace.ops_applied if op.op == MemoryOp.ADD and op.success]
+        self.assertGreater(len(add_ops), 0,
+            "LTM should promote even with empty affected_content - fallback to response text")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

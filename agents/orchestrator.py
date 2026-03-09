@@ -462,18 +462,23 @@ class Orchestrator:
                 should_run_memory_agent = True
 
         # ── 3c. Immediately promote to LTM on learning spike ─────────────────
-        if (
-            feedback
-            and feedback.score >= self._config.LTM_PROMOTE_THRESHOLD
-            and feedback.affected_content
-        ):
-            add_op = self._ltm.add(
-                content=feedback.affected_content,
-                learning_score=feedback.score,
-                source_turn=turn_after,
-                trigger=TriggerKind.LEARNING_SCORE,
-            )
-            ops.append(add_op)
+        if feedback and feedback.score >= self._config.LTM_PROMOTE_THRESHOLD:
+            # Use affected_content if provided, otherwise extract from recent assistant message
+            content_to_store = feedback.affected_content
+            if not content_to_store:
+                # Find the most recent assistant message as fallback
+                for msg in reversed(self._stm.messages()):
+                    if msg.role == "assistant" and msg.content:
+                        content_to_store = msg.content[:500]  # Limit to 500 chars
+                        break
+            if content_to_store:
+                add_op = self._ltm.add(
+                    content=content_to_store,
+                    learning_score=feedback.score,
+                    source_turn=turn_after,
+                    trigger=TriggerKind.LEARNING_SCORE,
+                )
+                ops.append(add_op)
 
         # ── 3d–e. Memory agent review ─────────────────────────────────────────
         if should_run_memory_agent:
