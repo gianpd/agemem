@@ -118,6 +118,7 @@ EDILIZIA_BUCKETS: Dict[str, List[str]] = {
     "autorizzazioni": [],
     "finanziamenti": [],
     "garanzie":     [],
+    "valori":       [],
     "scadenze":     [],
     "durate":       [],
 }
