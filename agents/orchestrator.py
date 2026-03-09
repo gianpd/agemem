@@ -47,6 +47,7 @@ from core.types import (
     MemoryOp,
     MemoryOpResult,
     TriggerKind,
+    Skill,
 )
 from core.config import AgememConfig, DEFAULT_CONFIG
 from memory.ltm_store import LTMStore
@@ -55,6 +56,7 @@ from triggers.system_rules import SystemRules, RuleID
 from agents.llm_client import LLMClient, ToolCallResponse
 from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
+from skills.manager import SkillManager
 
 
 # ── Tool Call Tracking (LoopGuard) ───────────────────────────────────────────
@@ -177,6 +179,10 @@ class Orchestrator:
         # Tool support
         self._tools: list[dict] = []
         self._tool_tracker = ToolCallTracker()
+
+        # Skill manager for dynamic capability hints
+        self._skill_manager = SkillManager(config)
+        self._skill_manager.load_skills()
 
     # ── Tool Configuration ────────────────────────────────────────────────────
 
@@ -323,6 +329,16 @@ class Orchestrator:
             retrieve_op = self._stm.retrieve(relevant, trigger=TriggerKind.SYSTEM_RULE)
             ops.append(retrieve_op)
 
+        # ── 1c. Detect and inject relevant skills ──────────────────────────────
+        skills = self._skill_manager.detect_skills(user_input)
+        for skill in skills:
+            self._stm.add_message(
+                role="system",
+                content=f"[SKILL HINT: {skill.name}] {skill.hint_message}",
+                relevance_score=self._config.SKILL_DEFAULT_RELEVANCE,
+                is_pinned=False,
+            )
+
         # ── 2. Main LLM call with tool support ────────────────────────────────
         self._stm.add_message(role="user", content=user_input, relevance_score=1.0)
         
@@ -379,13 +395,21 @@ class Orchestrator:
                     detail=f"Tool '{tool_name}' executed with args: {tool_args}",
                 ))
                 
-                # Add assistant message with tool call (for proper conversation structure)
-                # Note: We store a placeholder since our ContextMessage doesn't support tool_calls field yet
-                # The important part is the tool result message with tool_call_id
+                # Add assistant message with proper tool call structure
+                # This is required for the LLM to understand its own tool call
+                tool_calls_data = [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(tool_args) if isinstance(tool_args, dict) else str(tool_args)
+                    }
+                }]
                 self._stm.add_message(
                     role="assistant",
-                    content=f"[CALLED TOOL: {tool_name}]",
+                    content=None,  # No content when making tool calls
                     relevance_score=0.8,
+                    tool_calls=tool_calls_data,
                 )
                 # Add the tool result with proper role and tool_call_id
                 self._stm.add_message(
