@@ -8,7 +8,7 @@
 
 ## DAG Status
 
-- [ ] NODE 00: Environment Sanity Check
+- [x] NODE 00: Environment Sanity Check
 - [ ] NODE 01: Interactive LTM Probe
 - [ ] NODE 02: Bug Identification & Fix
 - [ ] NODE 03: Regression Verification
@@ -18,6 +18,21 @@
 - [ ] NODE 07: LTM Rule Cross-Reference Audit
 
 ## Execution Log
+
+### NODE 00 — Environment Sanity Check | COMPLETE | 2026-03-09T11:15:43Z
+**Agent:** MAIN_AGENT
+**Actions taken:**
+- Checked Python version with `python3 --version`
+- Verified core imports: `from core.types import *; from memory.ltm_store import LTMStore`
+- Verified test imports: `import test_agemem`
+**Findings:**
+- Python 3.12.3 detected (meets 3.11+ requirement)
+- All imports resolve successfully
+- Environment ready for LTM verification
+**Artifacts produced:** None (verification only)
+**Tests passed:** N/A
+**Blockers:** NONE
+**Next node to run:** NODE 01
 
 <!-- Append entries here. Format:
 ### NODE XX — <name> | <status> | <ISO timestamp>
