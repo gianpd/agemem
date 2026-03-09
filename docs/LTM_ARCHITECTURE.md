@@ -8,7 +8,7 @@ This document provides a detailed technical explanation of how Long-Term Memory 
 
 LTM (Long-Term Memory) is the persistent memory tier that survives across conversation sessions. Unlike STM (Short-Term Memory) which is the active context window limited to ~6000 tokens, LTM:
 
-- **Persists to disk** (`agent_memory/ltm_store.json` by default)
+- **Persists to disk** (`{PERSIST_DIR}/ltm_store.json` where PERSIST_DIR defaults to `agent_memory`)
 - **Has a capacity** of up to 500 entries (configurable via `LTM_MAX_ENTRIES`)
 - **Uses token-overlap retrieval** instead of embeddings (inference-only constraint)
 - **Stores facts, preferences, and knowledge** the agent deems worth remembering
@@ -308,13 +308,13 @@ All LTM-related thresholds are in `core/config.py`:
 
 ### LTM Persistence
 
-- **Path:** Configurable via `LTM_PERSIST_PATH` env var (default: `agent_memory/ltm_store.json`)
+- **Path:** `{PERSIST_DIR}/ltm_store.json` where PERSIST_DIR is configurable via env var (default: `agent_memory`)
 - **When:** Every write triggers `_maybe_persist()` — immediate durability
 - **Format:** JSON array of `MemoryEntry` objects
 
 ### STM Persistence
 
-- **Path:** `agemem_state/stm_context.json`
+- **Path:** `{PERSIST_DIR}/stm_context.json` where PERSIST_DIR is configurable via env var (default: `agent_memory`)
 - **When:** After every turn in `chat()` method
 - **Purpose:** Survive process restarts without losing conversation context
 

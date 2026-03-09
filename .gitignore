@@ -3,6 +3,7 @@ __pycache__/
 .env*.
 __pytest__
 .venv/
+.claude
 
 *.json
 *.jsonr

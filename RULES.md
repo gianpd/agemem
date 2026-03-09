@@ -136,7 +136,10 @@ API_KEY=your-api-key                   # Primary API key
 OPENAI_API_KEY=your-key                # Fallback for OpenAI-compatible services
 
 # Memory and persistence
-LTM_PERSIST_PATH=agent_memory/ltm_store.json
+# Both LTM and STM are stored in PERSIST_DIR:
+#   - {PERSIST_DIR}/ltm_store.json  (LTM entries)
+#   - {PERSIST_DIR}/stm_context.json (STM context)
+PERSIST_DIR=agent_memory
 STM_TOKEN_LIMIT=6000
 ```
 

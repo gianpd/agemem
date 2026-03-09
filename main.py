@@ -29,7 +29,16 @@ Deprecated (still supported for backward compatibility):
 Other settings:
     WEB_SEARCH_MAX_RESULTS  default: 5
     TOOL_RESULT_MAX_CHARS   default: 4000
-    LTM_PERSIST_PATH        default: agent_memory/ltm_store.json
+    PERSIST_DIR             default: agent_memory  (for LTM + STM storage)
+
+Notes on persistence:
+    Both LTM (long-term memory) and STM (short-term context) are stored in
+    the PERSIST_DIR directory:
+    - {PERSIST_DIR}/ltm_store.json  (persists across sessions)
+    - {PERSIST_DIR}/stm_context.json (persists across sessions)
+
+    The old LTM_PERSIST_PATH environment variable is deprecated. Use PERSIST_DIR
+    to configure the storage location for both memory systems.
 """
 
 from __future__ import annotations
@@ -77,7 +86,24 @@ BASE_MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS
 BASE_TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.2"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
 TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "4000"))
-LTM_PERSIST_PATH = os.getenv("LTM_PERSIST_PATH", "agent_memory/ltm_store.json")
+
+# Persistence directory - MUST be consistent between LTM and STM
+# Both memories use this directory:
+#   - {PERSIST_DIR}/ltm_store.json  (LTM entries)
+#   - {PERSIST_DIR}/stm_context.json (STM context)
+PERSIST_DIR = os.getenv("PERSIST_DIR", "agent_memory")
+
+# Deprecated: LTM_PERSIST_PATH is no longer used. LTM and STM both use PERSIST_DIR.
+# Kept for backward compatibility check only.
+_LEGACY_LTM_PATH = os.getenv("LTM_PERSIST_PATH")
+if _LEGACY_LTM_PATH:
+    warnings.warn(
+        "LTM_PERSIST_PATH is deprecated. Both LTM and STM now use PERSIST_DIR. "
+        f"Set PERSIST_DIR='{Path(_LEGACY_LTM_PATH).parent}' instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
 STM_TOKEN_LIMIT = int(os.getenv("STM_TOKEN_LIMIT", "6000"))
 
 
@@ -86,7 +112,6 @@ STM_TOKEN_LIMIT = int(os.getenv("STM_TOKEN_LIMIT", "6000"))
 from core.config import AgememConfig
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
-from memory.ltm_store import LTMStore
 
 
 # ── Tool Definitions ─────────────────────────────────────────────────────────
@@ -164,17 +189,14 @@ def build_orchestrator() -> Orchestrator:
         TRIGGER_EVERY_N_TURNS=10,
         DEFAULT_MAX_TOKENS=BASE_MAX_TOKENS,
         DEFAULT_TEMPERATURE=BASE_TEMPERATURE,
-        PERSIST_DIR="agemem_state",
+        PERSIST_DIR=PERSIST_DIR,
     )
 
     llm = LLMClient(client, default_model=cfg.DEFAULT_MODEL)
 
-    # Create LTM store with persistence
-    ltm_path = Path(LTM_PERSIST_PATH)
-    ltm_path.parent.mkdir(parents=True, exist_ok=True)
-    ltm_store = LTMStore(cfg, persist_path=ltm_path)
-
-    orch = Orchestrator(llm=llm, config=cfg, ltm_store=ltm_store)
+    # Orchestrator handles both LTM and STM persistence via config.PERSIST_DIR
+    # This ensures both memories use the SAME directory (coherence)
+    orch = Orchestrator(llm=llm, config=cfg)
 
     # Set up tools - combine all tool definitions
     all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS
@@ -388,7 +410,7 @@ def print_banner(orch: Orchestrator):
     banner = f"""[bold]AgeMem Chat[/bold]
   [dim]Model   :[/dim] {BASE_MODEL} @ {BASE_URL}
   [dim]STM     :[/dim] {STM_TOKEN_LIMIT} token limit
-  [dim]LTM     :[/dim] {LTM_PERSIST_PATH} ({ltm_count} entries loaded)
+  [dim]LTM     :[/dim] {PERSIST_DIR}/ltm_store.json ({ltm_count} entries loaded)
   [dim]Memory  :[/dim] STM resets on /clear — LTM persists across sessions
   [dim]Tools   :[/dim] {tools_count} available (type /tools to list)
 

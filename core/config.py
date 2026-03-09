@@ -126,11 +126,21 @@ class AgememConfig:
     DEFAULT_TEMPERATURE: float = 0.2
 
     # ── Persistence ──────────────────────────────────────────────────────────
-    PERSIST_DIR: Optional[str] = "agemem_state"
-    """Directory for persistent storage. Set to None to disable persistence."""
+    PERSIST_DIR: Optional[str] = "agent_memory"
+    """Directory for persistent storage. Set to None to disable persistence.
+
+    Coherence note: This MUST match the default in main.py's LTM_PERSIST_PATH.
+    Both LTM and STM are stored in this directory:
+    - {PERSIST_DIR}/ltm_store.json  (LTM entries)
+    - {PERSIST_DIR}/stm_context.json (STM context)
+    """
 
     LTM_PERSIST_FILENAME: str = "ltm_store.json"
-    """Filename for LTM store persistence within PERSIST_DIR."""
+    """Filename for LTM store persistence within PERSIST_DIR.
+
+    WARNING: This path must be kept in sync with main.py's LTM_PERSIST_PATH
+    environment variable. If you change one, change the other.
+    """
 
     STM_PERSIST_FILENAME: str = "stm_context.json"
     """Filename for STM context persistence within PERSIST_DIR."""
