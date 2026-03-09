@@ -157,7 +157,7 @@ class MemoryAgent:
             for m in messages
         )
         prompt = (
-            "Summarise the following conversation segment in 2-3 sentences. "
+            "Summarise the following conversation segment in 3-4 sentences. "
             "Preserve all key facts, decisions, and user preferences. "
             "Be concise.\n\n" + formatted
         )
@@ -165,7 +165,7 @@ class MemoryAgent:
             return self._llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 model=self._config.MEMORY_AGENT_MODEL,
-                max_tokens=256,
+                max_tokens=512,
                 temperature=0.1,
             )
         except Exception as exc:
