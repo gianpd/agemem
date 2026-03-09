@@ -11,8 +11,9 @@
 - [x] NODE 00: Environment Sanity Check
 - [x] NODE 01: Interactive LTM Probe
 - [x] NODE 02: Bug Identification & Fix (NO BUGS FOUND)
-- [ ] NODE 03: Regression Verification
-- [ ] NODE 04: Unit Test Generation
+- [x] NODE 03: Regression Verification
+- [x] NODE 04: Unit Test Generation
+- [~] NODE 05: Unit Test Execution & Coverage Gate
 - [ ] NODE 05: Unit Test Execution & Coverage Gate
 - [ ] NODE 06: Progress Audit & Final Report
 - [ ] NODE 07: LTM Rule Cross-Reference Audit
@@ -71,6 +72,50 @@
 **Tests passed:** Y (29/29 existing tests)
 **Blockers:** NONE
 **Next node to run:** NODE 03 (Regression Verification)
+
+### NODE 03 — Regression Verification | COMPLETE | 2026-03-09T11:52:00Z
+**Agent:** MAIN_AGENT
+**Actions taken:**
+- Re-ran all 29 existing unit tests: 29/29 PASS
+- Re-ran ltm_probe.py: 7 turns, 2 LTM entries, 0 bugs
+- Verified no regressions introduced
+**Findings:**
+- All existing tests pass
+- Probe produces consistent results
+- LTM system functioning correctly
+- No new bugs introduced
+**Artifacts produced:** probe_report.json (updated)
+**Tests passed:** Y (29/29)
+**Blockers:** NONE
+**Next node to run:** NODE 04 (Unit Test Generation)
+
+### NODE 04 — Unit Test Generation | COMPLETE | 2026-03-09T11:55:00Z
+**Agent:** MAIN_AGENT
+**Actions taken:**
+- Created tests/test_ltm_rules.py with 19 new test cases
+- Covered all 12 LTM rules (LTM-01 through LTM-12)
+- Each test has docstring referencing Rule ID
+- Used mocked LLM (no network calls)
+- Tests use unittest (no external dependencies)
+**Findings:**
+- All 19 new tests pass
+- Combined with existing 29 tests: 48/48 total pass
+- Coverage includes:
+  - LTM-01/02: Overflow warning/critical thresholds
+  - LTM-03: Periodic review every N turns
+  - LTM-04: Learning spike detection
+  - LTM-05: Learning score collection
+  - LTM-06: LTM ADD on threshold
+  - LTM-07: Duplicate detection
+  - LTM-08: Confidence gate
+  - LTM-09: Entry pruning
+  - LTM-10: Search/retrieve
+  - LTM-11: Double overflow guard
+  - LTM-12: No silent failures
+**Artifacts produced:** tests/test_ltm_rules.py
+**Tests passed:** Y (19/19 new, 48/48 total)
+**Blockers:** NONE
+**Next node to run:** NODE 05 (Coverage Gate)
 
 <!-- Append entries here. Format:
 ### NODE XX — <name> | <status> | <ISO timestamp>
