@@ -6,6 +6,12 @@ AgeMem Interactive Chat — REPL entry point for the AgeMem-hybrid system.
 Usage:
     python main.py
 
+Keybindings:
+    Enter          Send message
+    Alt+Enter      Insert newline (for multiline messages)
+    Escape+Enter   Insert newline (alternative)
+    Ctrl+C         Cancel current input or exit
+
 Environment variables (all optional, with defaults):
     BASE_URL            Base URL for LLM API (default: http://localhost:8080)
     BASE_MODEL          Model name (default: qwen3-4b)
@@ -28,19 +34,27 @@ Other settings:
 
 from __future__ import annotations
 
-
 import os
 import sys
 import signal
 import time
 import warnings
 from pathlib import Path
-from typing import Optional, Any
-from dataclasses import dataclass, field
+from typing import Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from openai import OpenAI
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.formatted_text import HTML
+
 
 # ── Configuration from environment ───────────────────────────────────────────
 
@@ -154,19 +168,69 @@ def build_orchestrator() -> Orchestrator:
     )
 
     llm = LLMClient(client, default_model=cfg.DEFAULT_MODEL)
-    
+
     # Create LTM store with persistence
     ltm_path = Path(LTM_PERSIST_PATH)
     ltm_path.parent.mkdir(parents=True, exist_ok=True)
     ltm_store = LTMStore(cfg, persist_path=ltm_path)
-    
+
     orch = Orchestrator(llm=llm, config=cfg, ltm_store=ltm_store)
-    
+
     # Set up tools - combine all tool definitions
     all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS
     orch.set_tools(all_tools)
-    
+
     return orch
+
+
+# ── Rich Console Setup ───────────────────────────────────────────────────────
+
+console = Console()
+
+
+def get_history_path() -> Path:
+    """Get path to command history file."""
+    # Use XDG_CACHE_HOME if set, otherwise ~/.cache
+    cache_dir = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")) / "agemem"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "history"
+
+
+def create_prompt_session() -> PromptSession:
+    """Create a PromptSession with multiline support and history.
+
+    Keybindings:
+    - Enter: submit message
+    - Alt+Enter / Escape+Enter: insert newline
+    """
+    bindings = KeyBindings()
+
+    @bindings.add('enter')
+    def _(event):
+        """Enter submits the message (even in multiline mode)."""
+        event.current_buffer.validate_and_handle()
+
+    @bindings.add('escape', 'enter')
+    def _(event):
+        """Escape followed by Enter inserts a newline."""
+        event.current_buffer.insert_text('\n')
+
+    @bindings.add('c-j')  # Ctrl+J = Meta+Enter on some terminals
+    def _(event):
+        """Alt+Enter inserts a newline (terminal-dependent)."""
+        event.current_buffer.insert_text('\n')
+
+    history_path = get_history_path()
+
+    session = PromptSession(
+        history=FileHistory(str(history_path)),
+        key_bindings=bindings,
+        multiline=True,
+        mouse_support=True,
+        prompt_continuation="... ",
+    )
+
+    return session
 
 
 # ── Diagnostics Display ──────────────────────────────────────────────────────
@@ -183,115 +247,134 @@ def print_diagnostics(orch: Orchestrator):
     trace = orch.last_trace()
     if not trace:
         return
-    
+
     stats = trace.stm_stats_after
     ltm_count = len(orch.ltm_snapshot())
     turn = trace.turn_index
-    
-    # Progress bar
+
+    # Progress bar for STM
     bar = format_progress_bar(stats.utilisation_ratio)
-    
-    print(f"  [STM {bar} {stats.utilisation_ratio:.0%} ~{stats.total_tokens}tok | LTM {ltm_count} entries | turn {turn}]")
-    
+
+    # Use dimmed color for diagnostics
+    console.print()
+    diag_text = Text()
+    diag_text.append("  [")
+    diag_text.append(f"STM {bar} {stats.utilisation_ratio:.0%} ~{stats.total_tokens}tok", style="dim")
+    diag_text.append(" | ")
+    diag_text.append(f"LTM {ltm_count} entries", style="dim")
+    diag_text.append(" | ")
+    diag_text.append(f"turn {turn}", style="dim")
+    diag_text.append("]")
+    console.print(diag_text)
+
     # Memory ops
     for op in trace.ops_applied:
         if op.success:
             trigger_name = op.trigger.value if hasattr(op.trigger, 'value') else str(op.trigger)
-            print(f"  [MEM] {op.op.value.upper()} triggered by {trigger_name} — {op.detail}")
+            console.print(f"  [dim][MEM] {op.op.value.upper()} triggered by {trigger_name} — {op.detail}[/dim]")
 
     # Learning feedback
     if trace.feedback:
-        print(f"  [LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:50]}...")
+        console.print(f"  [dim][LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:50]}...[/dim]")
 
     # Memory Agent rationale
     if trace.memory_agent_rationale:
-        print(f"  [AGENT] {trace.memory_agent_rationale[:60]}...")
+        console.print(f"  [dim][AGENT] {trace.memory_agent_rationale[:60]}...[/dim]")
 
 
 # ── REPL Commands ────────────────────────────────────────────────────────────
 
 def print_help():
     """Print help message."""
-    print("""
-Available commands:
-  /tools    List all available tools the agent can use.
-  /clear    Reset STM context. LTM is retained.
-  /memory   Print current LTM snapshot.
-  /stats    Print current STM stats.
-  /forget   Wipe LTM store from disk and memory.
-  /help     Show this help message.
-  Ctrl-C    Exit gracefully.
-""")
+    help_text = """
+[bold]Available commands:[/bold]
+  [cyan]/tools[/cyan]    List all available tools the agent can use.
+  [cyan]/clear[/cyan]    Reset STM context. LTM is retained.
+  [cyan]/memory[/cyan]   Print current LTM snapshot.
+  [cyan]/stats[/cyan]    Print current STM stats.
+  [cyan]/forget[/cyan]   Wipe LTM store from disk and memory.
+  [cyan]/help[/cyan]     Show this help message.
+  [cyan]Ctrl+C[/cyan]    Cancel current input or exit.
+
+[bold]Multiline input (for long messages):[/bold]
+  [cyan]Enter[/cyan]             Send message
+  [cyan]Alt+Enter[/cyan]         Insert newline (may be Escape+Enter on some terminals)
+  [cyan]Escape, Enter[/cyan]     Insert newline (two separate keypresses)
+
+[dim]You can paste long text directly - it will be preserved.[/dim]
+"""
+    console.print(Panel(help_text, border_style="dim", padding=(0, 1)))
 
 
 def print_tools(orch: Orchestrator):
     """Print available tools."""
     tools = orch.get_available_tools()
     if not tools:
-        print("  [No tools available]")
+        console.print("  [yellow]No tools available[/yellow]")
         return
 
-    print(f"\n  Available Tools ({len(tools)}):")
-    print("  " + "-" * 50)
-
+    tool_lines = []
     for tool in tools:
         func = tool.get("function", {})
         name = func.get("name", "unknown")
         desc = func.get("description", "No description available.")
         # Get first line of description only
         desc_first_line = desc.split(".")[0] + "." if "." in desc else desc
-        print(f"    /{name}")
-        print(f"      {desc_first_line[:60]}{'...' if len(desc_first_line) > 60 else ''}")
+        tool_lines.append(f"  [cyan]/{name}[/cyan]")
+        tool_lines.append(f"    {desc_first_line[:70]}{'...' if len(desc_first_line) > 70 else ''}")
 
-    print("\n  Use these tools by mentioning them, e.g.:")
-    print('    "Search the web for Python tutorials"  → uses web_search')
-    print('    "List all documents"                   → uses list_documents')
-    print('    "Write this to output.txt"             → uses write_file')
-    print()
+    console.print(Panel("\n".join(tool_lines), title=f"[bold]Available Tools ({len(tools)})[/bold]", border_style="dim"))
+
+    console.print("""
+[dim]Use these tools by mentioning them in your message:[/dim]
+  "Search the web for Python tutorials"  → uses web_search
+  "List all documents"                   → uses list_documents
+  "Write this to output.txt"             → uses write_file
+""")
 
 
 def print_memory(orch: Orchestrator):
     """Print LTM snapshot."""
     entries = orch.ltm_snapshot()
     if not entries:
-        print("  [LTM is empty]")
+        console.print("  [yellow]LTM is empty[/yellow]")
         return
-    
-    print(f"\n  LTM Store: {len(entries)} entries")
+
+    lines = []
     for entry in entries:
         score = entry.get('learning_score', 0)
         content = entry.get('content', '')[:80]
         entry_id = entry.get('entry_id', 'unknown')
-        print(f"    [{entry_id}] score={score:.2f}: {content}{'...' if len(entry.get('content', '')) > 80 else ''}")
-    print()
+        lines.append(f"  [{entry_id}] score={score:.2f}: {content}{'...' if len(entry.get('content', '')) > 80 else ''}")
+
+    console.print(Panel("\n".join(lines), title=f"[bold]LTM Store: {len(entries)} entries[/bold]", border_style="dim"))
 
 
 def print_stats(orch: Orchestrator):
     """Print STM stats."""
     stats = orch.stm_stats()
-    print(f"\n  STM Stats:")
-    print(f"    Tokens: {stats.total_tokens}")
-    print(f"    Utilisation: {stats.utilisation_ratio:.1%}")
-    print(f"    Messages: {stats.message_count}")
-    print(f"    Pinned: {stats.pinned_count}")
-    print()
+    content = f"""[bold]Tokens:[/bold] {stats.total_tokens}
+[bold]Utilisation:[/bold] {stats.utilisation_ratio:.1%}
+[bold]Messages:[/bold] {stats.message_count}
+[bold]Pinned:[/bold] {stats.pinned_count}"""
+    console.print(Panel(content, title="[bold]STM Stats[/bold]", border_style="dim"))
 
 
 def cmd_clear(orch: Orchestrator) -> bool:
     """Reset STM context."""
     orch.reset_stm()
-    print("  [STM cleared. LTM retained.]")
+    console.print("  [green]STM cleared. LTM retained.[/green]")
     return True
 
 
 def cmd_forget(orch: Orchestrator) -> bool:
     """Wipe LTM store."""
-    confirm = input("  Are you sure you want to wipe all LTM entries? [y/N]: ").strip().lower()
+    confirm = console.input("  [yellow]Are you sure you want to wipe all LTM entries? [y/N]:[/yellow] ").strip().lower()
     if confirm == 'y':
         orch.clear_ltm()
-        print("  [LTM wiped.]")
+        console.print("  [green]LTM wiped.[/green]")
     else:
-        print("  [Cancelled.]")
+        console.print("  [dim]Cancelled.[/dim]")
     return True
 
 
@@ -302,50 +385,54 @@ def print_banner(orch: Orchestrator):
     ltm_count = len(orch.ltm_snapshot())
     tools_count = len(orch.get_available_tools())
 
-    print(f"""
-AgeMem Chat
-  Model   : {BASE_MODEL} @ {BASE_URL}
-  STM     : {STM_TOKEN_LIMIT} token limit
-  LTM     : {LTM_PERSIST_PATH} ({ltm_count} entries loaded)
-  Memory  : STM resets on /clear — LTM persists across sessions
-  Tools   : {tools_count} available (type /tools to list)
-""")
+    banner = f"""[bold]AgeMem Chat[/bold]
+  [dim]Model   :[/dim] {BASE_MODEL} @ {BASE_URL}
+  [dim]STM     :[/dim] {STM_TOKEN_LIMIT} token limit
+  [dim]LTM     :[/dim] {LTM_PERSIST_PATH} ({ltm_count} entries loaded)
+  [dim]Memory  :[/dim] STM resets on /clear — LTM persists across sessions
+  [dim]Tools   :[/dim] {tools_count} available (type /tools to list)
 
-    print()
+[dim]Enter sends, Escape+Enter for newline, Ctrl+C to exit[/dim]"""
+
+    console.print(Panel(banner, border_style="blue", padding=(0, 1)))
 
 
 def main():
     """Main entry point."""
-    # Handle Ctrl-C gracefully
-    def signal_handler(sig, frame):
-        print("\n\nGoodbye!")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-
     # Build orchestrator
     try:
         orch = build_orchestrator()
     except Exception as e:
-        print(f"ERROR: Failed to initialize orchestrator: {e}")
+        console.print(f"[red bold]ERROR:[/red bold] Failed to initialize orchestrator: {e}")
         sys.exit(1)
-    
+
     # Print banner
     print_banner(orch)
-    
-    # REPL loop
-    print("Type /help for commands or start chatting!\n")
-    
+
+    # Create prompt session with history
+    session = create_prompt_session()
+
+    console.print("\nType [cyan]/help[/cyan] for commands or start chatting!\n")
+
     while True:
         try:
-            user_input = input("You: ").strip()
-        except EOFError:
-            print("\nGoodbye!")
+            # Use prompt_toolkit for multiline input
+            user_input = session.prompt(
+                HTML('<ansicyan><b>You:</b></ansicyan> '),
+            ).strip()
+
+        except KeyboardInterrupt:
+            # Ctrl+C: exit cleanly
+            console.print("\n[bold]Goodbye![/bold]")
             break
-        
+        except EOFError:
+            # Ctrl+D: exit cleanly
+            console.print("\n[bold]Goodbye![/bold]")
+            break
+
         if not user_input:
             continue
-        
+
         # Handle commands
         if user_input == "/help":
             print_help()
@@ -358,27 +445,43 @@ def main():
         if user_input == "/clear":
             cmd_clear(orch)
             continue
-        
+
         if user_input == "/memory":
             print_memory(orch)
             continue
-        
+
         if user_input == "/stats":
             print_stats(orch)
             continue
-        
+
         if user_input == "/forget":
             cmd_forget(orch)
             continue
-        
-        # Process chat
+
+        # Process chat with spinner
         try:
-            response = orch.chat(user_input)
-            print(f"\nAssistant: {response}\n")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[dim]Thinking...[/dim]"),
+                console=console,
+                transient=True,
+            ) as progress:
+                progress.add_task("thinking", total=None)
+                response = orch.chat(user_input)
+
+            # Render response as markdown
+            console.print()
+            console.print(Panel(
+                Markdown(response),
+                title="[bold cyan]Assistant[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            ))
+
             print_diagnostics(orch)
-            print()
+
         except Exception as e:
-            print(f"\n[ERROR] {e}\n")
+            console.print(f"\n[red bold]ERROR:[/red bold] {e}\n")
 
 
 if __name__ == "__main__":

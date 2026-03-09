@@ -76,13 +76,10 @@ class STMContext:
             if m.role == "system":
                 system_parts.append(m.content)
             elif m.role == "tool":
-                # Convert tool messages to user messages for compatibility
-                # Many chat templates don't support the 'tool' role
+                # Keep tool messages as proper tool role with tool_call_id
+                # This is required for proper tool calling with models that support it
                 tool_msg = m.to_openai_dict()
-                tool_content = tool_msg.get("content", "")
-                # Wrap in markers to identify as tool result
-                tool_content = f"[TOOL RESULT] {tool_content}"
-                conversation.append({"role": "user", "content": tool_content})
+                conversation.append(tool_msg)
             else:
                 conversation.append(m.to_openai_dict())
 
@@ -114,20 +111,25 @@ class STMContext:
     def add_message(
         self,
         role: str,
-        content: str,
+        content: Optional[str] = None,
         is_pinned: bool = False,
         relevance_score: float = 1.0,
         tool_call_id: Optional[str] = None,
+        tool_calls: Optional[list[dict]] = None,
     ) -> None:
         """Append a new message.  Pinned = never evicted by FILTER."""
+        if not content:
+            # convert no content to empty string
+            content = ""
         msg = ContextMessage(
             role=role,
             content=content,
             turn_index=self._turn_index,
-            token_estimate=self._tc.count(content),
+            token_estimate=self._tc.count(content or ""),
             relevance_score=relevance_score,
             is_pinned=is_pinned,
             tool_call_id=tool_call_id,
+            tool_calls=tool_calls,
         )
         self._messages.append(msg)
 
@@ -316,6 +318,7 @@ class STMContext:
                 "relevance_score": m.relevance_score,
                 "is_pinned": m.is_pinned,
                 "tool_call_id": m.tool_call_id,
+                "tool_calls": m.tool_calls,
             }
             for m in self._messages
         ]
@@ -338,6 +341,7 @@ class STMContext:
                     relevance_score=m["relevance_score"],
                     is_pinned=m["is_pinned"],
                     tool_call_id=m.get("tool_call_id"),
+                    tool_calls=m.get("tool_calls"),
                 )
                 for m in data
             ]
@@ -359,5 +363,5 @@ class STMContext:
         NOTE: This should never be used in production. It defeats the purpose
         of SUMMARY. Always inject a real summary_fn via Orchestrator.
         """
-        parts = [f"[{m.role}]: {m.content}" for m in messages]
+        parts = [f"[{m.role}]: {m.content or '(tool call)' if m.tool_calls else m.content or ''}" for m in messages]
         return "Previous context: " + " | ".join(parts)
