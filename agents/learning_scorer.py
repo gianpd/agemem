@@ -90,14 +90,24 @@ class LearningScorer:
                 messages=probe_messages,
                 max_tokens=200,
             )
-            score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
-            rationale = raw.get("rationale", "")
-            affected = raw.get("affected_content", "")[:80]
+            # Handle case where LLM returns just a float instead of a dict
+            if isinstance(raw, (int, float)):
+                score = max(0.0, min(1.0, float(raw)))
+                rationale = ""
+                affected = ""
+            elif isinstance(raw, dict):
+                score = max(0.0, min(1.0, float(raw.get("score", 0.0))))
+                rationale = raw.get("rationale", "")
+                affected = raw.get("affected_content", "")[:80]
+            else:
+                score = 0.0
+                rationale = ""
+                affected = ""
             print(f"[DEBUG] LearningScorer: score={score:.2f}, rationale='{rationale[:50]}...', content='{affected}...'", flush=True)
             return LearningFeedback(
                 score=score,
-                rationale=raw.get("rationale", ""),
-                affected_content=raw.get("affected_content", ""),
+                rationale=rationale,
+                affected_content=affected,
                 turn_index=turn_index,
             )
         except Exception as e:

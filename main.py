@@ -343,7 +343,7 @@ def print_memory(orch: Orchestrator):
     lines = []
     for entry in entries:
         score = entry.get('learning_score', 0)
-        content = entry.get('content', '')[:80]
+        content = entry.get('content', '')[:100]
         entry_id = entry.get('entry_id', 'unknown')
         lines.append(f"  [{entry_id}] score={score:.2f}: {content}{'...' if len(entry.get('content', '')) > 80 else ''}")
 

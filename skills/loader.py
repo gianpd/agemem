@@ -228,3 +228,8 @@ def load_skills_from_corpus(corpus_path: Path | str) -> list[Skill]:
     # Sort by priority (higher first)
     skills.sort(key=lambda s: s.priority, reverse=True)
     return skills
+
+
+if __name__ == "__main__":
+    skills = load_skills_from_corpus("corpus")
+    print(skills)
