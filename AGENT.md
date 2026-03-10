@@ -45,7 +45,7 @@ agemem/
 python -m unittest test_agemem -v
 
 # Start interactive chat
-python main.py
+uv run main.py
 
 # Install dependencies (basic)
 uv pip install -e .
@@ -60,15 +60,15 @@ The `ingest/` module provides PDF-to-markdown conversion with configurable NER e
 
 ```bash
 # Requires: uv pip install -e ".[ingest]"
-python ingest/ingest.py report.pdf [doc_type]
+uv run ingest/ingest.py report.pdf [doc_type]
 
 # Use built-in label sets for different domains
-python ingest/ingest.py paper.pdf research --labels research
-python ingest/ingest.py contract.pdf legal --labels legal
-python ingest/ingest.py gara.pdf bando --labels edilizia
+uv run ingest/ingest.py paper.pdf research --labels research
+uv run ingest/ingest.py contract.pdf legal --labels legal
+uv run ingest/ingest.py gara.pdf bando --labels edilizia
 
 # Use custom labels from YAML config
-python ingest/ingest.py doc.pdf custom --labels /path/to/config.yaml:medical
+uv run ingest/ingest.py doc.pdf custom --labels /path/to/config.yaml:medical
 ```
 
 ### Built-in Label Sets
