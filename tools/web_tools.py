@@ -45,12 +45,11 @@ tool_definitions = [
         "function": {
             "name": "write_file",
             "description": (
-                "Write text content to a file path. "
-                "Use to emit the final research markdown for the current topic. "
-                "Path MUST match the task manifest exactly (e.g. demo/research_llm_memory.md). "
-                "Creates parent directories if needed. "
-                "Returns confirmation with byte count. "
-                "Call ingest_document immediately after this succeeds."
+                "Write text content to a file at the specified path. "
+                "Requires BOTH 'path' (where to write) and 'content' (what to write). "
+                "Creates parent directories automatically. "
+                "Use for saving notes, reports, or any text output. "
+                "Example: path='output/report.md', content='# Report\\n\\nText here...'"
             ),
             "parameters": {
                 "type": "object",
@@ -67,19 +66,26 @@ tool_definitions = [
         "function": {
             "name": "ingest_document",
             "description": (
-                "Ingest a markdown research file into the corpus with full NER entity extraction. "
-                "Input MUST be a .md file you just wrote with write_file. "
-                "DO NOT pass PDF files — PDFs must be ingested via: python ingest.py <file.pdf>. "
-                "Blocks until corpus index is updated. Returns doc_id on success. "
-                "After this succeeds, output exactly on its own line: "
-                "[PIPELINE] TOPIC <topic_id> COMPLETE"
+                "Ingest a document into the corpus with NER entity extraction. "
+                "Supports both .md and .pdf files. "
+                "For .pdf: converts to markdown via Docling, extracts entities via GLiNER, adds to corpus. "
+                "For .md: adds to corpus with entity extraction. "
+                "Returns doc_id on success."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the .md file (e.g. demo/research_llm_memory.md)."
+                        "description": "Path to the file (.md or .pdf)"
+                    },
+                    "doc_type": {
+                        "type": "string",
+                        "description": "Document type: document, contract, research, cronoprogramma, etc. (PDF only, default: document)"
+                    },
+                    "labels": {
+                        "type": "string",
+                        "description": "Label set for entity extraction: edilizia, legal, research (PDF only, default: edilizia)"
                     }
                 },
                 "required": ["path"]
@@ -303,30 +309,79 @@ def write_file(path: str, content: str) -> str:
         return f"Error: {e}"
 
 
-def ingest_document(path: str) -> str:
+def ingest_document(path: str, doc_type: str = "document", labels: str = "edilizia") -> str:
     """
-    Ingest a markdown document into the corpus.
-    
+    Ingest a document into the corpus.
+
+    Supports both .md and .pdf files:
+    - .md files: processed directly with entity extraction
+    - .pdf files: converted via Docling using uv run ingest/ingest.py
+
     Args:
-        path: Path to the markdown file
-        
+        path: Path to the file (.md or .pdf)
+        doc_type: Document type for PDFs (default: document)
+        labels: Label set for PDFs (default: edilizia)
+
     Returns:
         Success message with doc_id or error
     """
-    from ingest import ingest
-    
+    import subprocess
+    import re
+
     file_path = Path(path)
-    
+
     if not file_path.exists():
         return f"Error: File not found: {path}"
-    
-    if not file_path.suffix == ".md":
-        return "Error: Only markdown (.md) files can be ingested via this tool. Use ingest.py for PDFs."
-    
-    try:
-        doc_id = ingest(str(file_path))
-        logger.info(f"[ingest_document] Ingested {path} as {doc_id}")
-        return f"Successfully ingested document. doc_id: {doc_id}"
-        
-    except Exception as e:
-        return f"Error ingesting document: {e}"
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".md":
+        # Markdown ingestion - import and call ingest function directly
+        try:
+            from ingest.ingest import ingest
+            doc_id = ingest(str(file_path))
+            logger.info(f"[ingest_document] Ingested markdown {path} as {doc_id}")
+            return f"Successfully ingested markdown. doc_id: {doc_id}"
+        except Exception as e:
+            return f"Error ingesting markdown: {e}"
+
+    elif suffix == ".pdf":
+        # PDF ingestion - use uv run ingest/ingest.py
+        cmd = [
+            "uv", "run", "ingest/ingest.py",
+            str(file_path),
+            doc_type,
+            "--labels", labels
+        ]
+
+        try:
+            logger.info(f"[ingest_document] Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minutes for large PDFs
+                cwd=str(Path(__file__).parent.parent)  # Run from project root
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                return f"Error ingesting PDF: {error_msg}"
+
+            # Extract doc_id from output (last line usually contains it)
+            output = result.stdout.strip()
+            doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
+            doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
+
+            logger.info(f"[ingest_document] Ingested PDF {path} as {doc_id}")
+            return f"Successfully ingested PDF.\n\n{output}"
+
+        except subprocess.TimeoutExpired:
+            return "Error: PDF ingestion timed out (after 10 minutes)"
+        except FileNotFoundError:
+            return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
+        except Exception as e:
+            return f"Error ingesting PDF: {e}"
+
+    else:
+        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
