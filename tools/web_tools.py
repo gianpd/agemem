@@ -385,3 +385,4 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
 
     else:
         return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+    

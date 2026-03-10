@@ -285,7 +285,7 @@ def load_labels(labels_arg: Optional[str]) -> Dict[str, Any]:
         Dictionary with 'labels', 'label_map', 'buckets', 'description'
     """
     # Import built-in labels
-    from gliner_labels.gliner_labels import get_builtin_labels, BUILTIN_LABEL_SETS
+    from ingest.gliner_labels.gliner_labels import get_builtin_labels, BUILTIN_LABEL_SETS
 
     if labels_arg is None:
         # Default to edilizia
