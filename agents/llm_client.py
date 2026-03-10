@@ -60,13 +60,14 @@ class LLMClient:
         json_mode: bool = False,
         retries: int = 2,
         tools: Optional[list[dict]] = None,
+        timeout: float = 300.0,
     ) -> str:
         """
         Send a chat completion request.
 
         Returns the assistant text content as a plain string.
         Raises RuntimeError after exhausting retries.
-        
+
         If tools are provided and the model returns a tool call, raises
         ToolCallResponse with the tool call details.
         """
@@ -75,6 +76,7 @@ class LLMClient:
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature if temperature is not None else self._temperature,
+            "timeout": timeout,
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}

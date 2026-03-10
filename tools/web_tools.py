@@ -45,17 +45,17 @@ tool_definitions = [
         "function": {
             "name": "write_file",
             "description": (
-                "Write text content to a file at the specified path. "
-                "Requires BOTH 'path' (where to write) and 'content' (what to write). "
+                "Write text content to a file. CRITICAL: Both 'path' and 'content' parameters are REQUIRED "
+                "and must be non-empty strings. The path must include a filename (e.g., 'docs/report.md', not just 'docs/'). "
                 "Creates parent directories automatically. "
                 "Use for saving notes, reports, or any text output. "
-                "Example: path='output/report.md', content='# Report\\n\\nText here...'"
+                "Example: path='output/report.md', content='# Report\\n\\nYour content here...'"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":    {"type": "string", "description": "Relative file path to write."},
-                    "content": {"type": "string", "description": "Full file content as a string."}
+                    "path":    {"type": "string", "description": "Relative file path including filename (e.g., 'output/notes.md'). Must be non-empty."},
+                    "content": {"type": "string", "description": "Full file content as a string. Must be non-empty."}
                 },
                 "required": ["path", "content"]
             }
@@ -283,30 +283,43 @@ async def web_search_tool(
 def write_file(path: str, content: str) -> str:
     """
     Write content to a file.
-    
+
     Args:
-        path: The file path to write to
-        content: The content to write
-        
+        path: The file path to write to (required, cannot be empty)
+        content: The content to write (required)
+
     Returns:
         Success message or error
     """
+    # Validate arguments
+    if not path or not isinstance(path, str) or not path.strip():
+        return "[TOOL ERROR] write_file: 'path' is required and cannot be empty. Example: path='output/report.md'"
+
+    if content is None:
+        return "[TOOL ERROR] write_file: 'content' is required and cannot be None."
+
     try:
         file_path = Path(path)
+
+        # Prevent writing to directories or dangerous paths
+        if file_path.is_dir():
+            return f"[TOOL ERROR] write_file: '{path}' is a directory, not a file. Please specify a file path."
+
+        # Ensure parent directory exists
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         with open(file_path, "w") as f:
             f.write(content)
-        
+
         byte_count = len(content.encode("utf-8"))
         logger.info(f"[write_file] Wrote {byte_count} bytes to {path}")
-        
+
         return f"Successfully wrote {byte_count} bytes to {path}"
-        
+
     except IOError as e:
-        return f"Error writing file: {e}"
+        return f"[TOOL ERROR] write_file failed: {e}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"[TOOL ERROR] write_file unexpected error: {e}"
 
 
 def ingest_document(path: str, doc_type: str = "document", labels: str = "edilizia") -> str:

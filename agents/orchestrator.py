@@ -378,12 +378,15 @@ class Orchestrator:
         # ── 2. Main LLM call with tool support ────────────────────────────────
         self._stm.add_message(role="user", content=user_input, relevance_score=1.0)
         
-        # Tool call loop - no hard iteration cap, but protected by LoopGuard
+        # Tool call loop - protected by LoopGuard and max iteration cap
         assistant_text = ""
-        
-        while True:
+        max_tool_iterations = 20  # Prevent infinite tool call loops
+        tool_iterations = 0
+
+        while tool_iterations < max_tool_iterations:
             messages = self._stm.openai_messages()
-            
+            tool_iterations += 1
+
             try:
                 # Call LLM with tools if available
                 assistant_text = self._llm.chat(
@@ -394,8 +397,12 @@ class Orchestrator:
                 )
                 # If we get here, no tool call was made - we have a text response
                 break
-                
+
             except ToolCallResponse as e:
+                # Check iteration limit before processing tool call
+                if tool_iterations >= max_tool_iterations:
+                    assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
+                    break
                 # Parse tool call
                 tool_call = e.tool_call
                 tool_name = tool_call.function.name
