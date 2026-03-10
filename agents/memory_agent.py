@@ -60,7 +60,14 @@ from core.config import AgememConfig, DEFAULT_CONFIG
 from agents.llm_client import LLMClient
 
 
-_SYSTEM_PROMPT = """\
+def _get_memory_agent_system_prompt() -> str:
+    """Load the MemoryAgent system prompt from the registry."""
+    try:
+        from prompts import get_memory_agent_prompt
+        return get_memory_agent_prompt()
+    except Exception:
+        # Fallback if registry fails
+        return """\
 You are a Memory Management Agent for an LLM assistant system.
 Your sole task is to analyse a conversation window and the current long-term memory store,
 then decide what memory operations to perform.
@@ -130,7 +137,7 @@ class MemoryAgent:
         try:
             raw = self._llm.chat_json(
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": _get_memory_agent_system_prompt()},
                     {"role": "user",   "content": prompt},
                 ],
                 model=self._config.MEMORY_AGENT_MODEL,

@@ -109,6 +109,7 @@ class TurnTrace:
     feedback: Optional[LearningFeedback] = None
     memory_agent_rationale: str = ""
     latency_ms: float = 0.0
+    prompt_versions: dict[str, str] = field(default_factory=dict) # Map of prompt_id -> version used during this turn for audit trail.
 
 
 class Orchestrator:
@@ -122,6 +123,10 @@ class Orchestrator:
     ) -> None:
         self._config = config
         self._llm = llm
+
+        # Initialize prompt registry
+        self._prompt_versions: dict[str, str] = {}
+        self._init_prompt_registry()
 
         # Resolve persistence paths
         self._persist_dir: Optional[Path] = None
@@ -183,6 +188,37 @@ class Orchestrator:
         # Skill manager for dynamic capability hints
         self._skill_manager = SkillManager(config)
         self._skill_manager.load_skills()
+
+    def _init_prompt_registry(self) -> None:
+        """Initialize prompt registry and capture current prompt versions for audit."""
+        try:
+            from prompts import get_active_version, list_prompts
+            # Capture active versions for audit trail
+            for meta in list_prompts():
+                version = get_active_version(meta.prompt_id)
+                self._prompt_versions[meta.prompt_id] = version
+        except Exception as e:
+            # Registry is optional - don't fail if prompts aren't configured
+            print(f"[Orchestrator] Prompt registry not initialized: {e}")
+
+    def reload_prompts(self) -> dict[str, str]:
+        """
+        Reload prompts from the registry and return current versions.
+
+        Returns:
+            Dictionary mapping prompt_id -> active_version
+        """
+        self._init_prompt_registry()
+        return dict(self._prompt_versions)
+
+    def get_prompt_versions(self) -> dict[str, str]:
+        """
+        Get the prompt versions used in this session.
+
+        Returns:
+            Dictionary mapping prompt_id -> active_version
+        """
+        return dict(self._prompt_versions)
 
     # ── Tool Configuration ────────────────────────────────────────────────────
 
@@ -507,6 +543,7 @@ class Orchestrator:
             feedback=feedback,
             memory_agent_rationale=ma_rationale,
             latency_ms=(time.time() - t0) * 1000,
+            prompt_versions=dict(self._prompt_versions),  # Copy for audit trail
         ))
 
         return assistant_text

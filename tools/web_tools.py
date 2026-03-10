@@ -248,9 +248,7 @@ async def web_search(
 
 async def web_search_tool(
     query: str,
-    num_results: int = 5,
-    session_id: Optional[str] = None,
-    db_session = None,
+    num_results: int = 5
 ) -> str:
     """
     Wrapper for web_search to maintain compatibility with existing tool interface.
@@ -260,8 +258,6 @@ async def web_search_tool(
     Args:
         query: The search query string
         num_results: Number of results (default 5, max 10 for tool interface)
-        session_id: Optional session ID for DB tracking
-        db_session: Optional database session for recording tool execution
         
     Returns:
         Formatted search results.
@@ -275,8 +271,6 @@ async def web_search_tool(
         enable_scrape=True,
         scrape_count=3,
         language="en",
-        session_id=session_id,
-        db_session=db_session,
     )
 
 

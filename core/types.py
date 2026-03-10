@@ -201,6 +201,59 @@ class Skill:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Prompt Registry Types
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PromptVersion:
+    """Represents a specific version of a prompt."""
+    version: str           # Semantic version, e.g., "1.0.0"
+    created_at: str        # ISO date, e.g., "2026-03-10"
+    author: str            # Who created this version
+    changelog: str = ""    # What changed in this version
+
+
+@dataclass
+class PromptMetadata:
+    """Metadata about a prompt (without the full content)."""
+    prompt_id: str
+    name: str
+    description: str
+    active_version: str
+    tags: list[str]
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class Prompt:
+    """A full prompt with metadata and content."""
+    prompt_id: str
+    name: str
+    version: str
+    content: str
+    created_at: str
+    updated_at: str
+    author: str
+    tags: list[str]
+    active: bool
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "prompt_id": self.prompt_id,
+            "name": self.name,
+            "version": self.version,
+            "content": self.content,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "author": self.author,
+            "tags": self.tags,
+            "active": self.active,
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Token estimation (stdlib fallback)
 # ──────────────────────────────────────────────────────────────────────────────
 
