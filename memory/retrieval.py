@@ -14,10 +14,12 @@ Design decisions
 * Recency decay uses exponential formula: exp(-age_days * decay_rate)
 * Final score weights: semantic 50%, learning_score 30%, recency 20%
 * Returns top_k results after re-ranking from top_k * 3 candidates.
+* learning_score is clamped to [0, 1] on read; storage layer should normalize.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any
@@ -26,6 +28,8 @@ import numpy as np
 
 from memory.embedding import embed_text
 from memory.vector_index import query_similar
+
+logger = logging.getLogger(__name__)
 
 
 def _fetch_entry_metadata(db: Any, entry_ids: list[str]) -> dict[str, dict]:
@@ -54,12 +58,13 @@ def _fetch_entry_metadata(db: Any, entry_ids: list[str]) -> dict[str, dict]:
         return {
             row[0]: {
                 "content": row[1] or "",
-                "learning_score": row[2] or 0.0,
+                "learning_score": max(0.0, min(1.0, (row[2] or 0.0))),  # clamp to [0, 1]
                 "created_at": row[3] or time.time(),
             }
             for row in cursor.fetchall()
         }
-    except Exception:
+    except Exception as e:
+        logger.warning("_fetch_entry_metadata failed for %d entries: %s", len(entry_ids), e)
         return {}
 
 
@@ -94,6 +99,10 @@ def retrieve_relevant_ltm(
         List of dicts with keys: entry_id, content, score, learning_score, age_days.
         Sorted by final_score descending.
     """
+    # Guard against empty queries
+    if not query or not query.strip():
+        return []
+
     # Stage 1: Semantic broad-pass
     # Get more candidates than needed for re-ranking
     candidate_count = top_k * 3
@@ -131,12 +140,17 @@ def retrieve_relevant_ltm(
     scored_entries: list[tuple[float, dict]] = []
 
     for entry_id in entry_ids:
-        entry_meta = metadata.get(entry_id, {})
+        # Skip stale vector index entries (deleted from ltm_entries)
+        if entry_id not in metadata:
+            logger.debug("Skipping stale vector entry: %s", entry_id)
+            continue
 
-        content = entry_meta.get("content", "")
+        entry_meta = metadata[entry_id]
+
+        content = entry_meta["content"]
         semantic_distance = distances.get(entry_id, 1.0)
-        learning_score = entry_meta.get("learning_score", 0.0)
-        created_at = entry_meta.get("created_at", now)
+        learning_score = entry_meta["learning_score"]
+        created_at = entry_meta["created_at"]
 
         # Convert distance to similarity score (lower distance = higher similarity)
         # sqlite-vec returns cosine distance, so similarity = 1 - distance
@@ -221,13 +235,13 @@ def retrieve_by_tags(
                 "entry_id": entry_id,
                 "content": content,
                 "score": learning_score,  # Use learning_score as score for tag search
-                "learning_score": learning_score,
+                "learning_score": max(0.0, min(1.0, learning_score or 0.0)),  # clamp to [0, 1]
                 "age_days": age_days,
             })
 
         return results
-    except Exception:
-        # Table structure might not support json_each or tags column
+    except Exception as e:
+        logger.warning("retrieve_by_tags failed for tags=%s: %s", tags, e)
         return []
 
 
@@ -268,17 +282,18 @@ def retrieve_recent(
             entry_id, content, learning_score, created_at, updated_at = row
             age_days = (now - created_at) / 86_400
 
-            # Score based on recency
+            # Score based on recency: 1.0 for most recent, approaching 0.0 at cutoff
             recency_score = (updated_at - cutoff) / (days * 86_400)
 
             results.append({
                 "entry_id": entry_id,
                 "content": content,
                 "score": recency_score,
-                "learning_score": learning_score,
+                "learning_score": max(0.0, min(1.0, learning_score or 0.0)),  # clamp to [0, 1]
                 "age_days": age_days,
             })
 
         return results
-    except Exception:
+    except Exception as e:
+        logger.warning("retrieve_recent failed for days=%d: %s", days, e)
         return []
