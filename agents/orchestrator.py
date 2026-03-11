@@ -350,63 +350,6 @@ class Orchestrator:
             except Exception as e:
                 return f"[TOOL ERROR] read_lines failed: {e}"
 
-        # Commodity tools
-        if name == "commodity_price":
-            try:
-                from tools.commodity_tool import get_commodity_price_tool
-                tag = arguments.get("tag", "")
-                location = arguments.get("location", None)
-                tool = get_commodity_price_tool()
-                # Run async function synchronously
-                import asyncio
-                try:
-                    result = asyncio.run(tool.execute(tag=tag, location=location))
-                except RuntimeError:
-                    try:
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        result = asyncio.run(tool.execute(tag=tag, location=location))
-                    except ImportError:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, tool.execute(tag=tag, location=location))
-                                result = future.result()
-                        else:
-                            result = loop.run_until_complete(tool.execute(tag=tag, location=location))
-                return result
-            except Exception as e:
-                return f"[TOOL ERROR] commodity_price failed: {e}"
-
-        if name == "commodity_history":
-            try:
-                from tools.commodity_tool import get_commodity_history_tool
-                tag = arguments.get("tag", "")
-                period_months = arguments.get("period_months", 12)
-                tool = get_commodity_history_tool()
-                # Run async function synchronously
-                import asyncio
-                try:
-                    result = asyncio.run(tool.execute(tag=tag, period_months=period_months))
-                except RuntimeError:
-                    try:
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        result = asyncio.run(tool.execute(tag=tag, period_months=period_months))
-                    except ImportError:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, tool.execute(tag=tag, period_months=period_months))
-                                result = future.result()
-                        else:
-                            result = loop.run_until_complete(tool.execute(tag=tag, period_months=period_months))
-                return result
-            except Exception as e:
-                return f"[TOOL ERROR] commodity_history failed: {e}"
-
         return f"[TOOL ERROR] Unknown tool: {name}"
 
     # ── Main public API ───────────────────────────────────────────────────────
@@ -493,7 +436,7 @@ class Orchestrator:
                     self._stm.add_message(
                         role="user",
                         content="[SYSTEM] Duplicate tool call detected. You already called this tool with the same arguments. Please try a different approach or provide a final answer.",
-                        relevance_score=1.0,
+                        relevance_score=0.0,
                     )
                     continue
                 
@@ -521,7 +464,7 @@ class Orchestrator:
                 self._stm.add_message(
                     role="assistant",
                     content=None,  # No content when making tool calls
-                    relevance_score=0.8,
+                    relevance_score=0.2,
                     tool_calls=tool_calls_data,
                 )
                 # Add the tool result with proper role and tool_call_id
