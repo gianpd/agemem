@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_cache/
 .env
 .env*.
 __pytest__
@@ -14,3 +15,5 @@ corpus/
 agemem_state/
 agent_memory/
 demo/
+output/
+workflow/

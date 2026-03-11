@@ -143,8 +143,19 @@ class Orchestrator:
             if self._persist_dir else None
         )
 
+        # SEMANTIC_SEARCH: Configure semantic search for LTM if enabled
+        semantic_db_path = None
+        if config.ENABLE_SEMANTIC_SEARCH and self._persist_dir:
+            semantic_db_path = self._persist_dir / config.SEMANTIC_DB_FILENAME
+
         # LTM — pass persist_path so _maybe_persist() is active
-        self._ltm = ltm_store or LTMStore(config, persist_path=ltm_path)
+        # SEMANTIC_SEARCH: Pass semantic_db_path if semantic search is enabled
+        self._ltm = ltm_store or LTMStore(
+            config,
+            persist_path=ltm_path,
+            semantic_db_path=semantic_db_path,
+            enable_semantic_search=config.ENABLE_SEMANTIC_SEARCH,
+        )
 
         # Memory agent and scorer
         self._memory_agent = MemoryAgent(llm, config)
