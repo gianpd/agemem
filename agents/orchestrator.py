@@ -243,6 +243,8 @@ class Orchestrator:
         - grep_corpus: Full-text search across all documents
         - read_document: Read full document content
         - read_lines: Read specific lines from a document
+        - commodity_price: Fetch current commodity prices (gold, silver, oil, etc.)
+        - commodity_history: Fetch historical commodity price data
 
         Returns the tool result as a string.
         """
@@ -336,6 +338,63 @@ class Orchestrator:
                 return read_lines(doc_id, start_line, end_line)
             except Exception as e:
                 return f"[TOOL ERROR] read_lines failed: {e}"
+
+        # Commodity tools
+        if name == "commodity_price":
+            try:
+                from tools.commodity_tool import get_commodity_price_tool
+                tag = arguments.get("tag", "")
+                location = arguments.get("location", None)
+                tool = get_commodity_price_tool()
+                # Run async function synchronously
+                import asyncio
+                try:
+                    result = asyncio.run(tool.execute(tag=tag, location=location))
+                except RuntimeError:
+                    try:
+                        import nest_asyncio
+                        nest_asyncio.apply()
+                        result = asyncio.run(tool.execute(tag=tag, location=location))
+                    except ImportError:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(asyncio.run, tool.execute(tag=tag, location=location))
+                                result = future.result()
+                        else:
+                            result = loop.run_until_complete(tool.execute(tag=tag, location=location))
+                return result
+            except Exception as e:
+                return f"[TOOL ERROR] commodity_price failed: {e}"
+
+        if name == "commodity_history":
+            try:
+                from tools.commodity_tool import get_commodity_history_tool
+                tag = arguments.get("tag", "")
+                period_months = arguments.get("period_months", 12)
+                tool = get_commodity_history_tool()
+                # Run async function synchronously
+                import asyncio
+                try:
+                    result = asyncio.run(tool.execute(tag=tag, period_months=period_months))
+                except RuntimeError:
+                    try:
+                        import nest_asyncio
+                        nest_asyncio.apply()
+                        result = asyncio.run(tool.execute(tag=tag, period_months=period_months))
+                    except ImportError:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(asyncio.run, tool.execute(tag=tag, period_months=period_months))
+                                result = future.result()
+                        else:
+                            result = loop.run_until_complete(tool.execute(tag=tag, period_months=period_months))
+                return result
+            except Exception as e:
+                return f"[TOOL ERROR] commodity_history failed: {e}"
 
         return f"[TOOL ERROR] Unknown tool: {name}"
 

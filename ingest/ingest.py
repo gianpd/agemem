@@ -36,6 +36,12 @@ from docling.datamodel.pipeline_options import (
 )
 from docling.datamodel.base_models import InputFormat
 
+try:
+    from .gliner_labels import get_builtin_labels, list_builtin_labels, BUILTIN_LABEL_SETS
+except ImportError:
+    # When running as script directly
+    from gliner_labels import get_builtin_labels, list_builtin_labels, BUILTIN_LABEL_SETS
+
 # Try to import torch for GPU memory management
 try:
     import torch
@@ -284,8 +290,6 @@ def load_labels(labels_arg: Optional[str]) -> Dict[str, Any]:
     Returns:
         Dictionary with 'labels', 'label_map', 'buckets', 'description'
     """
-    # Import built-in labels
-    from ingest.gliner_labels.gliner_labels import get_builtin_labels, BUILTIN_LABEL_SETS
 
     if labels_arg is None:
         # Default to edilizia

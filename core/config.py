@@ -63,6 +63,11 @@ TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "4000"))
 CHARS_PER_TOKEN = 3.5
 MAX_READ_LINES = 75
 
+# ─────────────────────────────────────────────────────────────
+# CONFIG — Tools
+# ─────────────────────────────────────────────────────────────
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+
 
 @dataclass
 class AgememConfig:
@@ -165,6 +170,10 @@ class AgememConfig:
     PROMPT_REGISTRY_DIR: Optional[str] = None
     """Directory for prompt registry files. If None, uses default prompts/prompts/."""
 
+    # ── External API Keys ─────────────────────────────────────────────────────
+    alpha_api_key: str = field(default_factory=lambda: os.getenv("ALPHA_VANTAGE_API_KEY", ""))
+    """Alpha Vantage API key for commodity price data."""
+
     @property
     def SYSTEM_PROMPT_HEADER(self) -> str:
         """Get the main system prompt from the registry."""
@@ -180,3 +189,8 @@ class AgememConfig:
 
 # Singleton-style default config; callers can replace it.
 DEFAULT_CONFIG = AgememConfig()
+
+
+def get_settings() -> AgememConfig:
+    """Get the default configuration settings."""
+    return DEFAULT_CONFIG

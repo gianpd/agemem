@@ -139,6 +139,7 @@ WEB_SEARCH_TOOL_SCHEMA = {
 # Import all tool definitions
 from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
 from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
+from tools.commodity_tool import get_commodity_tool_definitions
 
 def get_llm_client() -> OpenAI:
     """Get the OpenAI-compatible client with automatic API key handling.
@@ -199,7 +200,7 @@ def build_orchestrator() -> Orchestrator:
     orch = Orchestrator(llm=llm, config=cfg)
 
     # Set up tools - combine all tool definitions
-    all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS
+    all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS + get_commodity_tool_definitions()
     orch.set_tools(all_tools)
 
     return orch
