@@ -8,31 +8,38 @@ Responsibilities
 * ADD     – store a new MemoryEntry
 * UPDATE  – overwrite an existing entry (by entry_id or content similarity)
 * DELETE  – remove an entry
-* SEARCH  – naive keyword retrieval (no embeddings; inference-only constraint)
+* SEARCH  – semantic retrieval using embeddings (or fallback to token overlap)
 * PRUNE   – enforce LTM_MAX_ENTRIES by dropping lowest-scored entries
 
 Design decisions
 ────────────────
-* No vector DB.  Retrieval is done by token-overlap scoring, which is
-  feasible without any network or heavy library.  The expected entry count
-  (≤500) makes O(n) scan acceptable.
+* SEMANTIC_SEARCH: When enabled, uses sqlite-vec for vector similarity search.
 * Thread safety is not a concern for a single-agent inference loop but a
   reentrant lock is included for completeness.
-* Persistence: entries are serialised to JSON.  Callers can pass a path to
+* Persistence: entries are serialised to JSON. Callers can pass a path to
   enable persistence across sessions.
+* SEMANTIC_SEARCH: Optional SQLite backend for vector-based semantic search.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
+import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from core.types import MemoryEntry, MemoryOp, MemoryOpResult, TriggerKind
 from core.config import AgememConfig, DEFAULT_CONFIG
+
+# SEMANTIC_SEARCH: Lazy imports for embedding and vector modules
+if TYPE_CHECKING:
+    import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class LTMStore:
@@ -41,6 +48,9 @@ class LTMStore:
         self,
         config: AgememConfig = DEFAULT_CONFIG,
         persist_path: Optional[Path] = None,
+        # SEMANTIC_SEARCH: New optional parameters for semantic search
+        semantic_db_path: Optional[Path] = None,
+        enable_semantic_search: bool = False,
     ) -> None:
         self._config = config
         self._entries: dict[str, MemoryEntry] = {}
@@ -48,6 +58,73 @@ class LTMStore:
         self._persist_path = persist_path
         if persist_path and persist_path.exists():
             self._load(persist_path)
+
+        # SEMANTIC_SEARCH: Initialize SQLite backend if enabled
+        self._semantic_enabled = enable_semantic_search
+        self._semantic_db_path = semantic_db_path
+        self._db: Optional[sqlite3.Connection] = None
+        self._embedding_model = None
+
+        if enable_semantic_search and semantic_db_path:
+            self._init_semantic_backend()
+
+    # SEMANTIC_SEARCH: Initialize SQLite and embedding model
+    def _init_semantic_backend(self) -> None:
+        """Initialize SQLite database and embedding model for semantic search."""
+        try:
+            # Apply schema migrations
+            from core.db_migrations import apply_semantic_schema
+            apply_semantic_schema(str(self._semantic_db_path))
+
+            # Open connection
+            self._db = sqlite3.connect(str(self._semantic_db_path))
+
+            # Load sqlite-vec extension
+            self._db.enable_load_extension(True)
+            try:
+                import sqlite_vec
+                sqlite_vec.load(self._db)
+            except ImportError:
+                logger.warning("sqlite-vec not installed. Semantic search disabled.")
+                self._semantic_enabled = False
+                return
+
+            # Initialize embedding model (lazy)
+            self._embedding_model = None  # Will be loaded on first use
+
+            # Ensure vector index table exists
+            from memory.vector_index import ensure_table_exists
+            ensure_table_exists(self._db)
+
+            logger.info(f"Semantic search enabled: {self._semantic_db_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize semantic search: {e}")
+            self._semantic_enabled = False
+
+    # SEMANTIC_SEARCH: Get or load embedding model
+    def _get_embedding_model(self):
+        """Lazy-load the embedding model."""
+        if self._embedding_model is None:
+            try:
+                from memory.embedding import EmbeddingModule
+                self._embedding_model = EmbeddingModule.get_instance()
+            except Exception as e:
+                logger.warning(f"Failed to load embedding model: {e}")
+                return None
+        return self._embedding_model
+
+    # SEMANTIC_SEARCH: Generate embedding for text
+    def _generate_embedding(self, text: str) -> Optional["np.ndarray"]:
+        """Generate embedding for text, returns None on failure."""
+        model = self._get_embedding_model()
+        if model is None:
+            return None
+        try:
+            return model.embed_text(text)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding: {e}")
+            return None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -83,6 +160,10 @@ class LTMStore:
             self._maybe_prune()
             self._maybe_persist()
 
+            # SEMANTIC_SEARCH: Insert embedding into vector index
+            if self._semantic_enabled and self._db:
+                self._insert_embedding_for_entry(entry)
+
             return MemoryOpResult(
                 op=MemoryOp.ADD,
                 success=True,
@@ -112,6 +193,11 @@ class LTMStore:
             # Exponential moving average of learning scores
             entry.learning_score = 0.6 * entry.learning_score + 0.4 * learning_score
             self._maybe_persist()
+
+            # SEMANTIC_SEARCH: Update embedding in vector index
+            if self._semantic_enabled and self._db:
+                self._update_embedding_for_entry(entry)
+
             return MemoryOpResult(
                 op=MemoryOp.UPDATE,
                 success=True,
@@ -135,6 +221,12 @@ class LTMStore:
                 )
             del self._entries[entry_id]
             self._maybe_persist()
+
+            # SEMANTIC_SEARCH: Delete embedding from vector index
+            if self._semantic_enabled and self._db:
+                from memory.vector_index import delete_embedding
+                delete_embedding(self._db, entry_id)
+
             return MemoryOpResult(
                 op=MemoryOp.DELETE,
                 success=True,
@@ -147,29 +239,73 @@ class LTMStore:
         """
         Retrieve the top_k most relevant entries for a query.
 
-        Scoring: TF-IDF-inspired token overlap + recency decay + learning_score.
-        All O(n) — adequate for ≤500 entries without any embedding model.
+        SEMANTIC_SEARCH: When semantic search is enabled, uses vector similarity.
+        Falls back to token-overlap scoring when semantic search is unavailable.
+
+        Scoring (semantic): cosine similarity + recency decay + learning_score.
+        Scoring (fallback): TF-IDF-inspired token overlap + recency decay + learning_score.
         """
         with self._lock:
             if not self._entries:
                 return []
-            query_tokens = self._tokenise(query)
-            scored: list[tuple[float, MemoryEntry]] = []
-            now = time.time()
-            for entry in self._entries.values():
-                overlap = self._overlap_score(query_tokens, entry.content)
-                # Recency: exponential decay over 7 days
-                age_days = (now - entry.updated_at) / 86_400
-                recency = math.exp(-age_days / 7)
-                score = 0.5 * overlap + 0.3 * entry.learning_score + 0.2 * recency
-                scored.append((score, entry))
 
-            scored.sort(key=lambda t: t[0], reverse=True)
-            results = [e for _, e in scored[:top_k]]
-            # Increment access count for retrieved entries
-            for e in results:
-                e.access_count += 1
-            return results
+            # SEMANTIC_SEARCH: Use semantic search if enabled
+            if self._semantic_enabled and self._db:
+                return self._semantic_search(query, top_k)
+
+            # Fallback: token overlap search
+            return self._token_overlap_search(query, top_k)
+
+    # SEMANTIC_SEARCH: Semantic search implementation
+    def _semantic_search(self, query: str, top_k: int) -> list[MemoryEntry]:
+        """Perform semantic search using vector similarity."""
+        try:
+            from memory.retrieval import retrieve_relevant_ltm
+
+            results = retrieve_relevant_ltm(
+                db=self._db,
+                model=self._get_embedding_model(),
+                query=query,
+                top_k=top_k,
+            )
+
+            # Convert results to MemoryEntry objects
+            entries = []
+            for result in results:
+                entry = self._entries.get(result["entry_id"])
+                if entry:
+                    entry.access_count += 1
+                    entries.append(entry)
+
+            return entries
+
+        except Exception as e:
+            logger.error(f"Semantic search failed, falling back to token overlap: {e}")
+            return self._token_overlap_search(query, top_k)
+
+    # SEMANTIC_SEARCH: Original token overlap search (renamed)
+    def _token_overlap_search(self, query: str, top_k: int) -> list[MemoryEntry]:
+        """
+        Fallback retrieval using token overlap scoring.
+        All O(n) — adequate for ≤500 entries without any embedding model.
+        """
+        query_tokens = self._tokenise(query)
+        scored: list[tuple[float, MemoryEntry]] = []
+        now = time.time()
+        for entry in self._entries.values():
+            overlap = self._overlap_score(query_tokens, entry.content)
+            # Recency: exponential decay over 7 days
+            age_days = (now - entry.updated_at) / 86_400
+            recency = math.exp(-age_days / 7)
+            score = 0.5 * overlap + 0.3 * entry.learning_score + 0.2 * recency
+            scored.append((score, entry))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        results = [e for _, e in scored[:top_k]]
+        # Increment access count for retrieved entries
+        for e in results:
+            e.access_count += 1
+        return results
 
     def all_entries(self) -> list[MemoryEntry]:
         with self._lock:
@@ -178,6 +314,22 @@ class LTMStore:
     def size(self) -> int:
         with self._lock:
             return len(self._entries)
+
+    # SEMANTIC_SEARCH: Check if semantic search is enabled
+    def is_semantic_enabled(self) -> bool:
+        """Return True if semantic search is enabled and operational."""
+        return self._semantic_enabled and self._db is not None
+
+    # SEMANTIC_SEARCH: Get count of embeddings in vector index
+    def embedding_count(self) -> int:
+        """Return the number of entries with embeddings."""
+        if not self._semantic_enabled or not self._db:
+            return 0
+        try:
+            from memory.vector_index import get_embedding_count
+            return get_embedding_count(self._db)
+        except Exception:
+            return 0
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -226,6 +378,10 @@ class LTMStore:
         excess = len(self._entries) - self._config.LTM_MAX_ENTRIES
         for eid in sorted_ids[:excess]:
             del self._entries[eid]
+            # SEMANTIC_SEARCH: Also delete from vector index
+            if self._semantic_enabled and self._db:
+                from memory.vector_index import delete_embedding
+                delete_embedding(self._db, eid)
 
     def _maybe_persist(self) -> None:
         if self._persist_path is None:
@@ -241,3 +397,82 @@ class LTMStore:
                 self._entries[entry.entry_id] = entry
         except Exception:
             pass  # corrupt file → start fresh
+
+    # SEMANTIC_SEARCH: Insert embedding for an entry
+    def _insert_embedding_for_entry(self, entry: MemoryEntry) -> None:
+        """Generate and insert embedding for an entry."""
+        if not self._db:
+            return
+        try:
+            embedding = self._generate_embedding(entry.content)
+            if embedding is not None:
+                from memory.vector_index import insert_embedding
+                insert_embedding(self._db, entry.entry_id, embedding)
+
+                # Also update SQLite ltm_entries table
+                self._upsert_entry_to_sqlite(entry)
+
+        except Exception as e:
+            logger.error(f"Failed to insert embedding for {entry.entry_id}: {e}")
+
+    # SEMANTIC_SEARCH: Update embedding for an entry
+    def _update_embedding_for_entry(self, entry: MemoryEntry) -> None:
+        """Generate and update embedding for an entry."""
+        if not self._db:
+            return
+        try:
+            embedding = self._generate_embedding(entry.content)
+            if embedding is not None:
+                from memory.vector_index import update_embedding
+                update_embedding(self._db, entry.entry_id, embedding)
+
+                # Also update SQLite ltm_entries table
+                self._upsert_entry_to_sqlite(entry)
+
+        except Exception as e:
+            logger.error(f"Failed to update embedding for {entry.entry_id}: {e}")
+
+    # SEMANTIC_SEARCH: Upsert entry to SQLite ltm_entries table
+    def _upsert_entry_to_sqlite(self, entry: MemoryEntry) -> None:
+        """Insert or update an entry in the SQLite ltm_entries table."""
+        if not self._db:
+            return
+        try:
+            import json as json_mod
+            self._db.execute("""
+                INSERT OR REPLACE INTO ltm_entries
+                (entry_id, content, created_at, updated_at, access_count, learning_score, tags, source_turn)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                entry.entry_id,
+                entry.content,
+                entry.created_at,
+                entry.updated_at,
+                entry.access_count,
+                entry.learning_score,
+                json_mod.dumps(entry.tags),
+                entry.source_turn,
+            ))
+        except Exception as e:
+            logger.error(f"Failed to upsert entry {entry.entry_id} to SQLite: {e}")
+
+    # SEMANTIC_SEARCH: Sync all entries to SQLite (for migration)
+    def sync_to_sqlite(self) -> int:
+        """
+        Sync all in-memory entries to SQLite database.
+        Returns the number of entries synced.
+        """
+        if not self._db:
+            return 0
+        count = 0
+        for entry in self._entries.values():
+            self._upsert_entry_to_sqlite(entry)
+            count += 1
+        return count
+
+    # SEMANTIC_SEARCH: Close database connection
+    def close(self) -> None:
+        """Close the SQLite database connection if open."""
+        if self._db:
+            self._db.close()
+            self._db = None

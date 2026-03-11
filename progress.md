@@ -223,3 +223,163 @@
 
 ## Final Report
 <!-- Written by NODE 06 -->
+
+---
+
+## Semantic Search Implementation (Phase 1-3)
+
+### Phase 1: Core Implementation
+
+#### 1.1 Embedding Module
+- [x] Create `memory/embedding.py` with Qwen3-Embedding-0.6B model
+- [x] Implement single-text and batch embedding
+- [x] Add L2 normalization for cosine similarity
+- [x] Add model caching to `~/.cache/agemem/models`
+- [x] Write unit tests for embedding module
+
+**Log:**
+- 2026-03-11: EmbeddingModule complete. Smoke test shows semantic clustering works (similarity 0.70 for similar meanings vs 0.20-0.32 for different).
+
+#### 1.2 Vector Index
+- [x] Create `memory/vector_index.py` using sqlite-vec
+- [x] Implement insert, query, delete operations
+- [x] Add Float32 serialization for BLOB storage
+- [x] Write unit tests for vector index
+
+**Log:**
+- 2026-03-11: VectorIndexModule complete. All CRUD operations tested and passing.
+
+#### 1.3 Retrieval Pipeline
+- [x] Create `memory/retrieval.py` with two-stage retrieval
+- [x] Implement semantic search → re-ranking pipeline
+- [x] Add configurable top-k and similarity thresholds
+- [x] Write unit tests for retrieval pipeline
+
+**Log:**
+- 2026-03-11: RetrievalPipeline complete. Returns most similar entries with correct ranking.
+
+#### 1.4 Schema Migrations
+- [x] Create `core/db_migrations.py` with semantic schema
+- [x] Add embedding columns to `ltm_entries` table
+- [x] Create `ltm_vec_index` virtual table
+- [x] Ensure idempotency (safe to run multiple times)
+- [x] Write migration tests
+
+**Log:**
+- 2026-03-11: Schema migrations verified idempotent. All 4 migration tests pass.
+
+#### 1.5 Integration Wiring
+- [x] Update `memory/ltm_store.py` with semantic search support
+- [x] Update `core/config.py` with semantic search config flags
+- [x] Update `agents/orchestrator.py` to pass semantic config to LTM
+- [x] Update `memory/__init__.py` with new exports
+- [x] Update `tools/__init__.py` for new tools
+- [x] Add dependencies to `pyproject.toml`
+
+**Log:**
+- 2026-03-11: All integration changes marked with `# SEMANTIC_SEARCH:` comments. Existing tests still pass.
+
+#### 1.6 Unit Tests
+- [x] Create `tests/test_semantic_search.py`
+- [x] Test embedding generation (4 tests)
+- [x] Test vector index operations (4 tests)
+- [x] Test retrieval pipeline (3 tests)
+- [x] Test schema migrations (4 tests)
+- [x] Test serialization (2 tests)
+- [x] Test full integration (2 tests)
+
+**Log:**
+- 2026-03-11: All 20 tests pass in 0.69s.
+
+---
+
+### Phase 2: Migration
+
+#### 2.1 Migration Script
+- [x] Create `scripts/migrate_existing_ltm.py`
+- [x] Implement batch processing with configurable size
+- [x] Add error handling and progress reporting
+- [x] Add dry-run mode
+
+**Log:**
+- 2026-03-11: Migration script ready for use.
+
+#### 2.2 Preload Script
+- [x] Create `scripts/preload_model.py`
+- [x] Download model to cache before first use
+
+**Log:**
+- 2026-03-11: Model preload script created.
+
+#### 2.3 Run Migration
+- [ ] Run migration on production LTM database
+- [ ] Verify embeddings in `ltm_vec_index` table
+- [ ] Spot-check semantic search results
+
+**Log:**
+- (pending)
+
+---
+
+### Phase 3: Hybrid Search Optimization
+
+#### 3.1 Hybrid Search
+- [ ] Implement hybrid scoring (semantic + lexical)
+- [ ] Add configurable weight between semantic and keyword scores
+- [ ] Add relevance threshold tuning
+
+**Log:**
+- (pending)
+
+#### 3.2 Performance Optimization
+- [ ] Benchmark search latency with large datasets
+- [ ] Consider HNSW index (vectorlite) for >100K entries
+- [ ] Add query caching if needed
+
+**Log:**
+- (pending)
+
+---
+
+### Files Created/Modified
+
+| Path | Status | Description |
+|------|--------|-------------|
+| `memory/embedding.py` | NEW | Embedding module with Qwen3-Embedding-0.6B |
+| `memory/vector_index.py` | NEW | Vector index operations using sqlite-vec |
+| `memory/retrieval.py` | NEW | Two-stage retrieval pipeline |
+| `core/db_migrations.py` | NEW | SQLite schema migrations |
+| `scripts/preload_model.py` | NEW | Model download script |
+| `scripts/migrate_existing_ltm.py` | NEW | LTM migration script |
+| `tests/test_semantic_search.py` | NEW | Unit tests (20 passing) |
+| `memory/ltm_store.py` | MODIFIED | Semantic search integration |
+| `core/config.py` | MODIFIED | Semantic search config |
+| `agents/orchestrator.py` | MODIFIED | Pass semantic config to LTM |
+| `pyproject.toml` | MODIFIED | Added dependencies |
+| `memory/__init__.py` | MODIFIED | New exports |
+| `tools/__init__.py` | MODIFIED | Tool updates |
+
+---
+
+### Dependencies Added
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| sentence-transformers | >=3.0.0 | Embedding model loading |
+| sqlite-vec | >=0.1.0 | Vector similarity search |
+| numpy | >=1.24.0 | Numerical operations |
+
+---
+
+### Quick Commands
+
+```bash
+# Run tests
+pytest tests/test_semantic_search.py -v
+
+# Preload model
+python scripts/preload_model.py
+
+# Migrate existing LTM
+python scripts/migrate_existing_ltm.py --batch-size 32
+```

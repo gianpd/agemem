@@ -98,6 +98,25 @@ class AgememConfig:
     LTM_SIMILARITY_WORDS: int = 6
     """Number of leading content words used for naive duplicate detection."""
 
+    # SEMANTIC_SEARCH: Semantic search configuration
+    ENABLE_SEMANTIC_SEARCH: bool = False
+    """Enable semantic search using vector embeddings for LTM retrieval."""
+
+    SEMANTIC_DB_FILENAME: str = "ltm_semantic.db"
+    """Filename for SQLite database with vector index within PERSIST_DIR."""
+
+    SEMANTIC_EMBEDDING_MODEL: str = "Qwen/Qwen3-Embedding-0.6B"
+    """Embedding model to use for semantic search."""
+
+    SEMANTIC_EMBEDDING_DIM: int = 1024
+    """Dimension of embeddings from the configured model."""
+
+    SEMANTIC_RETRIEVAL_MULTIPLIER: int = 3
+    """Multiplier for broad-pass retrieval (top_k * this value) before re-ranking."""
+
+    SEMANTIC_RECENCY_DECAY_RATE: float = 0.01
+    """Rate of recency decay for re-ranking (higher = faster decay)."""
+
     # ── STM eviction / FILTER ─────────────────────────────────────────────────
     STM_EVICT_THRESHOLD: float = 0.30
     """relevance_score <= this makes a message a FILTER candidate."""
