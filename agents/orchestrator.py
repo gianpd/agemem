@@ -150,11 +150,13 @@ class Orchestrator:
 
         # LTM — pass persist_path so _maybe_persist() is active
         # SEMANTIC_SEARCH: Pass semantic_db_path if semantic search is enabled
+        # QUERY_EXPANSION: Pass llm_client for query expansion
         self._ltm = ltm_store or LTMStore(
             config,
             persist_path=ltm_path,
             semantic_db_path=semantic_db_path,
             enable_semantic_search=config.ENABLE_SEMANTIC_SEARCH,
+            llm_client=self._llm,
         )
 
         # Memory agent and scorer

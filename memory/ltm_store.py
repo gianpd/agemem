@@ -39,6 +39,9 @@ from core.config import AgememConfig, DEFAULT_CONFIG
 if TYPE_CHECKING:
     import numpy as np
 
+# QUERY_EXPANSION: Import QueryExpander
+from tools.query_expansion import QueryExpander
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +54,8 @@ class LTMStore:
         # SEMANTIC_SEARCH: New optional parameters for semantic search
         semantic_db_path: Optional[Path] = None,
         enable_semantic_search: bool = False,
+        # QUERY_EXPANSION: New optional parameter for query expansion
+        llm_client: Optional[Any] = None,
     ) -> None:
         self._config = config
         self._entries: dict[str, MemoryEntry] = {}
@@ -67,6 +72,19 @@ class LTMStore:
 
         if enable_semantic_search and semantic_db_path:
             self._init_semantic_backend()
+
+        # QUERY_EXPANSION: Initialize QueryExpander if enabled
+        self._expander: Optional[QueryExpander] = None
+        if config.ENABLE_QUERY_EXPANSION and llm_client is not None:
+            self._expander = QueryExpander(
+                llm_client=llm_client,
+                model=config.MEMORY_AGENT_MODEL,
+                n_variants=config.QUERY_EXPANSION_N_VARIANTS,
+                use_ner_hints=config.QUERY_EXPANSION_USE_NER_HINTS,
+                timeout_ms=config.QUERY_EXPANSION_TIMEOUT_MS,
+                fallback_transforms=config.QUERY_EXPANSION_FALLBACK_TRANSFORMS,
+                acronym_dict=config.QUERY_EXPANSION_ACRONYM_DICT,
+            )
 
     # SEMANTIC_SEARCH: Initialize SQLite and embedding model
     def _init_semantic_backend(self) -> None:
@@ -235,12 +253,21 @@ class LTMStore:
                 entries_affected=[entry_id],
             )
 
-    def search(self, query: str, top_k: int = 5) -> list[MemoryEntry]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        expand_query: bool | None = None,
+        ner_entities: list[dict] | None = None,
+    ) -> list[MemoryEntry]:
         """
         Retrieve the top_k most relevant entries for a query.
 
         SEMANTIC_SEARCH: When semantic search is enabled, uses vector similarity.
         Falls back to token-overlap scoring when semantic search is unavailable.
+
+        QUERY_EXPANSION: When enabled, generates paraphrase variants and merges results.
 
         Scoring (semantic): cosine similarity + recency decay + learning_score.
         Scoring (fallback): TF-IDF-inspired token overlap + recency decay + learning_score.
@@ -249,12 +276,47 @@ class LTMStore:
             if not self._entries:
                 return []
 
-            # SEMANTIC_SEARCH: Use semantic search if enabled
-            if self._semantic_enabled and self._db:
-                return self._semantic_search(query, top_k)
+            # Determine effective top_k
+            effective_top_k = top_k or self._config.LTM_SEARCH_TOP_K if hasattr(self._config, 'LTM_SEARCH_TOP_K') else top_k
 
-            # Fallback: token overlap search
-            return self._token_overlap_search(query, top_k)
+            # QUERY_EXPANSION: Determine if we should expand the query
+            should_expand = (
+                expand_query
+                if expand_query is not None
+                else self._config.ENABLE_QUERY_EXPANSION
+            )
+
+            # Get query variants
+            if should_expand and self._expander is not None:
+                queries = self._expander.expand(query, ner_entities=ner_entities)
+            else:
+                queries = [query]
+
+            # Run search for each query variant and merge results
+            all_results: dict[str, tuple[MemoryEntry, float]] = {}
+
+            for q in queries:
+                if self._semantic_enabled and self._db:
+                    results = self._semantic_search_with_scores(q, top_k=effective_top_k)
+                    # Semantic search returns distance (lower is better)
+                    for entry, score in results:
+                        if entry.entry_id not in all_results or score < all_results[entry.entry_id][1]:
+                            all_results[entry.entry_id] = (entry, score)
+                else:
+                    results = self._token_overlap_search_with_scores(q, top_k=effective_top_k)
+                    # Token overlap returns similarity score (higher is better)
+                    for entry, score in results:
+                        if entry.entry_id not in all_results or score > all_results[entry.entry_id][1]:
+                            all_results[entry.entry_id] = (entry, score)
+
+            # Sort by score and return top_k entries
+            if self._semantic_enabled and self._db:
+                # Semantic search: sort by distance (ascending, lower is better)
+                merged = sorted(all_results.values(), key=lambda x: x[1])
+            else:
+                # Token overlap: sort by similarity (descending, higher is better)
+                merged = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
+            return [entry for entry, _ in merged[:effective_top_k]]
 
     # SEMANTIC_SEARCH: Semantic search implementation
     def _semantic_search(self, query: str, top_k: int) -> list[MemoryEntry]:
@@ -283,6 +345,35 @@ class LTMStore:
             logger.error(f"Semantic search failed, falling back to token overlap: {e}")
             return self._token_overlap_search(query, top_k)
 
+    # QUERY_EXPANSION: Semantic search with scores for merging
+    def _semantic_search_with_scores(self, query: str, top_k: int) -> list[tuple[MemoryEntry, float]]:
+        """Perform semantic search and return (entry, score) tuples."""
+        try:
+            from memory.retrieval import retrieve_relevant_ltm
+
+            results = retrieve_relevant_ltm(
+                db=self._db,
+                model=self._get_embedding_model(),
+                query=query,
+                top_k=top_k,
+            )
+
+            # Convert results to (MemoryEntry, score) tuples
+            entries_with_scores = []
+            for result in results:
+                entry = self._entries.get(result["entry_id"])
+                if entry:
+                    entry.access_count += 1
+                    # Use distance as score (lower is better)
+                    score = result.get("distance", 0.0)
+                    entries_with_scores.append((entry, score))
+
+            return entries_with_scores
+
+        except Exception as e:
+            logger.error(f"Semantic search failed, falling back to token overlap: {e}")
+            return self._token_overlap_search_with_scores(query, top_k)
+
     # SEMANTIC_SEARCH: Original token overlap search (renamed)
     def _token_overlap_search(self, query: str, top_k: int) -> list[MemoryEntry]:
         """
@@ -305,6 +396,29 @@ class LTMStore:
         # Increment access count for retrieved entries
         for e in results:
             e.access_count += 1
+        return results
+
+    # QUERY_EXPANSION: Token overlap search with scores for merging
+    def _token_overlap_search_with_scores(self, query: str, top_k: int) -> list[tuple[MemoryEntry, float]]:
+        """
+        Fallback retrieval using token overlap scoring, returns (entry, score) tuples.
+        """
+        query_tokens = self._tokenise(query)
+        scored: list[tuple[float, MemoryEntry]] = []
+        now = time.time()
+        for entry in self._entries.values():
+            overlap = self._overlap_score(query_tokens, entry.content)
+            # Recency: exponential decay over 7 days
+            age_days = (now - entry.updated_at) / 86_400
+            recency = math.exp(-age_days / 7)
+            score = 0.5 * overlap + 0.3 * entry.learning_score + 0.2 * recency
+            scored.append((score, entry))
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        results = [(entry, score) for score, entry in scored[:top_k]]
+        # Increment access count for retrieved entries
+        for entry, _ in results:
+            entry.access_count += 1
         return results
 
     def all_entries(self) -> list[MemoryEntry]:

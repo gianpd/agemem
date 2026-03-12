@@ -395,22 +395,25 @@ def _is_url_from_context(url: str) -> bool:
         return True
 
     for context_url in _conversation_urls:
+        # Normalize context URL for comparison
+        context_url_normalized = _normalize_url(context_url)
+
         # Exact URL match (with/without trailing slash)
-        if normalized.rstrip('/') == context_url.rstrip('/'):
+        if normalized.rstrip('/') == context_url_normalized.rstrip('/'):
             return True
 
         # Same-origin check (scheme + host must match exactly)
         # This allows fetching different paths on the same domain that appeared
         # in search results, but not arbitrary subpaths that weren't registered
-        ctx_parsed = urlparse(context_url)
+        ctx_parsed = urlparse(context_url_normalized)
         ctx_origin = f"{ctx_parsed.scheme}://{ctx_parsed.netloc}"
         if request_origin == ctx_origin:
             # Both URLs are on the same origin - allow if the path is a subpath
             # of a registered URL (e.g., if /blog/ is registered, allow /blog/post)
             # SECURITY: Prevent path traversal (../) and ensure proper subpath match
-            ctx_path = ctx_parsed.path
-            req_path = parsed.path
-            if ctx_path != '/' and req_path.startswith(ctx_path):
+            ctx_path = ctx_parsed.path.rstrip('/')  # Normalize trailing slash
+            req_path = parsed.path.rstrip('/')
+            if ctx_path != '' and req_path.startswith(ctx_path):
                 # Ensure it's a proper subpath: either exact match or continues with /
                 next_char = req_path[len(ctx_path):len(ctx_path)+1]
                 if next_char in ('', '/'):  # Exact match or proper subpath
@@ -454,6 +457,9 @@ def _html_to_safe_text(html: str) -> str:
 
     # Remove elements with suspicious CSS (hidden content)
     for tag in soup.find_all():
+        # Defensive check: tag might be None with malformed HTML
+        if tag is None:
+            continue
         style = tag.get('style', '')
         if style:
             style_normalized = style.replace(' ', '').lower()
@@ -703,7 +709,9 @@ async def fetch_url(
                     if redirect_count > FETCH_URL_MAX_REDIRECTS:
                         return f"[FETCH URL ERROR] Too many redirects (max {FETCH_URL_MAX_REDIRECTS})"
 
-                    location = response.headers.get("location", "")
+                    # Defensive check for headers
+                    headers = getattr(response, 'headers', None) or {}
+                    location = headers.get("location", "")
                     if not location:
                         return f"[FETCH URL ERROR] Redirect response missing Location header"
 
@@ -750,7 +758,9 @@ async def fetch_url(
                 )
 
             # Handle binary content (PDFs, images) if save_path provided
-            content_type = response.headers.get('content-type', '').lower()
+            # Defensive check for headers
+            headers = getattr(response, 'headers', None) or {}
+            content_type = headers.get('content-type', '').lower()
             is_binary = any(ct in content_type for ct in [
                 'application/pdf', 'image/', 'application/octet-stream',
                 'application/zip', 'application/gzip'
@@ -788,7 +798,9 @@ async def fetch_url(
         logger.error(f"[fetch_url] Connection error: {clean_url}: {e}")
         return "[FETCH URL ERROR] Could not connect to server"
     except Exception as e:
+        import traceback
         logger.error(f"[fetch_url] Unexpected error fetching {clean_url}: {e}")
+        logger.error(f"[fetch_url] Traceback:\n{traceback.format_exc()}")
         return "[FETCH URL ERROR] Request failed"
 
 
@@ -830,6 +842,9 @@ def format_web_search_results(
     urls_found = []
 
     for i, r in enumerate(results, 1):
+        # Skip None results defensively
+        if r is None:
+            continue
         title = sanitize_for_llm(r.get("title", "No title"))
         url = sanitize_for_llm(r.get("url", r.get("link", "")))
         snippet = sanitize_for_llm(r.get("snippet", r.get("description", "")))
