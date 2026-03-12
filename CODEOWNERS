@@ -1,0 +1,74 @@
+# This is a CODEOWNERS file for the AgeMem repository
+# It defines who is responsible for different parts of the codebase
+# and automatically requests reviews from these owners when files are modified
+
+# Default owners for everything in the repo
+* @gianpd
+
+# Core system files
+/core/ @gianpd
+/core/types.py @gianpd
+/core/config.py @gianpd
+
+# Memory system
+/memory/ @gianpd
+/memory/ltm_store.py @gianpd
+/memory/stm_context.py @gianpd
+/memory/embedding.py @gianpd
+/memory/retrieval.py @gianpd
+/memory/vector_index.py @gianpd
+
+# Agent system
+/agents/ @gianpd
+/agents/orchestrator.py @gianpd
+/agents/memory_agent.py @gianpd
+/agents/llm_client.py @gianpd
+/agents/learning_scorer.py @gianpd
+/agents/response_handler.py @gianpd
+
+# Triggers and rules
+/triggers/ @gianpd
+/triggers/system_rules.py @gianpd
+
+# Ingest system
+/ingest/ @gianpd
+/ingest/ingest.py @gianpd
+/ingest/gliner_labels/ @gianpd
+
+# Tools
+/tools/ @gianpd
+/tools/tool_registry.py @gianpd
+/tools/web_tools.py @gianpd
+/tools/corpus.py @gianpd
+/tools/query_expansion.py @gianpd
+
+# Prompts
+/prompts/ @gianpd
+/prompts/loader.py @gianpd
+/prompts/registry.py @gianpd
+/prompts/prompts/ @gianpd
+
+# Skills
+/skills/ @gianpd
+/skills/loader.py @gianpd
+/skills/manager.py @gianpd
+
+# Tests
+/tests/ @gianpd
+
+# Documentation
+/docs/ @gianpd
+README.md @gianpd
+CONTRIBUTING.md @gianpd
+CODE_OF_CONDUCT.md @gianpd
+LICENSE @gianpd
+
+# Configuration files
+pyproject.toml @gianpd
+uv.lock @gianpd
+.gitignore @gianpd
+
+# GitHub configuration
+.github/ @gianpd
+.github/ISSUE_TEMPLATE/ @gianpd
+.github/PULL_REQUEST_TEMPLATE.md @gianpd

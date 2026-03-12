@@ -27,6 +27,9 @@ from memory.embedding import (
     cosine_similarity,
 )
 
+# QUERY_EXPANSION: Export QueryExpander for external use
+from tools.query_expansion import QueryExpander
+
 __all__ = [
     # Vector index
     "ensure_table_exists",
@@ -45,4 +48,6 @@ __all__ = [
     "embed_text",
     "embed_batch",
     "cosine_similarity",
+    # Query expansion
+    "QueryExpander",
 ]
