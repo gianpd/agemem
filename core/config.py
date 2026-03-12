@@ -98,6 +98,13 @@ class AgememConfig:
     LTM_SIMILARITY_WORDS: int = 6
     """Number of leading content words used for naive duplicate detection."""
 
+    LTM_DEDUP_THRESHOLD: float = 0.92
+    """Cosine similarity threshold for semantic duplicate detection when embeddings enabled.
+
+    Two entries with similarity >= this value are considered duplicates.
+    Only used when semantic search is enabled.
+    """
+
     # SEMANTIC_SEARCH: Semantic search configuration
     ENABLE_SEMANTIC_SEARCH: bool = False
     """Enable semantic search using vector embeddings for LTM retrieval."""

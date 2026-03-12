@@ -299,9 +299,12 @@ class LTMStore:
                 if self._semantic_enabled and self._db:
                     results = self._semantic_search_with_scores(q, top_k=effective_top_k)
                     # Semantic search returns distance (lower is better)
-                    for entry, score in results:
-                        if entry.entry_id not in all_results or score < all_results[entry.entry_id][1]:
-                            all_results[entry.entry_id] = (entry, score)
+                    # Normalize to similarity [0, 1] where 1 is best for consistent merging
+                    for entry, distance in results:
+                        # Cosine distance is in [0, 2], convert to similarity
+                        similarity = 1.0 - (distance / 2.0)
+                        if entry.entry_id not in all_results or similarity > all_results[entry.entry_id][1]:
+                            all_results[entry.entry_id] = (entry, similarity)
                 else:
                     results = self._token_overlap_search_with_scores(q, top_k=effective_top_k)
                     # Token overlap returns similarity score (higher is better)
@@ -309,13 +312,9 @@ class LTMStore:
                         if entry.entry_id not in all_results or score > all_results[entry.entry_id][1]:
                             all_results[entry.entry_id] = (entry, score)
 
-            # Sort by score and return top_k entries
-            if self._semantic_enabled and self._db:
-                # Semantic search: sort by distance (ascending, lower is better)
-                merged = sorted(all_results.values(), key=lambda x: x[1])
-            else:
-                # Token overlap: sort by similarity (descending, higher is better)
-                merged = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
+            # Sort by similarity score (descending, higher is better)
+            # All scores are now normalized to [0, 1] similarity scale
+            merged = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
             return [entry for entry, _ in merged[:effective_top_k]]
 
     # SEMANTIC_SEARCH: Semantic search implementation
@@ -470,9 +469,29 @@ class LTMStore:
 
     def _find_similar(self, content: str) -> Optional[MemoryEntry]:
         """
-        Naive duplicate detection: compare first N words.
+        Duplicate detection: uses embedding similarity when semantic search is enabled,
+        otherwise falls back to leading-words lexical comparison.
         Returns an existing entry if it looks like the same knowledge unit.
         """
+        # SEMANTIC_DEDUP: Use embedding similarity when semantic search is enabled
+        if self._semantic_enabled and self._embedding_model is not None:
+            vec = self._generate_embedding(content)
+            if vec is not None:
+                best_id: Optional[str] = None
+                best_sim = 0.0
+                # Compare with all existing entries using cosine similarity
+                for eid, entry in self._entries.items():
+                    stored_vec = self._get_cached_embedding(eid)
+                    if stored_vec is not None:
+                        # Cosine similarity for unit vectors = dot product
+                        import numpy as np
+                        sim = float(np.dot(vec, stored_vec))
+                        if sim > best_sim:
+                            best_sim, best_id = sim, eid
+                if best_sim >= self._config.LTM_DEDUP_THRESHOLD:
+                    return self._entries[best_id]
+
+        # FALLBACK: Lexical duplicate detection using leading words
         n = self._config.LTM_SIMILARITY_WORDS
         lead = " ".join(content.split()[:n]).lower()
         for entry in self._entries.values():
@@ -480,6 +499,17 @@ class LTMStore:
             if entry_lead == lead:
                 return entry
         return None
+
+    # SEMANTIC_DEDUP: Helper to get cached embedding for an entry
+    def _get_cached_embedding(self, entry_id: str) -> Optional["np.ndarray"]:
+        """Retrieve embedding from vector index for an entry."""
+        if not self._db:
+            return None
+        try:
+            from memory.vector_index import get_embedding
+            return get_embedding(self._db, entry_id)
+        except Exception:
+            return None
 
     def _maybe_prune(self) -> None:
         """Drop entries beyond LTM_MAX_ENTRIES, lowest learning_score first."""

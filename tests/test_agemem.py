@@ -33,6 +33,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
+from pathlib import Path
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -160,6 +161,36 @@ class TestLTMStore(unittest.TestCase):
             any("Kafka" in r.content or "pipeline" in r.content for r in results),
             f"Expected Kafka entry in top-3, got: {[r.content for r in results]}"
         )
+
+    @unittest.skipUnless(
+        os.environ.get("AGEMEM_TEST_SEMANTIC") == "1",
+        "Set AGEMEM_TEST_SEMANTIC=1 to run semantic retrieval tests"
+    )
+    def test_T04c_semantic_paraphrase_recall(self):
+        """
+        Semantic search path: paraphrase recall with embeddings enabled.
+        Requires sqlite-vec and embedding model to be available.
+        """
+        import tempfile
+        db_path = Path(tempfile.mktemp(suffix=".db"))
+        try:
+            semantic_store = LTMStore(
+                self.cfg,
+                semantic_db_path=db_path,
+                enable_semantic_search=True,
+            )
+            semantic_store.add("Alice is building a Kafka data pipeline", learning_score=0.9)
+            semantic_store.add("The capital of France is Paris", learning_score=0.7)
+            semantic_store.add("Machine learning uses neural networks", learning_score=0.6)
+
+            results = semantic_store.search("what does the user work on?", top_k=3)
+            self.assertTrue(
+                any("Kafka" in r.content or "pipeline" in r.content for r in results),
+                f"Semantic path should surface Kafka entry; got: {[r.content for r in results]}"
+            )
+            semantic_store.close()
+        finally:
+            db_path.unlink(missing_ok=True)
 
     def test_T05_prune_respects_max_entries(self):
         for i in range(7):
