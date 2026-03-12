@@ -53,7 +53,7 @@ from core.config import AgememConfig, DEFAULT_CONFIG
 from memory.ltm_store import LTMStore
 from memory.stm_context import STMContext
 from triggers.system_rules import SystemRules, RuleID
-from agents.llm_client import LLMClient, ToolCallResponse
+from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
 from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
 from skills.manager import SkillManager
@@ -437,7 +437,7 @@ class Orchestrator:
                         tool_args = json.loads(tool_call.function.arguments)
                 except (json.JSONDecodeError, TypeError):
                     tool_args = {}
-                
+
                 # Check for duplicate calls (LoopGuard)
                 call = ToolCall(name=tool_name, arguments=tool_args)
                 if self._tool_tracker.record(call):
@@ -448,10 +448,10 @@ class Orchestrator:
                         relevance_score=0.0,
                     )
                     continue
-                
+
                 # Execute the tool
                 tool_result = self._execute_tool(tool_name, tool_args)
-                
+
                 # Record the tool call in ops_applied with TriggerKind.MAIN_AGENT
                 ops.append(MemoryOpResult(
                     op=MemoryOp.RETRIEVE,  # Using RETRIEVE as the closest match for tool execution
@@ -459,7 +459,7 @@ class Orchestrator:
                     trigger=TriggerKind.MAIN_AGENT,
                     detail=f"Tool '{tool_name}' executed with args: {tool_args}",
                 ))
-                
+
                 # Add assistant message with proper tool call structure
                 # This is required for the LLM to understand its own tool call
                 tool_calls_data = [{
@@ -486,7 +486,61 @@ class Orchestrator:
                 
                 # Loop back to LLM call with the tool result
                 continue
-        
+
+            except TextToolCallResponse as e:
+                # Handle text-based tool calls (for models that don't use API tool calling)
+                # This is the same logic as ToolCallResponse but for text-parsed tool calls
+                if tool_iterations >= max_tool_iterations:
+                    assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
+                    break
+
+                tool_call = e.tool_call
+                tool_name = tool_call.function.name
+                tool_call_id = tool_call.id
+                tool_args = tool_call.function.arguments
+
+                # Check for duplicate calls (LoopGuard)
+                call = ToolCall(name=tool_name, arguments=tool_args)
+                if self._tool_tracker.record(call):
+                    self._stm.add_message(
+                        role="user",
+                        content="[SYSTEM] Duplicate tool call detected. You already called this tool with the same arguments. Please try a different approach or provide a final answer.",
+                        relevance_score=0.0,
+                    )
+                    continue
+
+                # Execute the tool
+                tool_result = self._execute_tool(tool_name, tool_args)
+
+                ops.append(MemoryOpResult(
+                    op=MemoryOp.RETRIEVE,
+                    success=True,
+                    trigger=TriggerKind.MAIN_AGENT,
+                    detail=f"Tool '{tool_name}' executed with args: {tool_args}",
+                ))
+
+                tool_calls_data = [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(tool_args) if isinstance(tool_args, dict) else str(tool_args)
+                    }
+                }]
+                self._stm.add_message(
+                    role="assistant",
+                    content=None,
+                    relevance_score=0.2,
+                    tool_calls=tool_calls_data,
+                )
+                self._stm.add_message(
+                    role="tool",
+                    content=tool_result,
+                    relevance_score=0.9,
+                    tool_call_id=tool_call_id,
+                )
+                continue
+
         self._stm.add_message(role="assistant", content=assistant_text, relevance_score=0.8)
         self._stm.increment_turn()
         turn_after = self._stm.current_turn()

@@ -173,7 +173,7 @@ def load_skills_from_corpus(corpus_path: Path | str) -> list[Skill]:
     if not corpus_path.exists():
         return skills
 
-    for doc_file in corpus_path.glob("*.md"):
+    for doc_file in corpus_path.rglob("*.md"):
         try:
             content = doc_file.read_text(encoding="utf-8")
             frontmatter, body = parse_frontmatter(content)

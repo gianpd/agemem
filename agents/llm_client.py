@@ -40,6 +40,208 @@ class ToolCallResponse(Exception):
         super().__init__(f"Tool call: {tool_call.function.name}")
 
 
+class TextToolCall:
+    """Represents a tool call parsed from text (for models that don't use API tool calling)."""
+
+    def __init__(self, name: str, arguments: dict):
+        self.id = f"text_tool_{int(time.time() * 1000)}"
+        self.function = type('Function', (), {
+            'name': name,
+            'arguments': arguments if isinstance(arguments, dict) else json.loads(arguments) if isinstance(arguments, str) else {}
+        })()
+
+
+class TextToolCallResponse(Exception):
+    """Raised when a tool call is detected in text output (not via API)."""
+
+    def __init__(self, tool_call: TextToolCall):
+        self.tool_call = tool_call
+        super().__init__(f"Text tool call: {tool_call.function.name}")
+
+
+# Known tool names that the model might call
+KNOWN_TOOL_NAMES = {
+    "web_search", "fetch_url", "write_file", "ingest_document",
+    "list_documents", "search_metadata", "grep_corpus", "read_document", "read_lines"
+}
+
+
+def parse_text_tool_call(text: str) -> TextToolCall | None:
+    """
+    Parse a tool call from text output (for models that don't use API tool calling).
+
+    Detects various formats:
+    - {"tool": "name", "args": {...}}
+    - {"name": "tool_name", "arguments": {...}}
+    - {"function": {"name": "...", "arguments": {...}}}
+    - Code blocks with tool call JSON
+
+    Returns TextToolCall if found, None otherwise.
+    """
+    if not text or not text.strip():
+        return None
+
+    # Try to extract JSON from the text
+    try:
+        # First try direct parse
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Try extracting from code blocks or wrappers
+        cleaned = _strip_wrappers(text)
+        json_str = _find_json_string(cleaned)
+        if not json_str:
+            return None
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try repair
+            try:
+                repaired = _repair_json(json_str)
+                data = json.loads(repaired)
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Extract tool name and arguments from various formats
+    tool_name = None
+    tool_args = {}
+
+    # Format 1: {"tool": "name", "args": {...}} or {"tool": "name", "arguments": {...}}
+    if "tool" in data:
+        tool_name = data.get("tool")
+        tool_args = data.get("args") or data.get("arguments") or {}
+
+    # Format 2: {"name": "tool_name", "arguments": {...}}
+    elif "name" in data:
+        tool_name = data.get("name")
+        tool_args = data.get("arguments") or {}
+
+    # Format 3: {"function": {"name": "...", "arguments": {...}}}
+    elif "function" in data and isinstance(data["function"], dict):
+        func = data["function"]
+        tool_name = func.get("name")
+        tool_args = func.get("arguments") or {}
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError:
+                tool_args = {}
+
+    # Format 4: {"tool_name": {...}} where key is a known tool name
+    else:
+        for key in data:
+            if key in KNOWN_TOOL_NAMES:
+                tool_name = key
+                tool_args = data[key] if isinstance(data[key], dict) else {}
+                break
+
+    # Validate tool name
+    if not tool_name or not isinstance(tool_name, str):
+        return None
+
+    # Normalize tool name
+    tool_name = tool_name.lower().strip()
+
+    # Check if it's a known tool
+    if tool_name not in KNOWN_TOOL_NAMES:
+        return None
+
+    # Ensure arguments is a dict
+    if not isinstance(tool_args, dict):
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError:
+                tool_args = {}
+        else:
+            tool_args = {}
+
+    return TextToolCall(name=tool_name, arguments=tool_args)
+
+
+def detect_text_tool_calls(text: str) -> list[TextToolCall]:
+    """
+    Detect all tool calls in text output.
+
+    Handles multiple tool calls in a single response.
+    Returns a list of TextToolCall objects found.
+    """
+    if not text or not text.strip():
+        return []
+
+    calls = []
+
+    # First, try to find all JSON objects using brace matching
+    # This handles nested objects correctly
+    def find_all_json_objects(s: str) -> list[str]:
+        """Find all JSON objects in a string using brace matching."""
+        objects = []
+        i = 0
+        while i < len(s):
+            if s[i] == '{':
+                # Found start of object, find matching end
+                depth = 0
+                in_string = False
+                escape_next = False
+                start = i
+                for j in range(i, len(s)):
+                    c = s[j]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if c == '\\' and in_string:
+                        escape_next = True
+                        continue
+                    if c == '"':
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            objects.append(s[start:j + 1])
+                            i = j + 1
+                            break
+                else:
+                    i += 1
+            else:
+                i += 1
+        return objects
+
+    # Find all JSON objects in the text
+    json_objects = find_all_json_objects(text)
+
+    for json_str in json_objects:
+        call = parse_text_tool_call(json_str)
+        if call:
+            calls.append(call)
+
+    # Also check for arrays of tool calls
+    if '"tool_calls"' in text or '"tools"' in text:
+        try:
+            cleaned = _strip_wrappers(text)
+            json_str = _find_json_string(cleaned)
+            if json_str:
+                data = json.loads(json_str)
+                if isinstance(data, dict):
+                    tc_list = data.get("tool_calls") or data.get("tools") or []
+                    if isinstance(tc_list, list):
+                        for tc in tc_list:
+                            if isinstance(tc, dict):
+                                call = parse_text_tool_call(json.dumps(tc))
+                                if call:
+                                    calls.append(call)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return calls
+
+
 class JSONParseError(Exception):
     """Raised when JSON cannot be extracted from LLM output."""
 
@@ -359,8 +561,18 @@ class LLMClient:
                 tool_calls = getattr(message, "tool_calls", None)
                 if isinstance(tool_calls, list) and len(tool_calls) > 0:
                     raise ToolCallResponse(tool_calls[0])
-                
-                return message.content or ""
+
+                content = message.content or ""
+
+                # Check for text-based tool calls (for models that don't use API tool calling)
+                # This handles models like GLM-5 that output tool calls as JSON in text
+                if tools:
+                    text_tool_calls = detect_text_tool_calls(content)
+                    if text_tool_calls:
+                        # Raise for the first detected tool call
+                        raise TextToolCallResponse(text_tool_calls[0])
+
+                return content
             except Exception as exc:
                 # Don't retry on tool calls - let them propagate
                 if isinstance(exc, ToolCallResponse):

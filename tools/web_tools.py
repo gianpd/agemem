@@ -110,7 +110,7 @@ tool_definitions = [
             "name": "fetch_url",
             "description": (
                 "Fetch content from a URL. SECURITY RESTRICTED: Only fetches URLs that appeared "
-                "in previous web_search results, user messages, or tool outputs in this conversation. "
+                "in previous web_search results, user messages, or tool/skills outputs in this conversation. "
                 "HTTPS only. Content is sanitized to prevent prompt injection. "
                 "Returns text content for HTML/JSON/API responses, or saves binary files (PDFs) to disk. "
                 "Max 500KB. Use this AFTER web_search to retrieve full paper content or API data."
@@ -120,7 +120,7 @@ tool_definitions = [
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "URL to fetch. Must be from conversation context (web_search results, previous tool outputs, or user messages). HTTPS only."
+                        "description": "URL to fetch. Must be from conversation context (web_search results, previous tool outputs, skills, or user messages). HTTPS only."
                     },
                     "max_length": {
                         "type": "integer",
