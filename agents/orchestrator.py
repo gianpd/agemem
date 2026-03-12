@@ -34,6 +34,7 @@ Acceptance criteria mapping
 
 from __future__ import annotations
 
+import re 
 import json
 import time
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ from agents.learning_scorer import LearningScorer
 from agents.response_handler import ResponseHandler
 from skills.manager import SkillManager
 
+import logging
 
 # ── Tool Call Tracking (LoopGuard) ───────────────────────────────────────────
 
@@ -388,10 +390,20 @@ class Orchestrator:
         ops.extend(overflow_ops)
 
         # ── 1b. Retrieve relevant LTM entries into STM ───────────────────────
-        relevant = self._ltm.search(user_input, top_k=3)
+        relevant = self._ltm.search(user_input, top_k=5)
         if relevant:
             retrieve_op = self._stm.retrieve(relevant, trigger=TriggerKind.SYSTEM_RULE)
             ops.append(retrieve_op)
+        else:
+            # LTM empty — search corpus and inject directly into STM (no duplication)
+            corpus_context = self._search_corpus_for_context(user_input)
+            if corpus_context:
+                self._stm.add_message(
+                    role="system",
+                    content=f"[CORPUS CONTEXT]\n{corpus_context}",
+                    relevance_score=0.9,
+                    is_pinned=False,
+                )
 
         # ── 1c. Detect and inject relevant skills ──────────────────────────────
         skills = self._skill_manager.detect_skills(user_input)
@@ -563,12 +575,13 @@ class Orchestrator:
                 continue
 
         self._stm.add_message(role="assistant", content=assistant_text, relevance_score=0.8)
-        self._stm.increment_turn()
-        turn_after = self._stm.current_turn()
 
         # Post-response overflow guard: the assistant reply may have pushed us over
         post_ops = self._stm.force_fit()
         ops.extend(post_ops)
+
+        self._stm.increment_turn()
+        turn_after = self._stm.current_turn()
 
         # ── 3a. Collect learning feedback ─────────────────────────────────────
         feedback: Optional[LearningFeedback] = None
@@ -694,6 +707,75 @@ class Orchestrator:
         """Clear all LTM entries from memory and disk."""
         self._ltm._entries.clear()
         self._ltm._maybe_persist()
+
+    def _search_corpus_for_context(self, query: str) -> Optional[str]:
+        """
+        Search corpus files and return matching content for STM injection.
+
+        This method searches the corpus without duplicating data into LTM.
+        Results are injected directly into STM as ephemeral context.
+
+        Args:
+            query: The user query to search for
+
+        Returns:
+            Formatted corpus content or None if no matches
+        """
+        from tools.corpus import grep_corpus, read_document
+
+        # Search corpus for matches
+        try:
+            grep_results = grep_corpus(query, context_lines=3)
+        except Exception:
+            return None
+
+        if not grep_results or "No matches found" in grep_results:
+            return None
+
+        # Extract doc_ids from grep results
+        doc_ids = set()
+        for line in grep_results.split('\n'):
+            if ': ' in line and not line.startswith('[TOOL'):
+                # Extract doc_id from path like "corpus/test1_0922ba.md:..."
+                import re
+                match = re.search(r'corpus/([^.]+)\.md:', line)
+                if match:
+                    doc_ids.add(match.group(1))
+
+        if not doc_ids:
+            return None
+
+        # Build context from matching documents
+        context_parts = []
+        for doc_id in list(doc_ids)[:3]:  # Limit to top 3 docs
+            try:
+                content = read_document(doc_id)
+                if not content or content.startswith("Error:"):
+                    continue
+
+                # Strip YAML frontmatter
+                if content.startswith('---'):
+                    parts = content.split('---', 2)
+                    if len(parts) >= 3:
+                        content_body = parts[2].strip()
+                    else:
+                        content_body = content
+                else:
+                    content_body = content
+
+                # Truncate if too long
+                if len(content_body) > 3000:
+                    content_body = content_body[:3000] + "\n... [truncated]"
+
+                context_parts.append(f"--- Document: {doc_id} ---\n{content_body}")
+
+            except Exception:
+                continue
+
+        if not context_parts:
+            return None
+
+        return "\n\n".join(context_parts)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

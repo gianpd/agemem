@@ -291,6 +291,169 @@ legal:
     - obligations
 
 # ═══════════════════════════════════════════════════════════════
+# Built-in: Finance (Financial Reports, Filings & Market Data)
+# ═══════════════════════════════════════════════════════════════
+finance:
+  description: "Financial documents, earnings reports, SEC filings, and market analysis"
+  labels:
+    # Base
+    - person
+    - organization
+    - date
+    - financial value
+    - location
+    # Instruments & Securities
+    - stock ticker
+    - security type
+    - bond type
+    - derivative type
+    - cryptocurrency
+    - commodity
+    # Metrics & Figures
+    - revenue
+    - earnings
+    - profit margin
+    - market capitalization
+    - stock price
+    - exchange rate
+    - interest rate
+    - financial ratio
+    - currency
+    - percentage
+    # Markets & Trading
+    - stock exchange
+    - market index
+    - market sector
+    - trading volume
+    # Institutions
+    - bank
+    - central bank
+    - regulatory body
+    - rating agency
+    - financial institution
+    # Corporate Events
+    - merger or acquisition
+    - initial public offering
+    - dividend
+    - share buyback
+    - earnings call
+    - fiscal quarter
+    - fiscal year
+    # Risk & Ratings
+    - credit rating
+    - risk factor
+    - investment recommendation
+    - analyst target price
+    # Regulatory
+    - SEC filing type
+    - accounting standard
+    - tax regulation
+    - compliance requirement
+    # Documents
+    - financial report type
+    - audit firm
+    # Transactions
+    - transaction type
+    - payment method
+    - account type
+  label_map:
+    # Base
+    person: people
+    organization: orgs
+    date: dates
+    financial value: values
+    location: locations
+    # Instruments
+    stock ticker: tickers
+    security type: securities
+    bond type: securities
+    derivative type: derivatives
+    cryptocurrency: crypto
+    commodity: commodities
+    # Metrics
+    revenue: financials
+    earnings: financials
+    profit margin: financials
+    market capitalization: financials
+    stock price: prices
+    exchange rate: prices
+    interest rate: rates
+    financial ratio: ratios
+    currency: currencies
+    percentage: percentages
+    # Markets
+    stock exchange: exchanges
+    market index: indices
+    market sector: sectors
+    trading volume: volumes
+    # Institutions
+    bank: institutions
+    central bank: institutions
+    regulatory body: regulators
+    rating agency: institutions
+    financial institution: institutions
+    # Corporate Events
+    merger or acquisition: corporate_events
+    initial public offering: corporate_events
+    dividend: corporate_events
+    share buyback: corporate_events
+    earnings call: corporate_events
+    fiscal quarter: periods
+    fiscal year: periods
+    # Risk
+    credit rating: ratings
+    risk factor: risks
+    investment recommendation: recommendations
+    analyst target price: prices
+    # Regulatory
+    SEC filing type: filings
+    accounting standard: standards
+    tax regulation: regulations
+    compliance requirement: regulations
+    # Documents
+    financial report type: reports
+    audit firm: institutions
+    # Transactions
+    transaction type: transactions
+    payment method: payment_methods
+    account type: account_types
+  buckets:
+    - people
+    - orgs
+    - dates
+    - values
+    - locations
+    - tickers
+    - securities
+    - derivatives
+    - crypto
+    - commodities
+    - financials
+    - prices
+    - rates
+    - ratios
+    - currencies
+    - percentages
+    - exchanges
+    - indices
+    - sectors
+    - volumes
+    - institutions
+    - regulators
+    - corporate_events
+    - periods
+    - ratings
+    - risks
+    - recommendations
+    - filings
+    - standards
+    - regulations
+    - reports
+    - transactions
+    - payment_methods
+    - account_types
+
+# ═══════════════════════════════════════════════════════════════
 # Custom: Example - Medical Documents
 # ═══════════════════════════════════════════════════════════════
 medical:
