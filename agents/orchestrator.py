@@ -247,6 +247,7 @@ class Orchestrator:
 
         Currently supported:
         - web_search: Search the web for current information
+        - fetch_url: Fetch content from a URL (HTML, JSON, PDF, etc.)
         - write_file: Write content to a file
         - ingest_document: Ingest a markdown file into the corpus
         - list_documents: List all ingested documents
@@ -254,8 +255,6 @@ class Orchestrator:
         - grep_corpus: Full-text search across all documents
         - read_document: Read full document content
         - read_lines: Read specific lines from a document
-        - commodity_price: Fetch current commodity prices (gold, silver, oil, etc.)
-        - commodity_history: Fetch historical commodity price data
 
         Returns the tool result as a string.
         """
@@ -349,6 +348,16 @@ class Orchestrator:
                 return read_lines(doc_id, start_line, end_line)
             except Exception as e:
                 return f"[TOOL ERROR] read_lines failed: {e}"
+
+        if name == "fetch_url":
+            try:
+                from tools.web_tools import fetch_url_tool
+                url = arguments.get("url", "")
+                max_length = arguments.get("max_length", 10000)
+                save_path = arguments.get("save_path")
+                return fetch_url_tool(url, max_length, save_path)
+            except Exception as e:
+                return f"[TOOL ERROR] fetch_url failed: {e}"
 
         return f"[TOOL ERROR] Unknown tool: {name}"
 
