@@ -193,6 +193,29 @@ class AgememConfig:
     alpha_api_key: str = field(default_factory=lambda: os.getenv("ALPHA_VANTAGE_API_KEY", ""))
     """Alpha Vantage API key for commodity price data."""
 
+    # ── Query Expansion ───────────────────────────────────────────────────────
+    ENABLE_QUERY_EXPANSION: bool = False
+    """Enable query expansion for LTM retrieval. Opt-in, safe default."""
+
+    QUERY_EXPANSION_N_VARIANTS: int = 3
+    """Total queries including original. Default: 3 (original + 2 variants)."""
+
+    QUERY_EXPANSION_USE_NER_HINTS: bool = True
+    """Inject GLiNER entities into expansion prompt for better grounding."""
+
+    QUERY_EXPANSION_TIMEOUT_MS: int = 2000
+    """LLM timeout in milliseconds before falling back to regex expansion."""
+
+    QUERY_EXPANSION_FALLBACK_TRANSFORMS: list[str] = field(
+        default_factory=lambda: ["nominalize", "add_how_to"]
+    )
+    """Enabled fallback transform names when LLM is unavailable."""
+
+    QUERY_EXPANSION_ACRONYM_DICT: dict[str, str] = field(
+        default_factory=dict
+    )
+    """User-supplied acronym expansion dictionary, e.g. {"LTM": "long term memory"}."""
+
     @property
     def SYSTEM_PROMPT_HEADER(self) -> str:
         """Get the main system prompt from the registry."""

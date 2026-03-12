@@ -58,6 +58,7 @@ from core.types import (
 )
 from core.config import AgememConfig, DEFAULT_CONFIG
 from agents.llm_client import LLMClient
+from agents.response_handler import ResponseHandler
 
 
 def _get_memory_agent_system_prompt() -> str:
@@ -120,6 +121,7 @@ class MemoryAgent:
     ) -> None:
         self._llm = llm
         self._config = config
+        self._response_handler = ResponseHandler(llm, max_retries=2, enable_validation=True)
 
     def review(
         self,
@@ -135,7 +137,7 @@ class MemoryAgent:
         """
         prompt = self._build_prompt(recent_messages, ltm_entries, feedback)
         try:
-            raw = self._llm.chat_json(
+            raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=[
                     {"role": "system", "content": _get_memory_agent_system_prompt()},
                     {"role": "user",   "content": prompt},
@@ -143,8 +145,12 @@ class MemoryAgent:
                 model=self._config.MEMORY_AGENT_MODEL,
                 max_tokens=self._config.MEMORY_AGENT_MAX_TOKENS,
             )
+            # Log response quality
+            if metrics.quality_score < 0.8:
+                print(f"[DEBUG] MemoryAgent low quality response: score={metrics.quality_score:.2f}", flush=True)
             return MemoryAgentDecision.from_dict(raw)
         except Exception as exc:
+            print(f"[DEBUG] MemoryAgent review failed: {exc}", flush=True)
             return MemoryAgentDecision(
                 ltm_operations=[],
                 context_relevance={},
@@ -169,14 +175,19 @@ class MemoryAgent:
             "Be concise.\n\n" + formatted
         )
         try:
-            return self._llm.chat(
+            response, metrics = self._response_handler.chat_with_recovery(
                 messages=[{"role": "user", "content": prompt}],
                 model=self._config.MEMORY_AGENT_MODEL,
                 max_tokens=512,
                 temperature=0.1,
             )
+            # Log response quality
+            if metrics.quality_score < 0.8:
+                print(f"[DEBUG] MemoryAgent summarise low quality: score={metrics.quality_score:.2f}", flush=True)
+            return response
         except Exception as exc:
             # Graceful fallback: return truncated original
+            print(f"[DEBUG] MemoryAgent summarise failed: {exc}", flush=True)
             return f"[Summary unavailable: {exc}] " + formatted[:300]
 
     # ── Prompt construction ───────────────────────────────────────────────────

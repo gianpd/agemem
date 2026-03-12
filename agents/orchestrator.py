@@ -56,6 +56,7 @@ from triggers.system_rules import SystemRules, RuleID
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
 from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
+from agents.response_handler import ResponseHandler
 from skills.manager import SkillManager
 
 
@@ -163,6 +164,9 @@ class Orchestrator:
         self._memory_agent = MemoryAgent(llm, config)
         self._scorer = LearningScorer(llm, config)
         self._rules = SystemRules(config)
+        
+        # Response handler for enhanced error recovery
+        self._response_handler = ResponseHandler(llm, max_retries=2, enable_validation=True)
 
         # STM — restore from disk if available
         self._stm = stm_context or STMContext(
@@ -412,14 +416,17 @@ class Orchestrator:
             tool_iterations += 1
 
             try:
-                # Call LLM with tools if available
-                assistant_text = self._llm.chat(
+                # Call LLM with tools if available using enhanced response handler
+                assistant_text, metrics = self._response_handler.chat_with_recovery(
                     messages=messages,
                     max_tokens=self._config.DEFAULT_MAX_TOKENS,
                     temperature=self._config.DEFAULT_TEMPERATURE,
                     tools=self._tools if self._tools else None,
                 )
                 # If we get here, no tool call was made - we have a text response
+                # Log response quality metrics
+                if metrics.quality_score < 0.8:
+                    print(f"[DEBUG] Low quality response detected: score={metrics.quality_score:.2f}, type={metrics.response_type.value}", flush=True)
                 break
 
             except ToolCallResponse as e:
@@ -500,6 +507,18 @@ class Orchestrator:
                 tool_name = tool_call.function.name
                 tool_call_id = tool_call.id
                 tool_args = tool_call.function.arguments
+
+                # Validate tool call arguments
+                validation = self._response_handler.validate_tool_call(tool_call)
+                if not validation.is_valid:
+                    print(f"[DEBUG] Invalid text tool call: {'; '.join(validation.errors)}", flush=True)
+                    # Add error message and continue
+                    self._stm.add_message(
+                        role="user",
+                        content=f"[SYSTEM] Tool call validation failed: {'; '.join(validation.errors)}. Please try again with valid arguments.",
+                        relevance_score=0.0,
+                    )
+                    continue
 
                 # Check for duplicate calls (LoopGuard)
                 call = ToolCall(name=tool_name, arguments=tool_args)

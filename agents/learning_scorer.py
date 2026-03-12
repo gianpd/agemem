@@ -26,6 +26,7 @@ from typing import Optional
 from core.types import LearningFeedback
 from core.config import AgememConfig, DEFAULT_CONFIG
 from agents.llm_client import LLMClient
+from agents.response_handler import ResponseHandler
 
 
 _LEARNING_PROMPT = """\
@@ -64,6 +65,7 @@ class LearningScorer:
         self._llm = llm
         self._config = config
         self._turns_since_last_collect: int = 0
+        self._response_handler = ResponseHandler(llm, max_retries=2, enable_validation=True)
 
     def should_collect(self, turn_index: int) -> bool:
         """Returns True if it is time to ask for feedback this turn."""
@@ -86,7 +88,7 @@ class LearningScorer:
         ]
         print(f"[DEBUG] LearningScorer: Collecting feedback at turn {turn_index}...", flush=True)
         try:
-            raw = self._llm.chat_json(
+            raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=probe_messages,
                 max_tokens=200,
             )
@@ -112,4 +114,9 @@ class LearningScorer:
             )
         except Exception as e:
             print(f"[DEBUG] LearningScorer.collect() failed: {e}", flush=True)
+            # Log metrics for debugging
+            if hasattr(self._response_handler, 'get_metrics'):
+                recent_metrics = self._response_handler.get_metrics()[-3:]  # Last 3 attempts
+                for m in recent_metrics:
+                    print(f"[DEBUG] Response metrics: type={m.response_type.value}, latency={m.latency_ms:.0f}ms, quality={m.quality_score:.2f}", flush=True)
             return None
