@@ -470,35 +470,46 @@ class LTMStore:
     def _find_similar(self, content: str) -> Optional[MemoryEntry]:
         """
         Duplicate detection: uses embedding similarity when semantic search is enabled,
-        otherwise falls back to leading-words lexical comparison.
-        Returns an existing entry if it looks like the same knowledge unit.
+        otherwise uses full-content Jaccard overlap.
+
+        SEMANTIC PATH: Uses cosine similarity on embeddings (requires sqlite-vec).
+        OVERLAP PATH: Uses Jaccard similarity on tokenised content.
+
+        Known limitations:
+        - Overlap path cannot detect paraphrases (BUG2a) — requires semantic search.
+        - Overlap path uses token overlap threshold, not semantic understanding.
         """
         # SEMANTIC_DEDUP: Use embedding similarity when semantic search is enabled
-        if self._semantic_enabled and self._embedding_model is not None:
+        if self._semantic_enabled and self._db is not None:
             vec = self._generate_embedding(content)
             if vec is not None:
                 best_id: Optional[str] = None
                 best_sim = 0.0
-                # Compare with all existing entries using cosine similarity
                 for eid, entry in self._entries.items():
                     stored_vec = self._get_cached_embedding(eid)
                     if stored_vec is not None:
-                        # Cosine similarity for unit vectors = dot product
                         import numpy as np
                         sim = float(np.dot(vec, stored_vec))
                         if sim > best_sim:
                             best_sim, best_id = sim, eid
                 if best_sim >= self._config.LTM_DEDUP_THRESHOLD:
                     return self._entries[best_id]
+                return None
 
-        # FALLBACK: Lexical duplicate detection using leading words
-        n = self._config.LTM_SIMILARITY_WORDS
-        lead = " ".join(content.split()[:n]).lower()
+        # OVERLAP_FALLBACK: Use full-content Jaccard similarity.
+        # This fixes BUG2b (false-positive prefix collapse) by comparing entire
+        # content rather than just leading words. BUG2a (paraphrase detection)
+        # remains a known limitation of the overlap path.
+        query_tokens = self._tokenise(content)
+        best_entry: Optional[MemoryEntry] = None
+        best_score = 0.0
         for entry in self._entries.values():
-            entry_lead = " ".join(entry.content.split()[:n]).lower()
-            if entry_lead == lead:
-                return entry
-        return None
+            score = self._overlap_score(query_tokens, entry.content)
+            if score > best_score:
+                best_score, best_entry = score, entry
+
+        threshold = getattr(self._config, 'LTM_DEDUP_OVERLAP_THRESHOLD', 0.7)
+        return best_entry if best_score >= threshold else None
 
     # SEMANTIC_DEDUP: Helper to get cached embedding for an entry
     def _get_cached_embedding(self, entry_id: str) -> Optional["np.ndarray"]:

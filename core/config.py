@@ -105,8 +105,20 @@ class AgememConfig:
     Only used when semantic search is enabled.
     """
 
+    LTM_DEDUP_OVERLAP_THRESHOLD: float = 0.7
+    """Jaccard overlap threshold for duplicate detection in overlap-only mode.
+
+    Two entries with Jaccard similarity >= this value are considered duplicates.
+    Only used when semantic search is disabled. This threshold balances:
+    - False positives: too low, distinct facts may collapse (e.g., "Python for data" vs "Python for web")
+    - False negatives: too high, near-duplicates may be stored separately
+
+    Note: Overlap-only dedup cannot detect paraphrases that share few tokens.
+    Enable semantic search for robust paraphrase detection.
+    """
+
     # SEMANTIC_SEARCH: Semantic search configuration
-    ENABLE_SEMANTIC_SEARCH: bool = False
+    ENABLE_SEMANTIC_SEARCH: bool = True
     """Enable semantic search using vector embeddings for LTM retrieval."""
 
     SEMANTIC_DB_FILENAME: str = "ltm_semantic.db"

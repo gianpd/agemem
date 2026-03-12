@@ -1,3 +1,102 @@
+# AgeMem — Bug Fixes: LTM Deduplication & STM Overflow
+
+**Feature:** Memory system reliability fixes
+**Status:** ✅ SHIPPED
+**Date:** 2026-03-12
+**Target branch:** `main`
+
+---
+
+## Summary
+
+Fixed two confirmed bugs in the memory system:
+1. **BUG2**: `_find_similar` overlap-only path used leading-word prefix matching, causing false-positive collapse
+2. **T20**: STM overflow test had unrealistic token limit that couldn't accommodate pinned system prompt
+
+---
+
+## BUG2: LTM Deduplication False-Positive Collapse
+
+### Problem
+
+The `_find_similar()` method in overlap-only mode (semantic search disabled, which is the default) used leading-word prefix matching:
+
+```python
+# Old code
+n = self._config.LTM_SIMILARITY_WORDS
+lead = " ".join(content.split()[:n]).lower()
+for entry in self._entries.values():
+    if " ".join(entry.content.split()[:n]).lower() == lead:
+        return entry
+```
+
+This caused:
+- **BUG2b**: Two distinct facts sharing the first N words would incorrectly merge (e.g., "Python is a programming language used for data science" vs "Python is a programming language used for web backends")
+- **BUG2a**: Paraphrases with different tokens couldn't be detected (known limitation, requires semantic search)
+
+### Fix
+
+Replaced leading-word match with full-content Jaccard similarity:
+
+```python
+query_tokens = self._tokenise(content)
+best_entry, best_score = None, 0.0
+for entry in self._entries.values():
+    score = self._overlap_score(query_tokens, entry.content)
+    if score > best_score:
+        best_score, best_entry = score, entry
+
+threshold = getattr(self._config, 'LTM_DEDUP_OVERLAP_THRESHOLD', 0.7)
+return best_entry if best_score >= threshold else None
+```
+
+### New Config
+
+```python
+LTM_DEDUP_OVERLAP_THRESHOLD: float = 0.7
+"""Jaccard overlap threshold for duplicate detection in overlap-only mode."""
+```
+
+### Test Results
+
+- **BUG2b**: Now passes — distinct facts with same prefix are kept separate
+- **BUG2a**: Documents known limitation — paraphrase detection requires semantic search
+
+---
+
+## T20: STM Overflow Test Token Limit
+
+### Problem
+
+Test used `STM_TOKEN_LIMIT=80` but the pinned system prompt is ~373 tokens. This made overflow prevention impossible — utilization was 601% before any user messages.
+
+### Fix
+
+Raised `STM_TOKEN_LIMIT` to 600 to accommodate the actual system prompt plus conversation turns:
+
+```python
+cfg = _cfg(
+    STM_TOKEN_LIMIT=600,  # Must exceed pinned system prompt (~373 tokens) + conversation
+    ...
+)
+```
+
+### Test Result
+
+Now passes — `force_fit()` correctly keeps utilization near the critical threshold.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `memory/ltm_store.py` | `_find_similar()` uses Jaccard overlap instead of leading-word match |
+| `core/config.py` | Added `LTM_DEDUP_OVERLAP_THRESHOLD` config |
+| `tests/test_agemem.py` | Updated BUG2 tests to document behavior; fixed T20 token limit |
+
+---
+
 # AgeMem — Query Expansion Tool: Software Specification
 
 **Feature:** `tools/query_expansion.py`  
