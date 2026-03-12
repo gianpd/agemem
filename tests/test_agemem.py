@@ -144,6 +144,22 @@ class TestLTMStore(unittest.TestCase):
         self.assertTrue(len(results) >= 1)
         # Most relevant should mention Python
         self.assertIn("Python", results[0].content)
+    
+    def test_T04b_search_paraphrase_recall(self):
+        """
+        Retrieval quality under paraphrase: query shares no tokens with stored fact.
+        This test is EXPECTED TO FAIL with the current overlap scorer.
+        It documents the known limitation and will pass once embeddings are added.
+        """
+        self.store.add("Alice is building a Kafka data pipeline", learning_score=0.9)
+        self.store.add("The capital of France is Paris", learning_score=0.7)
+        self.store.add("Machine learning uses neural networks", learning_score=0.6)
+
+        results = self.store.search("what does the user work on?", top_k=3)
+        self.assertTrue(
+            any("Kafka" in r.content or "pipeline" in r.content for r in results),
+            f"Expected Kafka entry in top-3, got: {[r.content for r in results]}"
+        )
 
     def test_T05_prune_respects_max_entries(self):
         for i in range(7):
