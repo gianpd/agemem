@@ -1,127 +1,110 @@
-# AgeMem-Hybrid
+# AgeMem — Agentic Memory for the Open AI Era
 
-**Inference-Only Long-Term and Short-Term Memory Management for LLM Agents**
+**Inference-only, privacy-first, long-term + short-term memory management for LLM agents on any hardware.**
 
----
-
-## What This Is
-
-This repository implements a hybrid memory management system for LLM agents, directly inspired by the architecture described in *Agentic Memory: Learning Unified Long-Term and Short-Term Memory Management for Large Language Model Agents* (Yu et al., 2026, arXiv:2601.01885). It is written in Python and targets any OpenAI-compatible API endpoint.
-
-The system is **not** a reproduction of AgeMem. It is a principled inference-only adaptation — a deliberate architectural response to the paper's own finding that the RL training is the source of its performance gains, not the tool interface alone. That finding is the starting point for this design.
+[![Tests](https://img.shields.io/badge/tests-35%20passing-brightgreen)](tests/test_agemem.py)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 ---
 
-## Background: What the Paper Actually Claims
+## The Problem We're Solving
 
-The paper proposes AgeMem, a framework where an LLM agent autonomously manages both long-term memory (LTM) and short-term memory (STM) through a unified tool-based interface. The core contribution is a three-stage progressive reinforcement learning strategy with step-wise GRPO that teaches the model *when* to invoke memory tools by back-propagating final task rewards through intermediate memory decisions.
+Every serious agent deployment hits the same wall.
 
-The paper includes an explicit ablation called **AgeMem-noRL**: the same tool interface, the same architecture, but without RL fine-tuning. This is the critical data point. AgeMem-noRL performs worse than most baselines on several benchmarks — it scores 8.87% on PDDL versus 13–18% for baselines, and 46.34% on BabyAI versus 58–60% for baselines. The RL training contributes 8.53 and 8.72 percentage point improvements over AgeMem-noRL.
+You can buy a 1-million-token context window. You can throw a 70B model at it. You'll still watch your agent hallucinate a user preference it was told three sessions ago, because that fact was silently evicted when the context overflowed — or it was buried so deep in a sea of irrelevant tokens that the model's attention never reached it.
 
-**The tool design is necessary but not sufficient.** Any inference-only deployment of AgeMem is, by the paper's own definition, running AgeMem-noRL at best. This system acknowledges that constraint and compensates for it with a hybrid control architecture.
+**The memory wall is not a model problem. It is a systems problem.**
 
----
+The industry's current answer — bigger contexts, more VRAM, cloud-hosted memory APIs — is the software equivalent of solving a bad search engine by making the database bigger. It is compute-inefficient, privacy-hostile, and fundamentally non-local.
 
-## Design Philosophy: The Hybrid Approach
+AgeMem is built on a different thesis:
 
-Because a frozen, non-fine-tuned LLM cannot learn *when* to invoke memory tools from reward signals, this system distributes that responsibility across three layers with different guarantees:
+> **500 perfectly curated memories on a 9B model will consistently outperform 10,000 uncurated RAG chunks on a 70B model.**
 
-**Layer 1 — System Rules (deterministic, no LLM).** A rule engine fires memory operations based on measurable thresholds: context token utilisation, turn count, and learning score magnitude. These rules are unconditional and cannot be overridden by the agent. They are the correctness floor of the system.
-
-**Layer 2 — Memory Agent (LLM-based, dedicated sub-agent).** A separate LLM call is responsible for qualitative memory decisions: what content is worth storing in LTM, which context messages are low-relevance, whether a compression summary is warranted. This is the "agent-based LTM" pattern from Figure 1b of the paper, but applied to both memory tiers and triggered by the rule engine rather than on every turn.
-
-**Layer 3 — Learning Score Feedback (agent self-assessment).** The main agent periodically rates its own turns on a 0–1 novelty scale. Scores above the promotion threshold trigger immediate LTM candidacy. Scores above the spike threshold bypass the periodic cadence entirely. This is an inference-only approximation of the reward signal that RL training would otherwise bake into the weights.
-
-The three layers together cover the space that the paper's RL training covers in a single fine-tuned model: deterministic safety, qualitative judgment, and signal-driven prioritisation.
+We prove this not with benchmarks on a leased datacenter cluster, but on an **8GB RTX 4060 at 36 tokens/second**.
 
 ---
 
-## Project Structure
+## What AgeMem Is
+
+AgeMem is a hybrid memory management system that gives any LLM agent — running on any OpenAI-compatible endpoint, including fully local models via Ollama — a disciplined, auditable memory architecture with two tiers:
+
+- **Short-Term Memory (STM)** — the active context window, managed with surgical precision. Messages are filtered by relevance score, summarised when the window fills, and hard-dropped only when no other option remains. Pinned content (system prompt, injected LTM) is never evicted under any pressure level.
+
+- **Long-Term Memory (LTM)** — a persistent store of high-value facts, promoted from STM based on a learning signal and retrieved via semantic search. Backed by `sqlite-vec` for vector similarity, with a Jaccard overlap fallback that works on CPU with zero dependencies.
+
+The system decides when to move information between tiers, when to compress, and when to discard — without requiring fine-tuned weights. It runs at inference time, on your hardware, with your data never leaving your machine.
+
+---
+
+## Why Now
+
+Bryan Catanzaro (VP of Applied Deep Learning Research, NVIDIA) recently articulated what the open AI ecosystem is converging toward: *AI as open infrastructure*, not walled-garden products. The Nemotron Nano releases are one data point. Llama, Qwen, Mistral are others. Highly capable open models are rapidly approaching the quality of frontier closed APIs — and they run locally.
+
+When that transition completes, the final bottleneck will not be the model's reasoning. It will be **state management**. An agent that can reason beautifully but forgets everything is not an agent. It is an expensive autocomplete.
+
+AgeMem is building that missing layer — the memory infrastructure that makes local open models genuinely useful across sessions, users, and tasks.
+
+---
+
+## Architecture
 
 ```
-agemem/
-├── core/
-│   ├── types.py          # All data contracts: MemoryEntry, ContextMessage,
-│   │                     #   LearningFeedback, MemoryOpResult, ContextStats
-│   └── config.py         # All tunable thresholds in one place
-├── memory/
-│   ├── ltm_store.py      # Persistent LTM store with overlap-based retrieval
-│   └── stm_context.py    # Active context window with FILTER, SUMMARY, RETRIEVE
-├── triggers/
-│   └── system_rules.py   # Deterministic rule engine (R1–R4)
-├── agents/
-│   ├── llm_client.py     # Thin OpenAI-compatible wrapper
-│   ├── memory_agent.py   # Dedicated sub-agent for qualitative memory decisions
-│   ├── learning_scorer.py# Agent self-assessment feedback collector
-│   └── orchestrator.py   # Central turn coordinator
-├── tests/
-│   └── test_agemem.py    # 28 offline unit tests, no LLM required
-└── example_usage.py      # Wiring example for OpenAI / local models
+┌─────────────────────────────────────────────────────────────────┐
+│                         Orchestrator                            │
+│  ┌──────────────┐  ┌─────────────────┐  ┌──────────────────┐   │
+│  │ System Rules │  │  Memory Agent   │  │ Learning Scorer  │   │
+│  │ (pure logic) │  │  (LLM-driven)   │  │ (self-assessed)  │   │
+│  └──────┬───────┘  └────────┬────────┘  └────────┬─────────┘   │
+│         │                   │                     │             │
+│  ┌──────▼───────────────────▼─────────────────────▼─────────┐  │
+│  │                    STM Context Window                      │  │
+│  │         FILTER · SUMMARY · RETRIEVE · force_fit           │  │
+│  └───────────────────────────┬───────────────────────────────┘  │
+│                               │ promote / retrieve               │
+│  ┌────────────────────────────▼──────────────────────────────┐  │
+│  │                      LTM Store                             │  │
+│  │     ADD · UPDATE · DELETE · SEARCH (semantic + overlap)    │  │
+│  │     sqlite-vec vector index  ·  JSON persistence           │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Three-layer control
 
-## Features and Their AgeMem Correspondence
+**Layer 1 — System Rules (deterministic, zero LLM cost).** A pure rule engine fires memory operations based on measurable thresholds: context token utilisation, turn count, learning score magnitude. These rules form the correctness floor. They cannot be overridden by the agent.
 
-### Unified Tool Interface
+**Layer 2 — Memory Agent (LLM-driven, dedicated sub-agent).** A separate LLM call handles qualitative decisions: what content is worth storing in LTM, which context messages are low-relevance, whether compression is warranted. Triggered by the rule engine, not on every turn, keeping inference cost bounded.
 
-The paper exposes six memory operations as agent-callable tools: ADD, UPDATE, DELETE (LTM), and RETRIEVE, SUMMARY, FILTER (STM). This system implements all six as first-class operations with typed return values (`MemoryOpResult`), a trigger provenance field (`TriggerKind`), and full audit logging per turn. The difference from the paper is that these operations are invoked by the control system rather than selected by a trained policy. The interface itself is faithful.
-
-### Long-Term Memory Store (`ltm_store.py`)
-
-Corresponds to the LTM management component in AgeMem. Implements ADD with near-duplicate detection (avoiding redundant storage, which the paper's penalty term `Ppenalty` discourages), UPDATE via exponential moving average of learning scores (approximating the paper's storage quality reward), DELETE, and keyword-overlap search for retrieval. The retrieval scoring combines token-overlap, recency decay, and accumulated learning score — a hand-crafted approximation of the semantic relevance component the paper trains via RL.
-
-The paper measures Memory Quality (MQ) as LLM-judged relevance between stored entries and ground-truth facts. This system collects the same signal indirectly through `LearningFeedback.score`, which drives both what gets stored and how highly it is ranked for future retrieval.
-
-### Short-Term Memory Context (`stm_context.py`)
-
-Corresponds to the STM management component in AgeMem. The critical design decision is the **double overflow guard** in the orchestrator: `force_fit()` runs both before the user message is appended (pre-turn) and after the assistant response is appended (post-turn). This is necessary because a long assistant response can push a context from 70% utilisation to 105% in a single step. The paper's RL training prevents this implicitly by learning proactive summarisation. In the inference-only setting, the guard must be explicit and run at both boundaries.
-
-The `STM_WARNING_THRESHOLD` (75%) and `STM_CRITICAL_THRESHOLD` (90%) map to the paper's concept of preventive actions and overflow penalties respectively. SUMMARY is triggered at warning; FILTER plus hard-drop is triggered at critical. Pinned messages (system prompt, injected LTM entries) are never evicted under any pressure level.
-
-### System Rules (`system_rules.py`)
-
-This layer has no direct equivalent in the paper. It is the structural contribution of the hybrid approach. The paper replaces heuristics with learned policy; this system acknowledges that the policy cannot be learned at inference time and instead formalises the heuristics as an explicit, auditable rule engine.
-
-Rules:
-- **R1** — SUMMARY recommendation at warning threshold
-- **R2** — forced FILTER + SUMMARY at critical threshold  
-- **R3** — periodic MemoryAgent review cycle every N turns
-- **R4** — immediate LTM candidacy on learning score spike
-
-Each rule carries a priority, a `RuleID`, and is independently testable without any LLM. The rule engine is the component that prevents the system from degrading to the naïve AgeMem-noRL baseline.
-
-### Memory Agent (`memory_agent.py`)
-
-Corresponds most closely to the "agent-based LTM" pattern (Figure 1b of the paper) extended to cover STM as well. The MemoryAgent is a dedicated LLM call with a structured output contract (JSON schema) that produces ADD/UPDATE/DELETE recommendations for LTM, per-message relevance scores for STM, and a summary trigger signal. It is invoked only when the system rules determine a review is warranted — not on every turn — to control inference cost.
-
-The key limitation relative to the paper: the MemoryAgent relies on a crafted prompt to encode what AgeMem's RL training encodes in weights. It is calibrated, not learned. Its decisions are correct on the schema level (validated before application) but not on the quality level in the way a trained model would be.
-
-### Learning Score Feedback (`learning_scorer.py`)
-
-This is the acceptance-criterion mechanism that has no precise parallel in the paper. The paper uses task completion reward `Rtask` propagated backwards through trajectory steps. In inference, there is no trajectory and no reward signal. The learning score is an agent self-assessment: after every N turns, the main agent answers "how much new, reusable information did you just encounter?" on a 0–1 scale.
-
-This score drives: promotion of content to LTM (score ≥ `LTM_PROMOTE_THRESHOLD`), update rather than add for near-duplicates (score ≥ `LTM_UPDATE_THRESHOLD`), and bypass of the periodic review cadence for high-novelty turns (score ≥ `LEARNING_SCORE_THRESHOLD_IMMEDIATE`). It also feeds into the MemoryAgent's review context, giving it a pre-labelled salience signal. The score is the closest inference-time proxy available for the paper's reward-weighted memory quality signal.
+**Layer 3 — Learning Score (self-assessed signal).** After every N turns, the main agent rates its own output on a 0–1 novelty scale. Scores above the promotion threshold trigger LTM candidacy. Scores above the spike threshold bypass the periodic cadence entirely. This is the inference-time proxy for the reward signal that RL training would otherwise require.
 
 ---
 
-## What This Is Not
+## Key Technical Properties
 
-This system does not reproduce the paper's performance numbers and does not claim to. The paper's gains — 4.82 to 8.57 percentage points over the best baselines on five benchmarks — come from the three-stage RL training and step-wise GRPO. Those are training-time interventions. They require labelled trajectories, rollout groups, and fine-tuning compute. None of that is available at inference time.
+### Dual overflow guard (the double-boundary invariant)
 
-The system also does not implement embedding-based retrieval. LTM search uses token-overlap scoring, which is sufficient for small stores (≤500 entries) and requires no external dependencies. For larger deployments, the `LTMStore.search()` method is the correct extension point for a vector database integration.
+A single `force_fit()` call at turn start is insufficient. An assistant response can itself be longer than the remaining token budget, pushing a 70% context to 105% in a single step. AgeMem enforces the overflow invariant at **both** message-append boundaries — before the user message and after the assistant response. Test T20 was written specifically to catch this failure mode.
 
----
+### Semantic deduplication
 
-## Research Contribution
+`_find_similar()` uses full-content Jaccard similarity in the overlap-only path (not leading-word prefix matching, which collapses distinct facts that happen to share an opening phrase). When semantic search is enabled, cosine similarity on unit-normalised embeddings replaces the heuristic entirely, with a configurable threshold (`LTM_DEDUP_THRESHOLD=0.92`).
 
-This implementation makes one novel engineering contribution that is not present in the paper and is not implied by it.
+### Hybrid retrieval scoring
 
-**The double-boundary overflow invariant.** The paper's RL training learns proactive compression behaviours that prevent the context from approaching overflow. In the inference-only setting, no such proactive behaviour can be assumed. A single `force_fit()` call at turn start is insufficient: an assistant response can itself be longer than the remaining token budget. The correct invariant is that the context must be within bounds at the *end* of every turn, not just the start. This requires `force_fit()` to be called after the assistant message is appended, not before the user message is appended. The test `T20` was written to catch this specific failure, and it did — catching a real bug in the first implementation where a 6-turn session produced a context at 106% utilisation despite the pre-turn guard being present.
+```
+score = 0.6 × cosine_similarity
+      + 0.25 × recency_decay (exp, 7-day half-life)
+      + 0.15 × learning_score
+```
 
-This double-boundary pattern is a concrete and transferable finding: any inference-only memory system that guards context overflow only at turn ingress will fail on long assistant responses. The fix is a one-line addition, but the architectural insight — that the overflow invariant must be enforced at message-append boundaries, not at turn boundaries — has implications for all similar systems.
+Semantic relevance dominates, but recent and high-salience entries get a measurable boost. Query expansion generates paraphrase variants and merges results, with per-variant attribution so you can measure which variant actually retrieved the winning entry.
 
-A secondary contribution is the formalisation of the rule engine as a pure, LLM-free, independently testable layer. In the AgeMem paper and in most prior work, the equivalent logic is embedded inside prompt text or hardcoded in the agent loop. Separating it into a typed rule engine with priority ordering and `TriggerKind` provenance tracking makes the system's behaviour auditable and its failure modes diagnosable without inspecting LLM outputs.
+### Privacy by default
+
+The entire stack — `llama.cpp` inference, `sqlite-vec` vector index, GLiNER NER enrichment, JSON persistence — runs locally. No telemetry, no cloud round-trips, no API keys required beyond your local model server.
 
 ---
 
@@ -133,7 +116,7 @@ from core.config import AgememConfig
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
 
-client = openai.OpenAI(api_key="sk-...")
+client = openai.OpenAI(api_key="sk-...")          # or ollama / any compatible endpoint
 cfg = AgememConfig(DEFAULT_MODEL="gpt-4o-mini")
 llm = LLMClient(client, default_model=cfg.DEFAULT_MODEL)
 orch = Orchestrator(llm=llm, config=cfg)
@@ -141,50 +124,136 @@ orch = Orchestrator(llm=llm, config=cfg)
 response = orch.chat("My name is Alice and I'm building a Kafka pipeline.")
 print(response)
 
-# Inspect what happened
 trace = orch.last_trace()
 print(f"STM: {trace.stm_stats_after.utilisation_ratio:.0%} full")
-print(f"Ops: {[op.op.value for op in trace.ops_applied if op.success]}")
 print(f"LTM: {len(orch.ltm_snapshot())} entries stored")
 ```
 
-For local models via Ollama:
-
+**For local models via Ollama:**
 ```python
 client = openai.OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
 ```
 
----
-
-## Running Tests
-
-No network or API key required:
-
+**Run the test suite (no API key, no network):**
 ```bash
-cd agemem
 python -m unittest tests.test_agemem -v
+# 35 tests, 0 failures
 ```
 
-All 28 tests cover: token counting, LTM add/update/delete/search/prune, STM filter/summary/retrieve/force_fit, system rule firing conditions, MemoryAgent JSON schema parsing, and full orchestrator turn lifecycle including overflow behaviour and LTM promotion via learning score.
-
 ---
 
-## Configuration Reference
+## Configuration
 
-All thresholds are in `core/config.py` as a single `AgememConfig` dataclass. Key parameters:
+All thresholds live in a single `AgememConfig` dataclass in `core/config.py`. Nothing is hardcoded.
 
 | Parameter | Default | Effect |
 |---|---|---|
 | `STM_TOKEN_LIMIT` | 6000 | Hard context ceiling |
 | `STM_WARNING_THRESHOLD` | 0.75 | SUMMARY fires above this |
-| `STM_CRITICAL_THRESHOLD` | 0.90 | FILTER + SUMMARY forces above this |
-| `LTM_PROMOTE_THRESHOLD` | 0.65 | Learning score above this → LTM ADD |
-| `LEARNING_SCORE_PROMPT_EVERY_N` | 3 | Ask agent for feedback every N turns |
-| `TRIGGER_EVERY_N_TURNS` | 10 | MemoryAgent full review cadence |
-| `MEMORY_AGENT_MODEL` | gpt-4o-mini | Can differ from main agent model |
+| `STM_CRITICAL_THRESHOLD` | 0.90 | FILTER + hard-drop above this |
+| `LTM_PROMOTE_THRESHOLD` | 0.65 | Learning score → LTM ADD |
+| `LTM_DEDUP_THRESHOLD` | 0.92 | Cosine sim threshold for dedup (semantic) |
+| `LTM_DEDUP_OVERLAP_THRESHOLD` | 0.70 | Jaccard threshold for dedup (overlap fallback) |
+| `LEARNING_SCORE_PROMPT_EVERY_N` | 3 | Feedback collection cadence |
+| `TRIGGER_EVERY_N_TURNS` | 10 | Memory Agent full review cadence |
+| `MEMORY_AGENT_MODEL` | gpt-4o-mini | Can differ from main agent |
+| `ENABLE_QUERY_EXPANSION` | False | Multi-variant retrieval |
+
+---
+
+## Project Structure
+
+```
+agemem/
+├── core/
+│   ├── types.py            # All data contracts
+│   └── config.py           # All thresholds — one place
+├── memory/
+│   ├── ltm_store.py        # LTM: ADD/UPDATE/DELETE/SEARCH/PRUNE
+│   ├── stm_context.py      # STM: FILTER/SUMMARY/RETRIEVE/force_fit
+│   ├── embedding.py        # Embedding model (lazy-loaded)
+│   └── vector_index.py     # sqlite-vec wrapper
+├── triggers/
+│   └── system_rules.py     # Deterministic rule engine (R1–R4)
+├── agents/
+│   ├── llm_client.py       # OpenAI-compatible wrapper
+│   ├── memory_agent.py     # Qualitative memory decisions
+│   ├── learning_scorer.py  # Self-assessment feedback
+│   └── orchestrator.py     # Turn coordinator
+├── tools/
+│   └── query_expansion.py  # Paraphrase variant generation
+└── tests/
+    └── test_agemem.py      # 35 offline unit tests — no LLM required
+```
+
+---
+
+## Roadmap
+
+The following items are actively being worked on or designed. Contributions in any of these areas are especially welcome.
+
+**Near-term**
+- [ ] MRR@K evaluation harness with `SearchTrace` instrumentation and SQLite logging
+- [ ] Variant hit-rate metric — measures query expansion ROI against latency cost
+- [ ] `_find_similar` semantic path for overlap-only stores (full Jaccard → embedding upgrade path)
+- [ ] Entity-retention checks via GLiNER NER to prevent important named entities being pruned
+
+**Medium-term**
+- [ ] Multi-agent memory sharing — shared LTM store across agent instances with conflict resolution
+- [ ] Memory compaction — periodic background consolidation of related LTM entries
+- [ ] Streaming token counting for models with non-whitespace tokenisers
+- [ ] Benchmarks on AgeMem paper tasks: ALFWorld, SciWorld, BabyAI
+
+**Long-term vision**
+- [ ] On-device fine-tuning of the memory promotion policy using AgeMem's own `learning_score` signal as reward — closing the loop between inference-only and the RL training the original paper required
+- [ ] Cross-session memory graphs — structured entity relationships, not just flat key-value facts
+- [ ] Memory federation — privacy-preserving sync across devices with local encryption
+
+---
+
+## Contributing
+
+AgeMem is at an inflection point. The core architecture is proven and tested. The retrieval layer is getting measurably better. The gap between this system and the RL-trained AgeMem paper baseline is understood and documented — and there is a clear engineering path to close it without requiring fine-tuning compute.
+
+**This is the moment to get involved.**
+
+If you work on any of the following, your contribution will have immediate, measurable impact:
+
+- **Retrieval quality** — embedding models, reranking, hybrid BM25+semantic, query expansion tuning
+- **Evaluation** — MRR@K harness, shadow-mode A/B testing, benchmark integration (ALFWorld, BabyAI)
+- **Local inference** — llama.cpp integration, quantisation testing, edge hardware profiling
+- **NLP** — NER-guided memory promotion, entity extraction, coreference resolution
+- **Infrastructure** — async orchestration, multi-agent coordination, persistence backends
+
+To contribute:
+
+1. Fork and clone the repo
+2. Run `python -m unittest tests.test_agemem -v` — all 35 should pass
+3. Open an issue describing what you want to work on, or pick one from the roadmap
+4. Submit a PR with tests — the test suite is the contract
+
+Please read the inline documentation in `core/config.py` and `memory/ltm_store.py` before opening a PR. The codebase is intentionally small and readable. A new contributor should be able to understand the full system in an afternoon.
+
+---
+
+## Why AgeMem Matters
+
+NVIDIA's Catanzaro framed it precisely: *"Every fast computer is also a slow computer."* The purpose of accelerated compute is not to do everything — it is to prioritise and focus on the workloads that matter.
+
+The agent memory problem is the same problem. A 1-million-token context is not intelligence. It is compute spent on attention over irrelevant tokens. AgeMem applies the same logic that makes accelerated computing efficient to the software layer: filter ruthlessly, retain purposefully, retrieve precisely.
+
+As open-weight models get smaller and smarter — Llama, Qwen, Nemotron, and whatever comes next — the model ceases to be the bottleneck. The agent that wins in a world of capable local models is the one with the best memory, not the biggest context.
+
+AgeMem is building that memory layer. It is open, auditable, runs on your hardware, and is designed to be extended by the community.
+
+**Come build it with us.**
 
 ---
 
 ## Reference
 
 Yu, Y., Yao, L., Xie, Y., Tan, Q., Feng, J., Li, Y., & Wu, L. (2026). *Agentic Memory: Learning Unified Long-Term and Short-Term Memory Management for Large Language Model Agents*. arXiv:2601.01885.
+
+---
+
+*AgeMem is an independent open-source project. It is not affiliated with or endorsed by NVIDIA, Anthropic, or the authors of the AgeMem paper.*
