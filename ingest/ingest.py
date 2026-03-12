@@ -242,13 +242,22 @@ def _needs_ocr(pdf_path: Path, sample_pages: int = 5) -> bool:
 # ── GLiNER entity extractor (zero-shot, no training needed) ───
 try:
     from gliner import GLiNER
-    _ner = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
+    # Initialize GLiNER with explicit tokenizer max_length to avoid truncation warnings
+    _ner = GLiNER.from_pretrained(
+        "urchade/gliner_medium-v2.1",
+        max_length=384  # Explicitly set tokenizer max_length to match model limit
+    )
     NER_BACKEND = "gliner"
 except ImportError:
     _ner = None
     NER_BACKEND = "none"
     print("[warn] gliner not installed — entity extraction disabled.")
     print("       pip install gliner")
+except Exception as e:
+    _ner = None
+    NER_BACKEND = "none"
+    print(f"[warn] GLiNER initialization failed: {e}")
+    print("       Entity extraction disabled.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -351,16 +360,24 @@ SENTENCE_SPLIT_BOUNDARIES = [
 ]
 
 
-def _split_long_sentence(sentence: str, max_chars: int = MAX_SENTENCE_CHARS) -> List[str]:
+def _split_long_sentence(
+    sentence: str, 
+    max_chars: int = MAX_SENTENCE_CHARS,
+    overlap_chars: int = 100
+) -> List[str]:
     """
     Split a long sentence at natural boundaries for GLiNER processing.
 
     GLiNER's tokenizer truncates at 384 tokens, so we proactively split
     long sentences at semicolons, commas, or conjunctions to preserve entity recall.
+    
+    Uses sliding window with overlap for very long sentences to ensure entities
+    at segment boundaries are not missed.
 
     Args:
         sentence: A single sentence (no newlines)
         max_chars: Maximum characters per segment (~4 chars/token)
+        overlap_chars: Number of characters to overlap between segments
 
     Returns:
         List of sentence segments, each within token limit
@@ -370,36 +387,49 @@ def _split_long_sentence(sentence: str, max_chars: int = MAX_SENTENCE_CHARS) -> 
 
     segments = []
     remaining = sentence
+    start_pos = 0
 
-    while len(remaining) > max_chars:
-        # Look for split point within the safe zone
-        search_end = min(max_chars + 20, len(remaining))  # small overshoot for better breaks
-        search_region = remaining[:search_end]
+    while start_pos < len(sentence):
+        # Calculate end position for this segment
+        end_pos = min(start_pos + max_chars, len(sentence))
+        
+        # If we're not at the end, look for a good split point
+        if end_pos < len(sentence):
+            # Look for split point within the safe zone (from start_pos to end_pos)
+            search_region = sentence[start_pos:end_pos]
+            
+            best_split = -1
+            for boundary in SENTENCE_SPLIT_BOUNDARIES:
+                # Find last occurrence of boundary in search region
+                idx = search_region.rfind(boundary)
+                if idx > max_chars * 0.3:  # Don't split too early (at least 30% of max)
+                    split_at = start_pos + idx + len(boundary)
+                    # Prefer semicolons/conjunctions — keep delimiter with left segment
+                    if boundary in (';', ','):
+                        best_split = split_at
+                        break  # semicolon/comma are ideal, stop here
+                    elif best_split == -1:
+                        best_split = split_at
+            
+            if best_split == -1:
+                # No good boundary found; hard split at max_chars
+                best_split = end_pos
+            
+            # Add segment
+            segment = sentence[start_pos:best_split].strip()
+            if segment:
+                segments.append(segment)
+            
+            # Move start position with overlap
+            start_pos = max(start_pos + 1, best_split - overlap_chars)
+        else:
+            # Last segment
+            segment = sentence[start_pos:].strip()
+            if segment:
+                segments.append(segment)
+            break
 
-        best_split = -1
-        for boundary in SENTENCE_SPLIT_BOUNDARIES:
-            # Find last occurrence of boundary in search region
-            idx = search_region.rfind(boundary)
-            if idx > max_chars * 0.5:  # Don't split too early (at least 50% of max)
-                split_at = idx + len(boundary)
-                # Prefer semicolons/conjunctions — keep delimiter with left segment
-                if boundary in (';', ','):
-                    best_split = split_at
-                    break  # semicolon/comma are ideal, stop here
-                elif best_split == -1:
-                    best_split = split_at
-
-        if best_split == -1:
-            # No good boundary found; hard split at max_chars
-            best_split = max_chars
-
-        segments.append(remaining[:best_split].strip())
-        remaining = remaining[best_split:].strip()
-
-    if remaining:
-        segments.append(remaining)
-
-    return segments
+    return [s for s in segments if s.strip()]
 
 
 def _split_text_for_gliner(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> List[str]:
@@ -430,39 +460,100 @@ def _split_text_for_gliner(text: str, max_chars: int = MAX_SENTENCE_CHARS) -> Li
     return [s for s in segments if s.strip()]
 
 
-def extract_entities(text: str, label_config: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
+def _find_segment_offset(text: str, segment: str, start_search: int = 0) -> int:
+    """
+    Find the offset of a segment in the original text.
+    
+    Args:
+        text: Original text
+        segment: Segment to find
+        start_search: Position to start searching from
+        
+    Returns:
+        Offset of segment in original text, or -1 if not found
+    """
+    idx = text.find(segment, start_search)
+    return idx if idx != -1 else start_search
+
+
+def extract_entities(
+    text: str, 
+    label_config: Optional[Dict[str, Any]] = None,
+    return_positions: bool = False
+) -> Dict[str, List[str]] | Dict[str, List[Dict[str, Any]]]:
     """
     Extract named entities from text using GLiNER with the configured labels.
 
     Uses sentence-aware splitting to avoid truncation at GLiNER's 384 token limit.
+    Entity spans are re-mapped to original text offsets when return_positions=True.
 
     Args:
         text: The text to analyze
         label_config: Optional label configuration (uses current if not provided)
+        return_positions: If True, return entities with their positions in original text
 
     Returns:
-        Dictionary of entity buckets with extracted values
+        Dictionary of entity buckets with extracted values (or entities with positions)
     """
     config = label_config or get_current_labels()
     labels = config["labels"]
     label_map = config["label_map"]
     buckets = {k: set() for k in config["buckets"].keys()}
+    
+    # For position tracking
+    entities_with_positions: Dict[str, List[Dict[str, Any]]] = {k: [] for k in config["buckets"].keys()}
 
     if NER_BACKEND == "gliner" and _ner is not None:
         segments = _split_text_for_gliner(text)
+        
+        # Track position in original text for re-mapping
+        current_offset = 0
 
         for i, segment in enumerate(segments):
             if len(segments) > 1:
                 print(f"      Processing segment {i + 1}/{len(segments)} ({len(segment):,} chars)...")
 
+            # Find segment position in original text for offset re-mapping
+            segment_offset = _find_segment_offset(text, segment, current_offset)
+            current_offset = segment_offset + len(segment)
+
             hits = _ner.predict_entities(segment, labels, threshold=0.4)
             for h in hits:
                 bucket = label_map.get(h["label"])
                 if bucket and len(h["text"].strip()) > 2:
-                    buckets[bucket].add(h["text"].strip())
+                    entity_text = h["text"].strip()
+                    buckets[bucket].add(entity_text)
+                    
+                    # Re-map entity position to original text
+                    if return_positions:
+                        # Adjust start/end positions to original text offset
+                        original_start = segment_offset + h.get("start", 0)
+                        original_end = segment_offset + h.get("end", len(entity_text))
+                        
+                        entities_with_positions[bucket].append({
+                            "text": entity_text,
+                            "label": h["label"],
+                            "start": original_start,
+                            "end": original_end,
+                            "score": h.get("score", 0.0)
+                        })
 
     # Convert sets to sorted lists and cap each bucket
-    return {k: sorted(v)[:15] for k, v in buckets.items() if v}
+    if return_positions:
+        # Return entities with positions, deduplicated by text
+        result = {}
+        for bucket, entities in entities_with_positions.items():
+            if entities:
+                # Deduplicate by text, keeping highest score
+                seen = {}
+                for entity in entities:
+                    text_key = entity["text"]
+                    if text_key not in seen or entity["score"] > seen[text_key]["score"]:
+                        seen[text_key] = entity
+                result[bucket] = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:15]
+        return result
+    else:
+        return {k: sorted(v)[:15] for k, v in buckets.items() if v}
 
 
 def detect_doc_date(text: str, entities: Dict[str, List[str]]) -> Optional[str]:
