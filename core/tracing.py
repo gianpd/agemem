@@ -537,6 +537,72 @@ class InteractionLogger:
             }
         )
 
+    def log_query_expansion(
+        self,
+        original_query: str,
+        variants: list[str],
+        hit_counts: list[int],
+        duration_ms: float,
+        method: str = "llm",
+        success: bool = True,
+    ):
+        """
+        Log query expansion details for corpus search.
+
+        Parameters
+        ----------
+        original_query : str
+            The original user query.
+        variants : list[str]
+            All query variants including the original (first element).
+        hit_counts : list[int]
+            Number of hits for each variant (parallel to variants).
+        duration_ms : float
+            Time taken for expansion and search.
+        method : str
+            Expansion method used: "llm", "regex", or "disabled".
+        success : bool
+            Whether expansion succeeded.
+        """
+        num_variants = len(variants)
+        num_hits = sum(1 for h in hit_counts if h > 0)
+        total_matches = sum(hit_counts)
+
+        # Build detailed log message
+        variant_details = []
+        for i, (variant, hits) in enumerate(zip(variants, hit_counts)):
+            status = "HIT" if hits > 0 else "no hit"
+            marker = "[ORIG]" if i == 0 else f"[VAR{i}]"
+            variant_details.append(f"  {marker} '{variant[:60]}{'...' if len(variant) > 60 else ''}' ({status}: {hits} matches)")
+
+        self._debug_logger.debug(
+            f"[QUERY_EXPANSION] original='{original_query[:80]}{'...' if len(original_query) > 80 else ''}'\n"
+            f"Method: {method}\n"
+            f"Variants generated: {num_variants}\n"
+            f"Variants with hits: {num_hits}/{num_variants}\n"
+            f"Total unique matches: {total_matches}\n"
+            f"Duration: {duration_ms:.1f}ms\n"
+            f"Success: {success}\n"
+            f"Variant details:\n" + "\n".join(variant_details)
+        )
+
+        # Also log to main logger for structured output
+        self._logger.debug(
+            f"QUERY_EXPANSION: method={method} variants={num_variants} hits={num_hits}/{num_variants} duration={duration_ms:.1f}ms",
+            extra={
+                "trace_id": self._current_trace.trace_id if self._current_trace else None,
+                "interaction_type": "query_expansion",
+                "original_query": original_query[:200],
+                "num_variants": num_variants,
+                "variants_with_hits": num_hits,
+                "total_matches": total_matches,
+                "duration_ms": duration_ms,
+                "method": method,
+                "success": success,
+                "variant_list": [v[:100] for v in variants],  # Truncated for log size
+            }
+        )
+
     def log_stm_stats(self, stats: dict):
         """Log STM statistics."""
         if self._current_trace:

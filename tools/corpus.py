@@ -55,9 +55,14 @@ tool_definitions = [
         "function": {
             "name": "grep_corpus",
             "description": (
-                "Search the full text of all documents in the corpus using a keyword pattern. "
+                "Search the full text of all documents using a keyword or regex pattern. "
                 "Returns matching lines with context. "
-                "Use this for full-text search across all documents. "
+                "For best results, use pipe-separated alternatives rather than natural language: "
+                "GOOD: grep_corpus('operating loss|breakeven|profitability') "
+                "GOOD: grep_corpus('Siemens|partnership|industrial') "
+                "BAD: grep_corpus('which company is closer to profitability') "
+                "Extract the most distinctive nouns and domain terms from the question "
+                "and combine them with | before calling this tool. "
                 "Results are capped at 4000 characters."
             ),
             "parameters": {

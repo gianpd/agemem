@@ -574,6 +574,16 @@ class LLMClient:
                 # Check for tool calls
                 tool_calls = getattr(message, "tool_calls", None)
                 if isinstance(tool_calls, list) and len(tool_calls) > 0:
+                    # TRACE: Log raw response before raising tool call
+                    from core.tracing import get_tracer
+                    tracer = get_tracer()
+                    if tracer:
+                        tracer._debug_logger.debug(
+                            f"[RAW_RESPONSE_TOOL_CALL] type=ToolCallResponse\n"
+                            f"Tool name: {getattr(tool_calls[0].function, 'name', 'UNKNOWN')}\n"
+                            f"Tool args: {getattr(tool_calls[0].function, 'arguments', 'N/A')!r}\n"
+                            f"Full message content: {message.content!r}"
+                        )
                     raise ToolCallResponse(tool_calls[0])
 
                 content = message.content or ""
@@ -583,6 +593,16 @@ class LLMClient:
                 if tools:
                     text_tool_calls = detect_text_tool_calls(content)
                     if text_tool_calls:
+                        # TRACE: Log raw response before raising text tool call
+                        from core.tracing import get_tracer
+                        tracer = get_tracer()
+                        if tracer:
+                            tracer._debug_logger.debug(
+                                f"[RAW_RESPONSE_TOOL_CALL] type=TextToolCallResponse\n"
+                                f"Tool name: {text_tool_calls[0].function.name}\n"
+                                f"Tool args: {text_tool_calls[0].function.arguments!r}\n"
+                                f"Full message content: {content!r}"
+                            )
                         # Raise for the first detected tool call
                         raise TextToolCallResponse(text_tool_calls[0])
 
@@ -670,6 +690,16 @@ class LLMClient:
                 # Check for tool calls
                 tool_calls = getattr(message, "tool_calls", None)
                 if isinstance(tool_calls, list) and len(tool_calls) > 0:
+                    # TRACE: Log raw response before raising tool call
+                    from core.tracing import get_tracer
+                    tracer = get_tracer()
+                    if tracer:
+                        tracer._debug_logger.debug(
+                            f"[RAW_RESPONSE_TOOL_CALL] type=ToolCallResponse\n"
+                            f"Tool name: {getattr(tool_calls[0].function, 'name', 'UNKNOWN')}\n"
+                            f"Tool args: {getattr(tool_calls[0].function, 'arguments', 'N/A')!r}\n"
+                            f"Full message content: {message.content!r}"
+                        )
                     raise ToolCallResponse(tool_calls[0])
 
                 content = message.content or ""
@@ -678,6 +708,16 @@ class LLMClient:
                 if tools:
                     text_tool_calls = detect_text_tool_calls(content)
                     if text_tool_calls:
+                        # TRACE: Log raw response before raising text tool call
+                        from core.tracing import get_tracer
+                        tracer = get_tracer()
+                        if tracer:
+                            tracer._debug_logger.debug(
+                                f"[RAW_RESPONSE_TOOL_CALL] type=TextToolCallResponse\n"
+                                f"Tool name: {text_tool_calls[0].function.name}\n"
+                                f"Tool args: {text_tool_calls[0].function.arguments!r}\n"
+                                f"Full message content: {content!r}"
+                            )
                         raise TextToolCallResponse(text_tool_calls[0])
 
                 is_empty = not content or not content.strip()

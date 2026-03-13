@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any, Optional, Union
 
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse, JSONParseError
+from core.tracing import get_tracer
 
 
 class ResponseType(Enum):
@@ -270,7 +271,19 @@ class ResponseHandler:
             except ToolCallResponse as e:
                 # Validate the tool call
                 validation = self.validate_tool_call(e.tool_call)
-                
+
+                # TRACE: Log raw tool call details for debugging
+                tracer = get_tracer()
+                raw_args = getattr(e.tool_call.function, 'arguments', None)
+                tracer._debug_logger.debug(
+                    f"[TOOL_CALL_DETECTED] type=ToolCallResponse\n"
+                    f"Tool name: {getattr(e.tool_call.function, 'name', 'UNKNOWN')}\n"
+                    f"Raw arguments: {raw_args!r}\n"
+                    f"Validation errors: {validation.errors}\n"
+                    f"Validation warnings: {validation.warnings}\n"
+                    f"Is valid: {validation.is_valid}"
+                )
+
                 if not validation.is_valid:
                     # Tool call is invalid, try to recover
                     if attempt < self._max_retries:
@@ -313,7 +326,19 @@ class ResponseHandler:
             except TextToolCallResponse as e:
                 # Similar handling for text-based tool calls
                 validation = self.validate_tool_call(e.tool_call)
-                
+
+                # TRACE: Log raw tool call details for debugging
+                tracer = get_tracer()
+                raw_args = getattr(e.tool_call.function, 'arguments', None)
+                tracer._debug_logger.debug(
+                    f"[TOOL_CALL_DETECTED] type=TextToolCallResponse\n"
+                    f"Tool name: {getattr(e.tool_call.function, 'name', 'UNKNOWN')}\n"
+                    f"Raw arguments: {raw_args!r}\n"
+                    f"Validation errors: {validation.errors}\n"
+                    f"Validation warnings: {validation.warnings}\n"
+                    f"Is valid: {validation.is_valid}"
+                )
+
                 if not validation.is_valid:
                     if attempt < self._max_retries:
                         error_msg = (
@@ -352,6 +377,14 @@ class ResponseHandler:
             except JSONParseError as e:
                 # JSON parsing failed
                 last_error = e
+
+                # TRACE: Log the raw response that caused JSON parse error
+                tracer = get_tracer()
+                tracer._debug_logger.debug(
+                    f"[JSON_PARSE_ERROR] reason={e.reason}\n"
+                    f"Raw response: {e.raw!r}"
+                )
+
                 if attempt < self._max_retries:
                     # Try to recover by asking for valid JSON
                     error_msg = (
