@@ -21,10 +21,11 @@ from core.config import (
     UWOT_SEARCH_ENABLED,
     UWOT_SEARCH_SERVICE_URL,
     UWOT_API_KEY,
+    FETCH_ONLY_MENTIONED_URLS,
 )
 
 # Security configuration for fetch_url
-FETCH_URL_MAX_CONTENT_LENGTH = 500_000  # 500KB max
+FETCH_URL_MAX_CONTENT_LENGTH = 1_500_000  # 1.5MB max
 FETCH_URL_TIMEOUT_SECONDS = 30
 FETCH_URL_MAX_REDIRECTS = 3
 
@@ -457,8 +458,8 @@ def _html_to_safe_text(html: str) -> str:
 
     # Remove elements with suspicious CSS (hidden content)
     for tag in soup.find_all():
-        # Defensive check: tag might be None with malformed HTML
-        if tag is None:
+        # Defensive check: tag or attrs might be None with malformed HTML
+        if tag is None or tag.attrs is None:
             continue
         style = tag.get('style', '')
         if style:
@@ -651,7 +652,7 @@ async def fetch_url(
 
     SECURITY FEATURES:
     - HTTPS only (no HTTP)
-    - URL must be from conversation context (previous web_search, user message, tool output)
+    - URL context validation (configurable via FETCH_ONLY_MENTIONED_URLS)
     - Homograph attack detection (Cyrillic lookalikes, etc.)
     - Internal IP blocking with DNS resolution (prevents DNS rebinding)
     - Cloud metadata endpoint blocking (169.254.x.x)
@@ -663,7 +664,7 @@ async def fetch_url(
     - Redirect limit (3 hops)
 
     Args:
-        url: URL to fetch. Must be from conversation context.
+        url: URL to fetch. Context validation depends on FETCH_ONLY_MENTIONED_URLS config.
         max_length: Maximum characters to return (default 10000, max 50000).
         save_path: If provided, save binary content to this path instead of returning text.
 
@@ -671,7 +672,7 @@ async def fetch_url(
         Fetched and sanitized content, or error message.
     """
     # Validate URL
-    is_valid, error_msg, clean_url = validate_url_for_fetch(url, require_context=True)
+    is_valid, error_msg, clean_url = validate_url_for_fetch(url, require_context=FETCH_ONLY_MENTIONED_URLS)
     if not is_valid:
         logger.warning(f"[fetch_url] Validation failed for '{url}': {error_msg}")
         return f"[FETCH URL ERROR] {error_msg}"

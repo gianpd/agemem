@@ -44,6 +44,10 @@ ORACLE_MODEL = os.getenv("ORACLE_MODEL", "gpt-4o-mini")
 # ─────────────────────────────────────────────────────────────
 UWOT_SEARCH_ENABLED = os.getenv("UWOT_SEARCH_ENABLED", "true").lower() == "true"
 UWOT_SEARCH_SERVICE_URL = os.getenv("UWOT_SEARCH_SERVICE_URL", "http://localhost:8001")
+UWOT_API_KEY = os.getenv("UWOT_API_KEY", "")
+
+# Fetch URL security config
+FETCH_ONLY_MENTIONED_URLS = os.getenv("FETCH_ONLY_MENTIONED_URLS", "true").lower() == "true"
 UWOT_API_KEY = os.getenv("UWOT_API_KEY")
 
 

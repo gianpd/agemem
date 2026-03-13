@@ -248,7 +248,7 @@ def create_prompt_session() -> PromptSession:
         history=FileHistory(str(history_path)),
         key_bindings=bindings,
         multiline=True,
-        mouse_support=True,
+        mouse_support=False,
         prompt_continuation="... ",
     )
 
