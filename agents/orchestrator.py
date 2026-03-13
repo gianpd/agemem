@@ -34,7 +34,7 @@ Acceptance criteria mapping
 
 from __future__ import annotations
 
-import re 
+import re
 import json
 import time
 from dataclasses import dataclass, field
@@ -61,6 +61,9 @@ from agents.response_handler import ResponseHandler
 from skills.manager import SkillManager
 
 import logging
+
+# ── Tracing System ──────────────────────────────────────────────────────────
+from core.tracing import get_tracer
 
 # ── Tool Call Tracking (LoopGuard) ───────────────────────────────────────────
 
@@ -379,7 +382,10 @@ class Orchestrator:
         t0 = time.time()
         turn = self._stm.current_turn()
         stats_before = self._stm.stats()
-        
+
+        # Get tracer instance
+        tracer = get_tracer()
+
         # Reset tool tracker for this turn
         self._tool_tracker.reset()
 
@@ -389,11 +395,26 @@ class Orchestrator:
         overflow_ops = self._stm.force_fit()
         ops.extend(overflow_ops)
 
+        # Log overflow operations
+        for op in overflow_ops:
+            tracer.log_memory_op(
+                op_type="STM_OVERFLOW_GUARD",
+                detail=op.detail or "",
+                success=op.success,
+                trigger=op.trigger.value if hasattr(op.trigger, 'value') else str(op.trigger),
+            )
+
         # ── 1b. Retrieve relevant LTM entries into STM ───────────────────────
         relevant = self._ltm.search(user_input, top_k=5)
         if relevant:
             retrieve_op = self._stm.retrieve(relevant, trigger=TriggerKind.SYSTEM_RULE)
             ops.append(retrieve_op)
+            tracer.log_memory_op(
+                op_type="LTM_RETRIEVE",
+                detail=f"Retrieved {len(relevant)} entries",
+                success=True,
+                trigger="SYSTEM_RULE",
+            )
         else:
             # LTM empty — search corpus and inject directly into STM (no duplication)
             corpus_context = self._search_corpus_for_context(user_input)
@@ -403,6 +424,11 @@ class Orchestrator:
                     content=f"[CORPUS CONTEXT]\n{corpus_context}",
                     relevance_score=0.9,
                     is_pinned=False,
+                )
+                tracer.log_memory_op(
+                    op_type="CORPUS_INJECT",
+                    detail=f"Injected corpus context ({len(corpus_context)} chars)",
+                    success=True,
                 )
 
         # ── 1c. Detect and inject relevant skills ──────────────────────────────
@@ -417,7 +443,7 @@ class Orchestrator:
 
         # ── 2. Main LLM call with tool support ────────────────────────────────
         self._stm.add_message(role="user", content=user_input, relevance_score=1.0)
-        
+
         # Tool call loop - protected by LoopGuard and max iteration cap
         assistant_text = ""
         max_tool_iterations = 20  # Prevent infinite tool call loops
@@ -427,6 +453,16 @@ class Orchestrator:
             messages = self._stm.openai_messages()
             tool_iterations += 1
 
+            # Log LLM call
+            llm_call_id = tracer.log_llm_call(
+                messages=messages,
+                model=self._config.DEFAULT_MODEL,
+                max_tokens=self._config.DEFAULT_MAX_TOKENS,
+                temperature=self._config.DEFAULT_TEMPERATURE,
+                has_tools=bool(self._tools),
+            )
+            llm_call_start = time.time()
+
             try:
                 # Call LLM with tools if available using enhanced response handler
                 assistant_text, metrics = self._response_handler.chat_with_recovery(
@@ -435,6 +471,15 @@ class Orchestrator:
                     temperature=self._config.DEFAULT_TEMPERATURE,
                     tools=self._tools if self._tools else None,
                 )
+
+                # Log successful LLM response
+                tracer.log_llm_response(
+                    call_id=llm_call_id,
+                    response=assistant_text,
+                    latency_ms=(time.time() - llm_call_start) * 1000,
+                    token_count=metrics.token_count,
+                )
+
                 # If we get here, no tool call was made - we have a text response
                 # Log response quality metrics
                 if metrics.quality_score < 0.8:
@@ -442,6 +487,9 @@ class Orchestrator:
                 break
 
             except ToolCallResponse as e:
+                # Log tool call
+                tool_call_start = time.time()
+
                 # Check iteration limit before processing tool call
                 if tool_iterations >= max_tool_iterations:
                     assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
@@ -472,6 +520,16 @@ class Orchestrator:
 
                 # Execute the tool
                 tool_result = self._execute_tool(tool_name, tool_args)
+                tool_duration = (time.time() - tool_call_start) * 1000
+
+                # Log tool call
+                tracer.log_tool_call(
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    duration_ms=tool_duration,
+                    result=tool_result[:500] if tool_result else None,
+                    success=not tool_result.startswith("[TOOL ERROR]"),
+                )
 
                 # Record the tool call in ops_applied with TriggerKind.MAIN_AGENT
                 ops.append(MemoryOpResult(
@@ -504,11 +562,13 @@ class Orchestrator:
                     relevance_score=0.9,
                     tool_call_id=tool_call_id,
                 )
-                
+
                 # Loop back to LLM call with the tool result
                 continue
 
             except TextToolCallResponse as e:
+                tool_call_start = time.time()
+
                 # Handle text-based tool calls (for models that don't use API tool calling)
                 # This is the same logic as ToolCallResponse but for text-parsed tool calls
                 if tool_iterations >= max_tool_iterations:
@@ -544,6 +604,16 @@ class Orchestrator:
 
                 # Execute the tool
                 tool_result = self._execute_tool(tool_name, tool_args)
+                tool_duration = (time.time() - tool_call_start) * 1000
+
+                # Log tool call
+                tracer.log_tool_call(
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    duration_ms=tool_duration,
+                    result=tool_result[:500] if tool_result else None,
+                    success=not tool_result.startswith("[TOOL ERROR]"),
+                )
 
                 ops.append(MemoryOpResult(
                     op=MemoryOp.RETRIEVE,
@@ -580,6 +650,14 @@ class Orchestrator:
         post_ops = self._stm.force_fit()
         ops.extend(post_ops)
 
+        # Log post-response overflow
+        for op in post_ops:
+            tracer.log_memory_op(
+                op_type="POST_OVERFLOW_GUARD",
+                detail=op.detail or "",
+                success=op.success,
+            )
+
         self._stm.increment_turn()
         turn_after = self._stm.current_turn()
 
@@ -604,12 +682,30 @@ class Orchestrator:
             if decision.rule_id in (RuleID.OVERFLOW_CRITICAL,):
                 filter_op = self._stm.filter(trigger=TriggerKind.SYSTEM_RULE)
                 ops.append(filter_op)
+                tracer.log_memory_op(
+                    op_type="STM_FILTER",
+                    detail="Critical overflow",
+                    success=True,
+                    trigger="SYSTEM_RULE",
+                )
                 summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
                 ops.append(summary_op)
+                tracer.log_memory_op(
+                    op_type="STM_SUMMARY",
+                    detail="Critical overflow summary",
+                    success=True,
+                    trigger="SYSTEM_RULE",
+                )
 
             elif decision.rule_id == RuleID.OVERFLOW_WARN:
                 summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
                 ops.append(summary_op)
+                tracer.log_memory_op(
+                    op_type="STM_SUMMARY",
+                    detail="Warning overflow summary",
+                    success=True,
+                    trigger="SYSTEM_RULE",
+                )
 
             elif decision.rule_id in (RuleID.PERIODIC_REVIEW, RuleID.LEARNING_SPIKE):
                 should_run_memory_agent = True
@@ -632,6 +728,12 @@ class Orchestrator:
                     trigger=TriggerKind.LEARNING_SCORE,
                 )
                 ops.append(add_op)
+                tracer.log_memory_op(
+                    op_type="LTM_ADD",
+                    detail=f"Learning spike score={feedback.score:.2f}",
+                    success=add_op.success,
+                    trigger="LEARNING_SCORE",
+                )
 
         # ── 3d–e. Memory agent review ─────────────────────────────────────────
         if should_run_memory_agent:
@@ -791,6 +893,7 @@ class Orchestrator:
         feedback: Optional[LearningFeedback],
     ) -> list[MemoryOpResult]:
         ops: list[MemoryOpResult] = []
+        tracer = get_tracer()
 
         for ltm_op in decision.ltm_operations:
             # Only apply high-confidence operations
@@ -808,6 +911,12 @@ class Orchestrator:
                     trigger=TriggerKind.MEMORY_AGENT,
                 )
                 ops.append(result)
+                tracer.log_memory_op(
+                    op_type="LTM_ADD",
+                    detail=f"MemoryAgent ADD: {ltm_op.content[:100]}...",
+                    success=result.success,
+                    trigger="MEMORY_AGENT",
+                )
 
             elif ltm_op.op == MemoryOp.UPDATE and ltm_op.entry_id:
                 result = self._ltm.update(
@@ -817,6 +926,12 @@ class Orchestrator:
                     trigger=TriggerKind.MEMORY_AGENT,
                 )
                 ops.append(result)
+                tracer.log_memory_op(
+                    op_type="LTM_UPDATE",
+                    detail=f"MemoryAgent UPDATE: entry_id={ltm_op.entry_id}",
+                    success=result.success,
+                    trigger="MEMORY_AGENT",
+                )
 
             elif ltm_op.op == MemoryOp.DELETE and ltm_op.entry_id:
                 result = self._ltm.delete(
@@ -824,6 +939,12 @@ class Orchestrator:
                     trigger=TriggerKind.MEMORY_AGENT,
                 )
                 ops.append(result)
+                tracer.log_memory_op(
+                    op_type="LTM_DELETE",
+                    detail=f"MemoryAgent DELETE: entry_id={ltm_op.entry_id}",
+                    success=result.success,
+                    trigger="MEMORY_AGENT",
+                )
 
         # Apply context relevance scores from MemoryAgent to STM messages
         if decision.context_relevance:
@@ -833,6 +954,13 @@ class Orchestrator:
 
         # SUMMARY if MemoryAgent requested it
         if decision.summary_needed:
-            ops.append(self._stm.summary(trigger=TriggerKind.MEMORY_AGENT))
+            summary_op = self._stm.summary(trigger=TriggerKind.MEMORY_AGENT)
+            ops.append(summary_op)
+            tracer.log_memory_op(
+                op_type="STM_SUMMARY",
+                detail="MemoryAgent requested summary",
+                success=True,
+                trigger="MEMORY_AGENT",
+            )
 
         return ops

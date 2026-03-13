@@ -64,6 +64,9 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.formatted_text import HTML
 
+# ── Tracing System ──────────────────────────────────────────────────────────
+from core.tracing import init_tracing, get_tracer, shutdown_tracing
+
 
 # ── Configuration from environment ───────────────────────────────────────────
 
@@ -105,6 +108,11 @@ if _LEGACY_LTM_PATH:
     )
 
 STM_TOKEN_LIMIT = int(os.getenv("STM_TOKEN_LIMIT", "6000"))
+
+# Tracing configuration
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+TRACE_LOG_DIR = os.getenv("TRACE_LOG_DIR", "logs")
+TRACE_RETENTION_DAYS = int(os.getenv("TRACE_RETENTION_DAYS", "30"))
 
 
 # ── Imports from AgeMem package ──────────────────────────────────────────────
@@ -421,6 +429,14 @@ def print_banner(orch: Orchestrator):
 
 def main():
     """Main entry point."""
+    # Initialize tracing system
+    init_tracing(
+        log_dir=TRACE_LOG_DIR,
+        debug=DEBUG_MODE,
+        retention_days=TRACE_RETENTION_DAYS,
+    )
+    tracer = get_tracer()
+
     # Build orchestrator
     try:
         orch = build_orchestrator()
@@ -436,6 +452,9 @@ def main():
 
     console.print("\nType [cyan]/help[/cyan] for commands or start chatting!\n")
 
+    # Turn counter for tracing
+    turn_counter = 0
+
     while True:
         try:
             # Use prompt_toolkit for multiline input
@@ -446,10 +465,12 @@ def main():
         except KeyboardInterrupt:
             # Ctrl+C: exit cleanly
             console.print("\n[bold]Goodbye![/bold]")
+            shutdown_tracing()
             break
         except EOFError:
             # Ctrl+D: exit cleanly
             console.print("\n[bold]Goodbye![/bold]")
+            shutdown_tracing()
             break
 
         if not user_input:
@@ -482,6 +503,21 @@ def main():
 
         # Process chat with spinner
         try:
+            # Start trace for this interaction
+            trace_id = tracer.start_trace(user_input, turn_index=turn_counter)
+
+            # Log STM stats before processing
+            stats_before = orch.stm_stats()
+            tracer.log_stm_stats({
+                "total_tokens": stats_before.total_tokens,
+                "utilisation_ratio": stats_before.utilisation_ratio,
+                "message_count": stats_before.message_count,
+                "pinned_count": stats_before.pinned_count,
+            })
+
+            # Log LTM count
+            tracer.log_ltm_count(len(orch.ltm_snapshot()))
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[dim]Thinking...[/dim]"),
@@ -490,6 +526,19 @@ def main():
             ) as progress:
                 progress.add_task("thinking", total=None)
                 response = orch.chat(user_input)
+
+            # Log the RAW response BEFORE any processing (key acceptance criteria)
+            # This captures the response exactly as received from the LLM
+            tracer.log_raw_response(response, model=BASE_MODEL)
+
+            # Log STM stats after processing
+            stats_after = orch.stm_stats()
+            tracer.log_stm_stats({
+                "total_tokens": stats_after.total_tokens,
+                "utilisation_ratio": stats_after.utilisation_ratio,
+                "message_count": stats_after.message_count,
+                "pinned_count": stats_after.pinned_count,
+            })
 
             # Render response as markdown
             console.print()
@@ -500,9 +549,15 @@ def main():
                 padding=(0, 1),
             ))
 
+            # End trace with final response
+            tracer.end_trace(final_response=response)
+
             print_diagnostics(orch)
 
+            turn_counter += 1
+
         except Exception as e:
+            tracer.end_trace(error=str(e))
             console.print(f"\n[red bold]ERROR:[/red bold] {e}\n")
 
 
