@@ -139,7 +139,13 @@ class LTMStore:
         if model is None:
             return None
         try:
-            return model.embed_text(text)
+            vec = model.embed_text(text)
+            # Ensure unit norm for cosine similarity via dot product
+            import numpy as np
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            return vec
         except Exception as e:
             logger.error(f"Failed to generate embedding: {e}")
             return None
@@ -496,6 +502,8 @@ class LTMStore:
                 if best_sim >= self._config.LTM_DEDUP_THRESHOLD:
                     return self._entries[best_id]
                 return None
+            # embedding generation failed — fall through to Jaccard
+            logger.warning("_find_similar: embedding failed, falling back to Jaccard dedup")
 
         # OVERLAP_FALLBACK: Use full-content Jaccard similarity.
         # This fixes BUG2b (false-positive prefix collapse) by comparing entire
@@ -569,8 +577,8 @@ class LTMStore:
                 from memory.vector_index import insert_embedding
                 insert_embedding(self._db, entry.entry_id, embedding)
 
-                # Also update SQLite ltm_entries table
-                self._upsert_entry_to_sqlite(entry)
+                # Also update SQLite ltm_entries table with embedding BLOB
+                self._upsert_entry_to_sqlite(entry, embedding=embedding)
 
                 # Commit the transaction to persist changes
                 self._db.commit()
@@ -589,8 +597,8 @@ class LTMStore:
                 from memory.vector_index import update_embedding
                 update_embedding(self._db, entry.entry_id, embedding)
 
-                # Also update SQLite ltm_entries table
-                self._upsert_entry_to_sqlite(entry)
+                # Also update SQLite ltm_entries table with embedding BLOB
+                self._upsert_entry_to_sqlite(entry, embedding=embedding)
 
                 # Commit the transaction to persist changes
                 self._db.commit()
@@ -599,16 +607,27 @@ class LTMStore:
             logger.error(f"Failed to update embedding for {entry.entry_id}: {e}")
 
     # SEMANTIC_SEARCH: Upsert entry to SQLite ltm_entries table
-    def _upsert_entry_to_sqlite(self, entry: MemoryEntry) -> None:
+    def _upsert_entry_to_sqlite(
+        self,
+        entry: MemoryEntry,
+        embedding: Optional["np.ndarray"] = None,
+    ) -> None:
         """Insert or update an entry in the SQLite ltm_entries table."""
         if not self._db:
             return
         try:
             import json as json_mod
+
+            # Serialize embedding to bytes if provided
+            embedding_bytes: Optional[bytes] = None
+            if embedding is not None:
+                import numpy as np
+                embedding_bytes = embedding.astype(np.float32).tobytes()
+
             self._db.execute("""
                 INSERT OR REPLACE INTO ltm_entries
-                (entry_id, content, created_at, updated_at, access_count, learning_score, tags, source_turn)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (entry_id, content, created_at, updated_at, access_count, learning_score, tags, source_turn, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.entry_id,
                 entry.content,
@@ -618,6 +637,7 @@ class LTMStore:
                 entry.learning_score,
                 json_mod.dumps(entry.tags),
                 entry.source_turn,
+                embedding_bytes,
             ))
         except Exception as e:
             logger.error(f"Failed to upsert entry {entry.entry_id} to SQLite: {e}")
@@ -632,7 +652,17 @@ class LTMStore:
             return 0
         count = 0
         for entry in self._entries.values():
-            self._upsert_entry_to_sqlite(entry)
+            # Generate and insert embedding - this also upserts to ltm_entries with BLOB
+            self._insert_embedding_for_entry(entry)
+            # Fallback: if embedding generation failed, _insert_embedding_for_entry
+            # will have logged the error but NOT written the row. Write it now without BLOB.
+            # Check first to avoid overwriting a successfully written embedding.
+            row = self._db.execute(
+                "SELECT entry_id FROM ltm_entries WHERE entry_id = ?",
+                (entry.entry_id,)
+            ).fetchone()
+            if row is None:
+                self._upsert_entry_to_sqlite(entry)  # embedding=None, row didn't exist
             count += 1
         # Commit all changes
         if count > 0:

@@ -195,6 +195,50 @@ class TestLTMStore(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    @unittest.skipUnless(
+        os.environ.get("AGEMEM_TEST_SEMANTIC") == "1",
+        "Set AGEMEM_TEST_SEMANTIC=1 to run semantic tests"
+    )
+    def test_sync_to_sqlite_does_not_erase_embedding_blob(self):
+        """
+        sync_to_sqlite must not overwrite a successfully written embedding BLOB
+        with NULL via a second upsert call.
+        """
+        import tempfile
+        db_path = Path(tempfile.mktemp(suffix=".db"))
+        try:
+            store = LTMStore(
+                self.cfg,
+                semantic_db_path=db_path,
+                enable_semantic_search=True,
+            )
+            store.add("Alice builds Kafka pipelines", learning_score=0.9)
+
+            # Verify BLOB was written by add()
+            row = store._db.execute(
+                "SELECT embedding FROM ltm_entries LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row[0], "BLOB should be set after add()")
+            blob_after_add = row[0]
+
+            # Now run sync — must not erase the BLOB
+            store.sync_to_sqlite()
+
+            row_after_sync = store._db.execute(
+                "SELECT embedding FROM ltm_entries LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(
+                row_after_sync[0],
+                "sync_to_sqlite erased the embedding BLOB — double-write bug present"
+            )
+            self.assertEqual(
+                blob_after_add, row_after_sync[0],
+                "embedding BLOB changed after sync_to_sqlite — unexpected mutation"
+            )
+            store.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_T05_prune_respects_max_entries(self):
         for i in range(7):
             self.store.add(f"Unique fact number {i} about topic {i}", learning_score=float(i) * 0.1)
@@ -780,6 +824,84 @@ class TestOrchestrator(unittest.TestCase):
         add_ops = [op for op in trace.ops_applied if op.op == MemoryOp.ADD and op.success]
         self.assertGreater(len(add_ops), 0,
             "LTM should promote even with empty affected_content - fallback to response text")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Corpus Search with Query Expansion Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestCorpusSearch(unittest.TestCase):
+
+    def test_corpus_search_uses_expanded_queries_when_enabled(self):
+        """
+        When ENABLE_QUERY_EXPANSION=True, _search_corpus_for_context must
+        call grep_corpus more than once — once per variant — not just once
+        with the raw query.
+        """
+        cfg = _cfg(ENABLE_QUERY_EXPANSION=True, QUERY_EXPANSION_N_VARIANTS=2)
+        llm = _mock_llm("variant one\nvariant two")  # expander LLM response
+        orch = Orchestrator(llm=llm, config=cfg)
+
+        call_count = [0]
+        def counting_grep(pattern, context_lines=3):
+            call_count[0] += 1
+            return "No matches found"
+
+        with patch("tools.corpus.grep_corpus", side_effect=counting_grep):
+            orch._search_corpus_for_context("what does the user work on?")
+
+        self.assertGreater(
+            call_count[0], 1,
+            f"Expected grep_corpus to be called once per variant (>1), "
+            f"got {call_count[0]} calls. Query expansion is not being used."
+        )
+
+    def test_corpus_search_deduplicates_across_variants(self):
+        """
+        If two variants match the same corpus line, it must appear only once
+        in the injected context — not duplicated.
+        """
+        cfg = _cfg(ENABLE_QUERY_EXPANSION=True, QUERY_EXPANSION_N_VARIANTS=2)
+        llm = _mock_llm("variant one\nvariant two")
+        orch = Orchestrator(llm=llm, config=cfg)
+
+        repeated_line = "corpus/doc1_abc123.md: Alice builds Kafka pipelines"
+
+        def grep_returns_same(_pattern, context_lines=3):
+            return repeated_line  # both variants return identical line
+
+        def read_returns_content(doc_id):
+            return "Alice builds Kafka pipelines"
+
+        with patch("tools.corpus.grep_corpus", side_effect=grep_returns_same), \
+             patch("tools.corpus.read_document", side_effect=read_returns_content):
+            result = orch._search_corpus_for_context("Kafka infrastructure")
+
+        # The duplicated line should produce only one document section
+        self.assertEqual(
+            result.count("--- Document: doc1_abc123 ---"), 1,
+            "Duplicate corpus lines from multiple variants must be deduplicated."
+        )
+
+    def test_corpus_search_falls_back_to_single_query_when_expansion_disabled(self):
+        """
+        When ENABLE_QUERY_EXPANSION=False, grep_corpus must be called exactly
+        once with the original query unchanged.
+        """
+        cfg = _cfg(ENABLE_QUERY_EXPANSION=False)
+        llm = _mock_llm("ok")
+        orch = Orchestrator(llm=llm, config=cfg)
+
+        calls = []
+        def recording_grep(pattern, context_lines=3):
+            calls.append(pattern)
+            return "No matches found"
+
+        with patch("tools.corpus.grep_corpus", side_effect=recording_grep):
+            orch._search_corpus_for_context("Kafka infrastructure")
+
+        self.assertEqual(len(calls), 1, "Exactly one grep call expected when expansion disabled")
+        self.assertEqual(calls[0], "Kafka infrastructure", "Raw query must be passed unchanged")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

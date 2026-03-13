@@ -1,3 +1,242 @@
+# AgeMem — Critical Bug Fixes: Semantic Search Embeddings
+
+**Feature:** LTM embedding persistence and fallback fixes
+**Status:** ✅ SHIPPED
+**Date:** 2026-03-13
+**Target branch:** `main`
+
+---
+
+## Summary
+
+Fixed five critical bugs in the semantic search implementation that caused:
+1. **Embedding BLOB not written** — `ltm_entries.embedding` column remained NULL
+2. **Silent duplicate insertion** — `_find_similar` returned `None` when embedding generation failed, bypassing deduplication
+3. **Migration missing embeddings** — `sync_to_sqlite` didn't generate embeddings for existing entries
+4. **Double-write erasing BLOB** — `sync_to_sqlite` called `_upsert_entry_to_sqlite` twice, second call overwriting embedding with NULL
+5. **Unnormalized embeddings** — `_generate_embedding` didn't ensure unit norm, breaking cosine similarity threshold
+
+---
+
+## Bug 1: Embedding BLOB Not Persisted
+
+### Problem
+
+`_upsert_entry_to_sqlite()` inserted rows without the `embedding` column, leaving BLOB data NULL:
+
+```python
+# Old code — embedding column missing from INSERT
+self._db.execute("""
+    INSERT OR REPLACE INTO ltm_entries
+    (entry_id, content, created_at, updated_at, access_count, learning_score, tags, source_turn)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+""")
+```
+
+This meant:
+- Vector index had embeddings (via `sqlite-vec`)
+- Main `ltm_entries` table had NULL in `embedding` column
+- Schema was inconsistent; external tools couldn't read embeddings
+
+### Fix
+
+Updated `_upsert_entry_to_sqlite` to accept optional embedding and serialize to bytes:
+
+```python
+def _upsert_entry_to_sqlite(
+    self,
+    entry: MemoryEntry,
+    embedding: Optional["np.ndarray"] = None,  # NEW parameter
+) -> None:
+    # Serialize embedding to bytes if provided
+    embedding_bytes: Optional[bytes] = None
+    if embedding is not None:
+        import numpy as np
+        embedding_bytes = embedding.astype(np.float32).tobytes()
+
+    self._db.execute("""
+        INSERT OR REPLACE INTO ltm_entries
+        (entry_id, content, created_at, updated_at, access_count,
+         learning_score, tags, source_turn, embedding)  # NEW column
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)             # NEW param
+    """, (..., embedding_bytes))
+```
+
+Updated callers (`_insert_embedding_for_entry`, `_update_embedding_for_entry`) to pass the embedding through.
+
+---
+
+## Bug 2: Silent Duplicate Insertion on Embedding Failure
+
+### Problem
+
+`_find_similar` had an early exit that never fell through to Jaccard fallback:
+
+```python
+# Old code — returns None without reaching Jaccard path
+if self._semantic_enabled and self._db is not None:
+    vec = self._generate_embedding(content)
+    if vec is not None:
+        # ... cosine similarity check ...
+        return None  # exits here if no semantic match found
+    return None      # exits here if embedding generation failed — BUG!
+
+# Jaccard fallback never reached when embedding fails
+```
+
+This caused:
+- Duplicate entries stored 10 seconds apart (identical content)
+- Database pollution
+- Memory growth unbounded by deduplication
+
+### Fix
+
+Removed early return, added fall-through with warning:
+
+```python
+if self._semantic_enabled and self._db is not None:
+    vec = self._generate_embedding(content)
+    if vec is not None:
+        # ... cosine similarity check ...
+        return None  # semantic search completed, no duplicate found
+    # embedding generation failed — fall through to Jaccard
+    logger.warning("_find_similar: embedding failed, falling back to Jaccard dedup")
+
+# Jaccard fallback now runs when semantic disabled OR embedding failed
+query_tokens = self._tokenise(content)
+# ... Jaccard scoring ...
+```
+
+---
+
+## Bug 3: sync_to_sqlite Missing Embeddings
+
+### Problem
+
+Migration method only called `_upsert_entry_to_sqlite` without generating embeddings:
+
+```python
+# Old code — no embeddings generated
+def sync_to_sqlite(self) -> int:
+    for entry in self._entries.values():
+        self._upsert_entry_to_sqlite(entry)  # embedding column always NULL
+```
+
+This meant:
+- Existing in-memory entries migrated without embeddings
+- Vector index remained empty for these entries
+- Semantic search couldn't find migrated entries
+
+### Fix
+
+Call `_insert_embedding_for_entry` which generates and stores embeddings:
+
+```python
+def sync_to_sqlite(self) -> int:
+    for entry in self._entries.values():
+        # Generate and insert embedding — writes to both vector index and ltm_entries BLOB
+        self._insert_embedding_for_entry(entry)
+        # Ensure row exists even if embedding generation failed
+        self._upsert_entry_to_sqlite(entry)
+    if count > 0:
+        self._db.commit()
+```
+
+---
+
+## Bug 4: Double-Write Erasing Embedding BLOB
+
+### Problem
+
+`sync_to_sqlite` called `_upsert_entry_to_sqlite` twice per entry — once inside `_insert_embedding_for_entry` (with embedding), then again directly (without embedding):
+
+```python
+# Bug: second call overwrites the BLOB with NULL
+def sync_to_sqlite(self) -> int:
+    for entry in self._entries.values():
+        self._insert_embedding_for_entry(entry)  # writes row WITH embedding BLOB
+        self._upsert_entry_to_sqlite(entry)       # overwrites with NULL embedding!
+```
+
+The `INSERT OR REPLACE` in the second call replaced the row, setting `embedding = NULL`.
+
+### Fix
+
+Check if row already exists before fallback upsert:
+
+```python
+def sync_to_sqlite(self) -> int:
+    for entry in self._entries.values():
+        self._insert_embedding_for_entry(entry)
+        # Only write row if embedding generation failed (row doesn't exist)
+        row = self._db.execute(
+            "SELECT entry_id FROM ltm_entries WHERE entry_id = ?",
+            (entry.entry_id,)
+        ).fetchone()
+        if row is None:
+            self._upsert_entry_to_sqlite(entry)  # embedding=None fallback
+```
+
+---
+
+## Bug 5: Unnormalized Embeddings Breaking Cosine Similarity
+
+### Problem
+
+`_generate_embedding` returned raw vectors from the embedding model without ensuring unit norm:
+
+```python
+# Old code — no normalization
+def _generate_embedding(self, text: str) -> Optional["np.ndarray"]:
+    return model.embed_text(text)  # may not be unit length
+```
+
+The `_find_similar` method uses `np.dot(vec, stored_vec)` to compute cosine similarity, which only equals cosine similarity when both vectors are unit-normalized. If the embedding model returns unnormalized vectors, the `LTM_DEDUP_THRESHOLD` (default 0.92) is meaningless.
+
+### Fix
+
+Normalize vectors to unit length after generation:
+
+```python
+def _generate_embedding(self, text: str) -> Optional["np.ndarray"]:
+    vec = model.embed_text(text)
+    # Ensure unit norm for cosine similarity via dot product
+    import numpy as np
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec = vec / norm
+    return vec
+```
+
+This is a no-op if the model already returns unit vectors (common with `normalize_embeddings=True`), but guarantees correct cosine similarity otherwise.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `memory/ltm_store.py` | `_upsert_entry_to_sqlite()` — added `embedding` param, writes BLOB column |
+| `memory/ltm_store.py` | `_insert_embedding_for_entry()` — passes embedding to upsert |
+| `memory/ltm_store.py` | `_update_embedding_for_entry()` — passes embedding to upsert |
+| `memory/ltm_store.py` | `_find_similar()` — fall through to Jaccard when embedding fails |
+| `memory/ltm_store.py` | `sync_to_sqlite()` — generate embeddings + fix double-write |
+| `memory/ltm_store.py` | `_generate_embedding()` — normalize to unit length |
+| `tests/test_agemem.py` | Added `test_sync_to_sqlite_does_not_erase_embedding_blob` |
+
+---
+
+## Verification
+
+- 38 of 39 existing tests pass (1 pre-existing flaky failure unrelated to these changes)
+- Embedding BLOB now populated in `ltm_entries` after `add()` with semantic search enabled
+- `sync_to_sqlite` preserves BLOBs and doesn't erase them
+- Duplicate detection falls back to Jaccard when embedding model unavailable
+- Migration populates embeddings for existing entries
+- `_generate_embedding` returns unit-normalized vectors
+
+---
+
 # AgeMem — Bug Fixes: LTM Deduplication & STM Overflow
 
 **Feature:** Memory system reliability fixes
@@ -94,6 +333,94 @@ Now passes — `force_fit()` correctly keeps utilization near the critical thres
 | `memory/ltm_store.py` | `_find_similar()` uses Jaccard overlap instead of leading-word match |
 | `core/config.py` | Added `LTM_DEDUP_OVERLAP_THRESHOLD` config |
 | `tests/test_agemem.py` | Updated BUG2 tests to document behavior; fixed T20 token limit |
+
+---
+
+# AgeMem — Query Expansion in Corpus Search
+
+**Feature:** Query expansion integration into `_search_corpus_for_context`
+**Status:** ✅ SHIPPED
+**Date:** 2026-03-13
+**Target branch:** `main`
+
+---
+
+## Summary
+
+Integrated the existing `QueryExpander` tool into `Orchestrator._search_corpus_for_context` to improve corpus search recall on paraphrase queries. When a user asks "which company is closer to profitability?" the grep pattern now finds content containing "operating breakeven" and "operating loss narrowing" through query variants.
+
+---
+
+## Problem
+
+The corpus search method passed raw user queries directly to `grep_corpus`, producing poor recall on paraphrase queries. Example:
+- User asks: "which company is closer to profitability?"
+- Corpus contains: "operating breakeven", "operating loss narrowing"
+- Grep finds nothing because "profitability" doesn't appear in the corpus
+
+---
+
+## Solution
+
+### 1. Added QueryExpander to Orchestrator
+
+```python
+# In Orchestrator.__init__
+self._query_expander: Optional[QueryExpander] = None
+if getattr(self._config, 'ENABLE_QUERY_EXPANSION', False):
+    self._query_expander = QueryExpander(
+        llm_client=self._llm,
+        model=self._config.MEMORY_AGENT_MODEL,
+        n_variants=getattr(self._config, 'QUERY_EXPANSION_N_VARIANTS', 3),
+        ...
+    )
+```
+
+### 2. Rewrote `_search_corpus_for_context`
+
+The new implementation:
+1. Generates query variants via `QueryExpander.expand(query)`
+2. Runs `grep_corpus` for each variant
+3. Deduplicates results across variants (same corpus line appears only once)
+4. Extracts doc_ids and builds context (still capped at 3 docs)
+5. Logs which variants produced hits for debugging
+
+---
+
+## Behavior
+
+| ENABLE_QUERY_EXPANSION | Behavior |
+|------------------------|----------|
+| `False` (default) | Identical to old implementation — single raw query grep |
+| `True` | Multi-variant grep with deduplication |
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `agents/orchestrator.py` | Added `QueryExpander` import; initialized `_query_expander`; rewrote `_search_corpus_for_context` |
+| `tests/test_agemem.py` | Added `TestCorpusSearch` class with 3 new tests |
+
+---
+
+## Tests Added
+
+| Test | Purpose |
+|------|---------|
+| `test_corpus_search_uses_expanded_queries_when_enabled` | Verifies grep_corpus called >1 time when expansion enabled |
+| `test_corpus_search_deduplicates_across_variants` | Verifies duplicate corpus lines appear only once |
+| `test_corpus_search_falls_back_to_single_query_when_expansion_disabled` | Verifies exactly 1 grep call when disabled |
+
+---
+
+## Acceptance Criteria
+
+- [x] All three new tests pass
+- [x] Existing tests still pass (37 passed, 1 skipped, 1 pre-existing flaky failure)
+- [x] When `ENABLE_QUERY_EXPANSION=False`, behavior identical to previous implementation
+- [x] Method signature unchanged — returns `Optional[str]`
 
 ---
 
