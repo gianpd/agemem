@@ -244,6 +244,7 @@ class LTMStore:
             if self._semantic_enabled and self._db:
                 from memory.vector_index import delete_embedding
                 delete_embedding(self._db, entry_id)
+                self._db.commit()
 
             return MemoryOpResult(
                 op=MemoryOp.DELETE,
@@ -538,6 +539,10 @@ class LTMStore:
                 from memory.vector_index import delete_embedding
                 delete_embedding(self._db, eid)
 
+        # Commit any deletes to SQLite
+        if self._semantic_enabled and self._db and excess > 0:
+            self._db.commit()
+
     def _maybe_persist(self) -> None:
         if self._persist_path is None:
             return
@@ -567,6 +572,9 @@ class LTMStore:
                 # Also update SQLite ltm_entries table
                 self._upsert_entry_to_sqlite(entry)
 
+                # Commit the transaction to persist changes
+                self._db.commit()
+
         except Exception as e:
             logger.error(f"Failed to insert embedding for {entry.entry_id}: {e}")
 
@@ -583,6 +591,9 @@ class LTMStore:
 
                 # Also update SQLite ltm_entries table
                 self._upsert_entry_to_sqlite(entry)
+
+                # Commit the transaction to persist changes
+                self._db.commit()
 
         except Exception as e:
             logger.error(f"Failed to update embedding for {entry.entry_id}: {e}")
@@ -623,6 +634,9 @@ class LTMStore:
         for entry in self._entries.values():
             self._upsert_entry_to_sqlite(entry)
             count += 1
+        # Commit all changes
+        if count > 0:
+            self._db.commit()
         return count
 
     # SEMANTIC_SEARCH: Close database connection
