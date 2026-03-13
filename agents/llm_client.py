@@ -29,7 +29,21 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
+
+
+@dataclass
+class ChatResponseInfo:
+    """Detailed response information from LLM chat call."""
+    content: str
+    model: str
+    finish_reason: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    is_empty: bool = False
+    retries_used: int = 0
 
 
 class ToolCallResponse(Exception):
@@ -572,10 +586,128 @@ class LLMClient:
                         # Raise for the first detected tool call
                         raise TextToolCallResponse(text_tool_calls[0])
 
+                # DIAGNOSTIC: Log response details for empty response debugging
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                if not content or not content.strip():
+                    # Log empty response details for debugging
+                    print(f"[DEBUG] EMPTY_RESPONSE: model={model} finish_reason={finish_reason} "
+                          f"content_len={len(content)} content_repr={repr(content[:50] if content else '')} "
+                          f"usage_in={getattr(usage, 'prompt_tokens', 0)} usage_out={getattr(usage, 'completion_tokens', 0)}",
+                          flush=True)
+
+                    # Retry on empty response (treat as transient failure)
+                    if attempt < retries:
+                        print(f"[DEBUG] RETRYING due to empty response (attempt {attempt + 1}/{retries})", flush=True)
+                        time.sleep(1.5 ** attempt)
+                        continue
+
                 return content
             except Exception as exc:
                 # Don't retry on tool calls - let them propagate
                 if isinstance(exc, ToolCallResponse):
+                    raise
+                last_exc = exc
+                if attempt < retries:
+                    time.sleep(1.5 ** attempt)
+
+        raise RuntimeError(f"LLM call failed after {retries+1} attempts: {last_exc}")
+
+    def chat_with_info(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        max_tokens: int = 1024,
+        temperature: Optional[float] = None,
+        json_mode: bool = False,
+        retries: int = 2,
+        tools: Optional[list[dict]] = None,
+        timeout: float = 300.0,
+    ) -> ChatResponseInfo:
+        """
+        Send a chat completion request and return detailed response information.
+
+        This method provides full diagnostic information including token counts,
+        finish reason, and empty response detection.
+
+        Returns ChatResponseInfo with content and metadata.
+        Raises RuntimeError after exhausting retries.
+        Raises ToolCallResponse or TextToolCallResponse if tool call detected.
+        """
+        model = model or self._model
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature if temperature is not None else self._temperature,
+            "timeout": timeout,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+            if self._disable_thinking_for_json and self._is_thinking_model(model):
+                kwargs["messages"] = self._inject_no_think(messages)
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+                self._total_calls += 1
+                usage = getattr(response, "usage", None)
+                prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+                completion_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+                total_tokens = prompt_tokens + completion_tokens
+
+                if usage:
+                    self._total_tokens_in += prompt_tokens
+                    self._total_tokens_out += completion_tokens
+
+                message = response.choices[0].message
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+
+                # Check for tool calls
+                tool_calls = getattr(message, "tool_calls", None)
+                if isinstance(tool_calls, list) and len(tool_calls) > 0:
+                    raise ToolCallResponse(tool_calls[0])
+
+                content = message.content or ""
+
+                # Check for text-based tool calls
+                if tools:
+                    text_tool_calls = detect_text_tool_calls(content)
+                    if text_tool_calls:
+                        raise TextToolCallResponse(text_tool_calls[0])
+
+                is_empty = not content or not content.strip()
+
+                # Log empty response details for debugging
+                if is_empty:
+                    print(f"[DEBUG] EMPTY_RESPONSE: model={model} finish_reason={finish_reason} "
+                          f"content_len={len(content)} content_repr={repr(content[:50] if content else '')} "
+                          f"usage_in={prompt_tokens} usage_out={completion_tokens}",
+                          flush=True)
+
+                    # Retry on empty response
+                    if attempt < retries:
+                        print(f"[DEBUG] RETRYING due to empty response (attempt {attempt + 1}/{retries})", flush=True)
+                        time.sleep(1.5 ** attempt)
+                        continue
+
+                return ChatResponseInfo(
+                    content=content,
+                    model=model,
+                    finish_reason=finish_reason,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    is_empty=is_empty,
+                    retries_used=attempt,
+                )
+
+            except Exception as exc:
+                if isinstance(exc, (ToolCallResponse, TextToolCallResponse)):
                     raise
                 last_exc = exc
                 if attempt < retries:

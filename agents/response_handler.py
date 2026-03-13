@@ -39,13 +39,22 @@ class ResponseMetrics:
     error_count: int = 0
     recovery_attempts: int = 0
     quality_score: float = 1.0
-    
+    # Additional diagnostic fields
+    model: str = "unknown"
+    finish_reason: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    is_empty_response: bool = False
+
     def __post_init__(self):
         """Calculate quality score based on errors and recovery attempts."""
         if self.error_count > 0 or self.recovery_attempts > 0:
             # Reduce quality score based on errors and recovery attempts
             penalty = (self.error_count * 0.3) + (self.recovery_attempts * 0.2)
             self.quality_score = max(0.0, 1.0 - penalty)
+        # Further reduce quality for empty responses
+        if self.is_empty_response:
+            self.quality_score = min(self.quality_score, 0.1)
 
 
 @dataclass

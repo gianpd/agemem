@@ -396,12 +396,29 @@ class InteractionLogger:
         )
 
         # Log message summary to debug
+        # Include message role and content preview for each message
+        msg_summaries = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                preview = content[:100] + "..." if len(content) > 100 else content
+            else:
+                # Check for tool_calls in assistant message
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    preview = f"[tool_calls: {len(tool_calls)}]"
+                else:
+                    preview = "[empty]"
+            msg_summaries.append(f"  [{i}] {role}: {preview}")
+
         self._debug_logger.debug(
             f"[LLM_CALL] call_id={call_id} model={model}\n"
             f"Messages: {len(messages)}\n"
             f"Max tokens: {max_tokens}\n"
             f"Temperature: {temperature}\n"
-            f"Tools: {has_tools}"
+            f"Tools: {has_tools}\n"
+            f"Message details:\n" + "\n".join(msg_summaries)
         )
 
         return call_id
@@ -413,6 +430,10 @@ class InteractionLogger:
         latency_ms: float,
         token_count: int = 0,
         error: Optional[str] = None,
+        model: str = "unknown",
+        finish_reason: Optional[str] = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ):
         """Log an LLM API response."""
         self._llm_logger.debug(
@@ -424,12 +445,27 @@ class InteractionLogger:
                 "token_count": token_count,
                 "response_length": len(response) if response else 0,
                 "error": error,
+                "model": model,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
             }
+        )
+
+        # Log detailed response info to debug log
+        is_empty = not response or not response.strip()
+        self._debug_logger.debug(
+            f"[LLM_RESPONSE] call_id={call_id} model={model}\n"
+            f"Latency: {latency_ms:.1f}ms\n"
+            f"Tokens: prompt={prompt_tokens} completion={completion_tokens}\n"
+            f"Finish reason: {finish_reason}\n"
+            f"Response length: {len(response) if response else 0} chars\n"
+            f"Is empty: {is_empty}"
         )
 
         # Log raw response for testing
         if response:
-            self.log_raw_response(response)
+            self.log_raw_response(response, model=model)
 
     # ── Tool Call Logging ─────────────────────────────────────────────────────
 

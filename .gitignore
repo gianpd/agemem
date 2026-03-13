@@ -9,6 +9,7 @@ __pytest__
 *.json
 *.jsonr
 *.pdf
+*.log
 
 documents/
 corpus/
@@ -17,3 +18,4 @@ agent_memory/
 demo/
 output/
 workflow/
+logs/
