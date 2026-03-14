@@ -59,6 +59,7 @@ from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
 from agents.response_handler import ResponseHandler
 from skills.manager import SkillManager
+from tools.query_expansion import QueryExpander
 
 import logging
 
@@ -210,6 +211,19 @@ class Orchestrator:
         # Skill manager for dynamic capability hints
         self._skill_manager = SkillManager(config)
         self._skill_manager.load_skills()
+
+        # Query expander for corpus search
+        self._query_expander: Optional[QueryExpander] = None
+        if getattr(self._config, 'ENABLE_QUERY_EXPANSION', False):
+            self._query_expander = QueryExpander(
+                llm_client=self._llm,
+                model=self._config.MEMORY_AGENT_MODEL,
+                n_variants=getattr(self._config, 'QUERY_EXPANSION_N_VARIANTS', 3),
+                use_ner_hints=getattr(self._config, 'QUERY_EXPANSION_USE_NER_HINTS', False),
+                timeout_ms=getattr(self._config, 'QUERY_EXPANSION_TIMEOUT_MS', 1500),
+                fallback_transforms=getattr(self._config, 'QUERY_EXPANSION_FALLBACK_TRANSFORMS', ["nominalize", "add_how_to"]),
+                acronym_dict=getattr(self._config, 'QUERY_EXPANSION_ACRONYM_DICT', {}),
+            )
 
     def _init_prompt_registry(self) -> None:
         """Initialize prompt registry and capture current prompt versions for audit."""
@@ -436,7 +450,7 @@ class Orchestrator:
         for skill in skills:
             self._stm.add_message(
                 role="system",
-                content=f"[SKILL HINT: {skill.name}] {skill.hint_message}",
+                content=f"[SKILL HINT: {skill.name}] {skill.hint_message} - {skill.source_doc_id} - {skill.description}",
                 relevance_score=self._config.SKILL_DEFAULT_RELEVANCE,
                 is_pinned=False,
             )
@@ -712,14 +726,22 @@ class Orchestrator:
 
         # ── 3c. Immediately promote to LTM on learning spike ─────────────────
         if feedback and feedback.score >= self._config.LTM_PROMOTE_THRESHOLD:
-            # Use affected_content if provided, otherwise extract from recent assistant message
+            # Use affected_content if provided, otherwise build from recent assistant messages
             content_to_store = feedback.affected_content
             if not content_to_store:
-                # Find the most recent assistant message as fallback
+                # Cumulative buffer: collect from recent assistant messages until budget exhausted
+                budget = self._config.LTM_ENTRY_MAX_CHARS
+                segments: list[str] = []
                 for msg in reversed(self._stm.messages()):
                     if msg.role == "assistant" and msg.content:
-                        content_to_store = msg.content[:500]  # Limit to 500 chars
-                        break
+                        segments.append(msg.content[:budget])
+                        budget -= len(msg.content)
+                        if budget <= 0:
+                            break
+                content_to_store = "\n\n".join(reversed(segments))
+            else:
+                # Respect budget even for explicit affected_content
+                content_to_store = content_to_store[:self._config.LTM_ENTRY_MAX_CHARS]
             if content_to_store:
                 add_op = self._ltm.add(
                     content=content_to_store,
@@ -816,6 +838,8 @@ class Orchestrator:
 
         This method searches the corpus without duplicating data into LTM.
         Results are injected directly into STM as ephemeral context.
+        Uses query expansion when ENABLE_QUERY_EXPANSION=True for better recall
+        on paraphrase queries.
 
         Args:
             query: The user query to search for
@@ -825,31 +849,109 @@ class Orchestrator:
         """
         from tools.corpus import grep_corpus, read_document
 
-        # Search corpus for matches
-        try:
-            grep_results = grep_corpus(query, context_lines=3)
-        except Exception:
-            return None
+        tracer = get_tracer()
+        logger = logging.getLogger("agemem")
 
-        if not grep_results or "No matches found" in grep_results:
-            return None
+        # Track timing for query expansion
+        expansion_start = time.time()
 
-        # Extract doc_ids from grep results
-        doc_ids = set()
-        for line in grep_results.split('\n'):
+        # Step 1: Generate query variants
+        if self._query_expander is not None:
+            queries = self._query_expander.expand(query)
+            method = "llm" if self._config.ENABLE_QUERY_EXPANSION else "regex"
+            tracer.log_memory_op(
+                op_type="QUERY_EXPANSION_INIT",
+                detail=f"Query expansion enabled with {len(queries)} variants",
+                success=True,
+            )
+        else:
+            queries = [query]
+            method = "disabled"
+            tracer.log_memory_op(
+                op_type="QUERY_EXPANSION_INIT",
+                detail="Query expansion disabled",
+                success=True,
+            )
+
+        # Step 2: Run grep_corpus for each variant, collect all result lines
+        all_lines: list[str] = []
+        hits_per_variant: list[int] = []
+
+        for q in queries:
+            variant_hits = 0
+            try:
+                result = grep_corpus(q, context_lines=3)
+            except Exception as e:
+                logger.debug(f"[query_expansion] grep_corpus failed for '{q[:40]}...': {e}")
+                hits_per_variant.append(0)
+                continue
+
+            if result and "No matches found" not in result:
+                lines = [line for line in result.split('\n') if line.strip()]
+                variant_hits = len(lines)
+                all_lines.extend(lines)
+
+            hits_per_variant.append(variant_hits)
+
+        # Step 3: Deduplicate lines by exact string, preserving first-occurrence order
+        seen_lines: set[str] = set()
+        deduplicated_lines: list[str] = []
+        for line in all_lines:
+            if line not in seen_lines:
+                seen_lines.add(line)
+                deduplicated_lines.append(line)
+
+        dedup_count = len(all_lines) - len(deduplicated_lines)
+
+        # Step 4: Extract doc_ids from deduplicated lines
+        doc_ids: set[str] = set()
+        for line in deduplicated_lines:
             if ': ' in line and not line.startswith('[TOOL'):
                 # Extract doc_id from path like "corpus/test1_0922ba.md:..."
-                import re
                 match = re.search(r'corpus/([^.]+)\.md:', line)
                 if match:
                     doc_ids.add(match.group(1))
 
+        expansion_duration_ms = (time.time() - expansion_start) * 1000
+
+        # Log query expansion results
+        tracer.log_query_expansion(
+            original_query=query,
+            variants=queries,
+            hit_counts=hits_per_variant,
+            duration_ms=expansion_duration_ms,
+            method=method,
+            success=True,
+        )
+
+        # Log deduplication stats
+        if dedup_count > 0:
+            tracer.log_memory_op(
+                op_type="QUERY_EXPANSION_DEDUP",
+                detail=f"Deduplicated {dedup_count} duplicate lines",
+                success=True,
+            )
+
         if not doc_ids:
+            tracer.log_memory_op(
+                op_type="QUERY_EXPANSION_NO_HITS",
+                detail=f"No documents found for query variants",
+                success=True,
+            )
             return None
 
-        # Build context from matching documents
+        # Log which variants produced hits
+        variants_with_hits = sum(1 for h in hits_per_variant if h > 0)
+        logger.debug(
+            f"[query_expansion] query='{query[:60]}...' method={method} "
+            f"variants={len(queries)} hits={variants_with_hits}/{len(queries)} "
+            f"docs={len(doc_ids)} dedup_removed={dedup_count}"
+        )
+
+        # Step 5: Build context from matching documents (cap at 3)
         context_parts = []
-        for doc_id in list(doc_ids)[:3]:  # Limit to top 3 docs
+        docs_used = 0
+        for doc_id in list(doc_ids)[:3]:
             try:
                 content = read_document(doc_id)
                 if not content or content.startswith("Error:"):
@@ -870,12 +972,27 @@ class Orchestrator:
                     content_body = content_body[:3000] + "\n... [truncated]"
 
                 context_parts.append(f"--- Document: {doc_id} ---\n{content_body}")
+                docs_used += 1
 
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[query_expansion] Failed to read document {doc_id}: {e}")
                 continue
 
         if not context_parts:
+            tracer.log_memory_op(
+                op_type="QUERY_EXPANSION_EMPTY_CONTEXT",
+                detail="No valid context extracted from documents",
+                success=False,
+            )
             return None
+
+        # Log final context built
+        total_chars = sum(len(p) for p in context_parts)
+        tracer.log_memory_op(
+            op_type="QUERY_EXPANSION_CONTEXT_BUILT",
+            detail=f"Built context from {docs_used} docs, {total_chars} chars",
+            success=True,
+        )
 
         return "\n\n".join(context_parts)
 

@@ -20,7 +20,6 @@ from bs4 import BeautifulSoup, Comment
 from core.config import (
     UWOT_SEARCH_ENABLED,
     UWOT_SEARCH_SERVICE_URL,
-    UWOT_API_KEY,
     FETCH_ONLY_MENTIONED_URLS,
 )
 

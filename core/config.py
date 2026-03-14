@@ -90,8 +90,11 @@ class AgememConfig:
     """Minimum messages to keep even under critical pressure (last N turns)."""
 
     # ── LTM store ─────────────────────────────────────────────────────────────
-    LTM_MAX_ENTRIES: int = 500
+    LTM_MAX_ENTRIES: int = 5000
     """Maximum entries in the LTM store before least-scored entries are pruned."""
+
+    LTM_ENTRY_MAX_CHARS: int = 2000
+    """Maximum characters per LTM entry. Larger content is truncated."""
 
     LTM_PROMOTE_THRESHOLD: float = 0.65
     """LearningFeedback.score >= this value triggers LTM ADD candidacy."""
@@ -158,7 +161,7 @@ class AgememConfig:
     LEARNING_SCORE_PROMPT_EVERY_N: int = 3
     """Ask the agent for a LearningFeedback every N turns."""
 
-    LEARNING_SCORE_THRESHOLD_IMMEDIATE: float = 0.85
+    LEARNING_SCORE_THRESHOLD_IMMEDIATE: float = 0.8
     """If agent self-reports >= this score, skip the N-turn cadence and act now."""
 
     # ── Memory agent ──────────────────────────────────────────────────────────
@@ -217,7 +220,7 @@ class AgememConfig:
     """Alpha Vantage API key for commodity price data."""
 
     # ── Query Expansion ───────────────────────────────────────────────────────
-    ENABLE_QUERY_EXPANSION: bool = False
+    ENABLE_QUERY_EXPANSION: bool = True
     """Enable query expansion for LTM retrieval. Opt-in, safe default."""
 
     QUERY_EXPANSION_N_VARIANTS: int = 3

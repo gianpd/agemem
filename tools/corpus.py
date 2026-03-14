@@ -6,7 +6,8 @@ Tools for interacting with the local document corpus.
 
 import json
 import logging
-import subprocess
+import re
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -14,8 +15,7 @@ from core.config import CORPUS, MAX_READ_LINES
 
 logger = logging.getLogger("agemem")
 
-
-tool_definitions = [
+tool_definitions =[
     {
         "type": "function",
         "function": {
@@ -37,9 +37,9 @@ tool_definitions = [
         "function": {
             "name": "search_metadata",
             "description": (
-                "Search document metadata (titles, types, tags) for a keyword. "
+                "Search document metadata (titles, types, tags, entities) for a keyword. "
                 "Returns matching documents with their metadata. "
-                "Use this to find documents by title, type, or keywords in frontmatter."
+                "Use this to find documents by title, type, or entities in frontmatter."
             ),
             "parameters": {
                 "type": "object",
@@ -55,20 +55,18 @@ tool_definitions = [
         "function": {
             "name": "grep_corpus",
             "description": (
-                "Search the full text of all documents using a keyword or regex pattern. "
-                "Returns matching lines with context. "
-                "For best results, use pipe-separated alternatives rather than natural language: "
+                "Search the body text of all documents using a keyword or regex pattern. "
+                "Automatically skips YAML frontmatter to reduce noise. "
+                "CRITICAL: Use pipe-separated words for multiple concepts, NOT spaces! "
                 "GOOD: grep_corpus('operating loss|breakeven|profitability') "
                 "GOOD: grep_corpus('Siemens|partnership|industrial') "
                 "BAD: grep_corpus('which company is closer to profitability') "
-                "Extract the most distinctive nouns and domain terms from the question "
-                "and combine them with | before calling this tool. "
-                "Results are capped at 4000 characters."
+                "Results are intelligently grouped and capped at ~4000 characters."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "The search pattern (keyword or regex)."},
+                    "pattern": {"type": "string", "description": "The search pattern (use | for OR, e.g., 'referendum|PM')."},
                     "context_lines": {"type": "integer", "description": "Number of context lines around matches (default 3, max 5)."}
                 },
                 "required": ["pattern"]
@@ -81,14 +79,13 @@ tool_definitions = [
             "name": "read_document",
             "description": (
                 "Read the full content of a specific document by its doc_id. "
-                "Use list_documents first to find available doc_ids. "
-                "Returns the document content, truncated if too long (max ~8000 chars). "
+                "Returns the document content, truncated if too long. "
                 "For large documents, use read_lines to read specific portions."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "doc_id": {"type": "string", "description": "The document ID (filename without extension)."}
+                    "doc_id": {"type": "string", "description": "The document ID (from list_documents)."}
                 },
                 "required": ["doc_id"]
             }
@@ -110,44 +107,53 @@ tool_definitions = [
                     "start_line": {"type": "integer", "description": "Start line number (1-indexed)."},
                     "end_line": {"type": "integer", "description": "End line number (1-indexed)."}
                 },
-                "required": ["doc_id", "start_line", "end_line"]
+                "required":["doc_id", "start_line", "end_line"]
             }
         }
     }
 ]
 
 
-def list_documents() -> str:
-    """
-    List all ingested documents with metadata.
+def _parse_frontmatter(content: str) -> tuple[dict, str, str]:
+    """Safely parse frontmatter and return (metadata_dict, body_text, raw_frontmatter)."""
+    meta = {}
+    body_text = content
+    raw_frontmatter = ""
+    
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            raw_frontmatter = parts[1]
+            body_text = parts[2]
+            try:
+                import yaml
+                meta = yaml.safe_load(raw_frontmatter) or {}
+            except Exception as e:
+                logger.warning(f"Failed to parse YAML frontmatter: {e}")
+                
+    return meta, body_text, raw_frontmatter
 
-    Returns:
-        JSON string with list of documents
-    """
-    docs = []
+
+def _get_doc_info(md_file: Path, meta: dict) -> dict:
+    """Extract standard fields from possibly varying metadata schemas."""
+    return {
+        "doc_id": meta.get("doc_id", md_file.stem),
+        "title": meta.get("doc_title", meta.get("title", md_file.stem)),
+        "type": meta.get("doc_type", meta.get("type", "unknown")),
+        "date": meta.get("doc_date", meta.get("date", "")),
+        "path": str(md_file)
+    }
+
+
+def list_documents() -> str:
+    """List all ingested documents with metadata."""
+    docs =[]
     for md_file in sorted(CORPUS.glob("*.md")):
         try:
-            with open(md_file, "r") as f:
+            with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
-
-            # Parse YAML frontmatter
-            meta = {}
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    import yaml
-                    try:
-                        meta = yaml.safe_load(parts[1]) or {}
-                    except yaml.YAMLError:
-                        pass
-
-            docs.append({
-                "doc_id": md_file.stem,
-                "title": meta.get("title", md_file.stem),
-                "type": meta.get("type", "unknown"),
-                "date": meta.get("date", ""),
-                "path": str(md_file)
-            })
+            meta, _, _ = _parse_frontmatter(content)
+            docs.append(_get_doc_info(md_file, meta))
         except IOError as e:
             logger.warning(f"[list_documents] Failed to read {md_file}: {e}")
 
@@ -155,41 +161,22 @@ def list_documents() -> str:
 
 
 def search_metadata(keyword: str) -> str:
-    """
-    Search document metadata for a keyword.
-
-    Args:
-        keyword: The keyword to search for
-
-    Returns:
-        JSON string with matching documents
-    """
+    """Search document metadata for a keyword anywhere in the frontmatter."""
     keyword_lower = keyword.lower()
-    matches = []
+    matches =[]
 
     for md_file in sorted(CORPUS.glob("*.md")):
         try:
-            with open(md_file, "r") as f:
+            with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # Check frontmatter
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    frontmatter = parts[1].lower()
-                    if keyword_lower in frontmatter:
-                        import yaml
-                        try:
-                            meta = yaml.safe_load(parts[1]) or {}
-                        except yaml.YAMLError:
-                            meta = {}
-
-                        matches.append({
-                            "doc_id": md_file.stem,
-                            "title": meta.get("title", md_file.stem),
-                            "type": meta.get("type", "unknown"),
-                            "matched_in": "frontmatter"
-                        })
+            meta, _, raw_frontmatter = _parse_frontmatter(content)
+            
+            # Search the raw text of the frontmatter (handles nested lists/entities safely)
+            if keyword_lower in raw_frontmatter.lower():
+                doc_info = _get_doc_info(md_file, meta)
+                doc_info["matched_in"] = "frontmatter"
+                matches.append(doc_info)
         except IOError:
             continue
 
@@ -198,64 +185,127 @@ def search_metadata(keyword: str) -> str:
 
 def grep_corpus(pattern: str, context_lines: int = 3) -> str:
     """
-    Search document body text using ripgrep.
-
-    Args:
-        pattern: The search pattern (single keyword recommended)
-        context_lines: Lines of context around matches
-
-    Returns:
-        Search results as formatted text
+    Search document body text using pure Python. 
+    Intelligently skips YAML frontmatter and groups context.
     """
-    if context_lines > 5:
-        context_lines = 5
-
+    context_lines = min(context_lines, 5)
+    
+    # AUTO-FIX: If the LLM mistakenly uses spaces instead of pipes, and no regex operators are present
+    if not any(c in pattern for c in "|.*+?()[]{}") and " " in pattern:
+        pattern = "|".join(pattern.split())
+        
     try:
-        result = subprocess.run(
-            ["rg", "-i", "-C", str(context_lines), "--no-heading", pattern, str(CORPUS)],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Error: Invalid regular expression - {e}"
 
-        if result.returncode == 0:
-            output = result.stdout
-            if len(output) > 4000:
-                output = output[:4000] + "\n... [truncated]"
-            return output
-        else:
-            return f"No matches found for pattern: {pattern}"
+    all_results =[]
+    total_matches = 0
+    char_count = 0
+    MAX_CHARS = 4000
 
-    except subprocess.TimeoutExpired:
-        return "Error: Search timed out"
-    except FileNotFoundError:
-        return "Error: ripgrep (rg) not installed"
-    except Exception as e:
-        return f"Error: {e}"
+    for md_file in sorted(CORPUS.rglob("*.md")):
+        if char_count > MAX_CHARS:
+            break
+
+        try:
+            with open(md_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            meta, body_text, _ = _parse_frontmatter(content)
+            doc_id = meta.get("doc_id", md_file.stem)
+
+            lines = body_text.splitlines()
+            match_indices =[i for i, line in enumerate(lines) if regex.search(line)]
+
+            if not match_indices:
+                continue
+
+            total_matches += len(match_indices)
+            
+            file_header = f"\n📄[{doc_id}] ({len(match_indices)} matches)"
+            all_results.append(file_header)
+            char_count += len(file_header)
+
+            MAX_MATCHES_PER_FILE = 5
+            snippets = []
+            current_snippet =[]
+            last_idx = -100
+
+            for i in match_indices[:MAX_MATCHES_PER_FILE]:
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+
+                if start <= last_idx:
+                    current_snippet.extend(lines[last_idx:end])
+                else:
+                    if current_snippet:
+                        snippets.append("\n".join(current_snippet))
+                    current_snippet = lines[start:end]
+
+                last_idx = end
+
+            if current_snippet:
+                snippets.append("\n".join(current_snippet))
+
+            for snip in snippets:
+                formatted_snip = f"...\n{snip.strip()}\n..."
+                all_results.append(formatted_snip)
+                char_count += len(formatted_snip)
+
+            if len(match_indices) > MAX_MATCHES_PER_FILE:
+                overflow_msg = f"  *(+{len(match_indices) - MAX_MATCHES_PER_FILE} more matches not shown)*"
+                all_results.append(overflow_msg)
+                char_count += len(overflow_msg)
+
+        except Exception as e:
+            logger.warning(f"Error searching {md_file}: {e}")
+
+    if not total_matches:
+        return f"No matches found for pattern: {pattern}"
+
+    result_str = "\n".join(all_results)
+    if len(result_str) > MAX_CHARS:
+        result_str = result_str[:MAX_CHARS] + "\n\n[TRUNCATED: Maximum output length reached]"
+        
+    return result_str
+
+
+def _find_file_by_doc_id(doc_id: str) -> Optional[Path]:
+    """Resolve a doc_id to its actual file path."""
+    # First try exact filename match
+    direct_path = CORPUS / f"{doc_id}.md"
+    if direct_path.exists():
+        return direct_path
+        
+    # Then fallback to parsing frontmatter to find the true ID
+    for md_file in CORPUS.glob("*.md"):
+        if md_file.stem == doc_id:
+            return md_file
+        try:
+            with open(md_file, "r", encoding="utf-8") as f:
+                meta, _, _ = _parse_frontmatter(f.read())
+                if meta.get("doc_id") == doc_id:
+                    return md_file
+        except Exception:
+            pass
+            
+    return None
 
 
 def read_document(doc_id: str) -> str:
-    """
-    Read the full content of a document by doc_id.
-
-    Args:
-        doc_id: The document ID (filename without extension)
-
-    Returns:
-        Document content or error message
-    """
-    doc_path = CORPUS / f"{doc_id}.md"
-
-    if not doc_path.exists():
+    """Read the full content of a document by doc_id."""
+    target_file = _find_file_by_doc_id(doc_id)
+    
+    if not target_file:
         return f"Error: Document '{doc_id}' not found"
 
     try:
-        with open(doc_path, "r") as f:
+        with open(target_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Truncate large documents
         if len(content) > 8000:
-            content = content[:8000] + "\n\n... [TRUNCATED - use read_lines for the rest]"
+            content = content[:8000] + f"\n\n...[TRUNCATED at 8000 chars. Use read_lines(doc_id='{doc_id}', start_line=..., end_line=...) for the rest]"
 
         return content
     except IOError as e:
@@ -263,31 +313,19 @@ def read_document(doc_id: str) -> str:
 
 
 def read_lines(doc_id: str, start_line: int, end_line: int) -> str:
-    """
-    Read a specific line range from a document.
+    """Read a specific line range from a document."""
+    target_file = _find_file_by_doc_id(doc_id)
 
-    Args:
-        doc_id: The document ID
-        start_line: 1-indexed start line
-        end_line: 1-indexed end line
-
-    Returns:
-        The requested lines or error message
-    """
-    doc_path = CORPUS / f"{doc_id}.md"
-
-    if not doc_path.exists():
+    if not target_file:
         return f"Error: Document '{doc_id}' not found"
 
-    # Enforce line limit
     if end_line - start_line > MAX_READ_LINES:
         end_line = start_line + MAX_READ_LINES
 
     try:
-        with open(doc_path, "r") as f:
+        with open(target_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
-        # Convert to 0-indexed
         start_idx = max(0, start_line - 1)
         end_idx = min(len(lines), end_line)
 
@@ -297,3 +335,7 @@ def read_lines(doc_id: str, start_line: int, end_line: int) -> str:
         return f"Lines {start_line}-{end_line} of {doc_id}:\n\n{result}"
     except IOError as e:
         return f"Error reading document: {e}"
+    
+if __name__ == "__main__":
+    r1 = grep_corpus("referendum giustizia italia")
+    print(r1)

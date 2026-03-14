@@ -30,28 +30,41 @@ from agents.response_handler import ResponseHandler
 
 
 _LEARNING_PROMPT = """\
-You just responded to a user. Now evaluate your own response from a memory perspective.
+Analyze the immediately preceding interaction to extract persistent memory artifacts. 
 
-Return ONLY valid JSON with these fields:
+You MUST return ONLY a strictly valid JSON object. Do not include markdown formatting or conversational filler. 
+
+Schema:
 {
-  "score": <float 0.0 to 1.0>,
-  "rationale": "<one sentence>",
-  "affected_content": "<quote the specific new fact or concept to remember>"
+  "score": <float>,
+  "rationale": "<string>",
+  "affected_content": "<string>"
 }
 
-Scoring guide:
-  1.0  — Highly novel, specific, reusable fact (e.g. user's name, project details, preference)
-  0.7  — Useful context likely needed later in this session
-  0.4  — Potentially relevant but uncertain
-  0.1  — Routine exchange, no new persistent knowledge
-  0.0  — Pure procedural step, nothing to retain
+### 1. Deterministic Scoring Matrix
+You MUST assign the "score" field exactly one of the following discrete values by evaluating these mutually exclusive conditions in descending order:
 
-IMPORTANT:
-- If score >= 0.65: affected_content MUST contain the specific fact/concept (truncated if needed)
-- If score < 0.65: affected_content can be brief or empty
-- Never return empty affected_content when score is high
+- IF the interaction contains explicit declarations of user attributes (e.g., Names, roles), permanent project architectures, file paths, or explicit user preferences ("I want", "always do X")
+  -> ASSIGN score: 1.0
 
-Be honest and calibrated. Do not inflate scores.
+- IF the interaction establishes a temporary operational state required for the current workflow (e.g., a chosen algorithm, a specific target directory for this session, a transient constraint)
+  -> ASSIGN score: 0.7
+
+- IF the interaction contains inferred user goals without explicit declarations, OR mentions concepts that lack concrete operational parameters
+  -> ASSIGN score: 0.4
+
+- IF the interaction consists strictly of tool executions, procedural acknowledgments ("Done", "Understood"), formatting operations, or generic dialogue
+  -> ASSIGN score: 0.0
+
+### 2. Output Constraints
+
+Rule A: "rationale"
+- MUST be exactly ONE sentence.
+- MUST explicitly state which scoring condition was triggered (e.g., "Explicit user file path declared.").
+
+Rule B: "affected_content"
+- IF score >= 0.7: MUST be an exact substring extraction (verbatim quote) of the newly established fact from the text. Maximum length: 50 words.
+- IF score < 0.7: MUST be exactly an empty string "". 
 """
 
 
@@ -90,7 +103,7 @@ class LearningScorer:
         try:
             raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=probe_messages,
-                max_tokens=200,
+                max_tokens=1024,
             )
             # Handle case where LLM returns just a float instead of a dict
             if isinstance(raw, (int, float)):
