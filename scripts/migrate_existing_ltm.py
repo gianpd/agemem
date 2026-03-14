@@ -80,7 +80,7 @@ def main():
     # Initialize SQLite database
     print("\nInitializing SQLite database...")
     try:
-        from core.db_migrations import apply_semantic_schema
+        from memory.migrations import apply_semantic_schema
         apply_semantic_schema(str(db_path))
         print(f"Schema applied to {db_path}")
     except Exception as e:

@@ -20,17 +20,28 @@ JSON Parsing Support
 Handles multiple LLM output formats:
 * OpenAI-compatible: native JSON mode with response_format
 * llama.cpp: may wrap JSON in code blocks or mix with prose
-* Reasoning models (DeepSeek-R1, Qwen3): <think>...</think> tags before JSON
+* Reasoning models (DeepSeek-R1, Qwen3): <think>... </think> tags before JSON
 * Models with output tags: <output>...</output> or similar wrappers
+
+Uses core.json_utils for JSON extraction and repair.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
+
+# Import JSON utilities from core module
+from core.json_utils import (
+    extract_json,
+    find_all_json_objects,
+    find_json_string,
+    repair_json,
+    strip_wrappers,
+    JSONParseError,
+)
 
 
 @dataclass
@@ -101,8 +112,8 @@ def parse_text_tool_call(text: str) -> TextToolCall | None:
         data = json.loads(text)
     except json.JSONDecodeError:
         # Try extracting from code blocks or wrappers
-        cleaned = _strip_wrappers(text)
-        json_str = _find_json_string(cleaned)
+        cleaned = strip_wrappers(text)
+        json_str = find_json_string(cleaned)
         if not json_str:
             return None
         try:
@@ -110,7 +121,7 @@ def parse_text_tool_call(text: str) -> TextToolCall | None:
         except json.JSONDecodeError:
             # Try repair
             try:
-                repaired = _repair_json(json_str)
+                repaired = repair_json(json_str)
                 data = json.loads(repaired)
             except (json.JSONDecodeError, TypeError):
                 return None
@@ -187,47 +198,7 @@ def detect_text_tool_calls(text: str) -> list[TextToolCall]:
 
     calls = []
 
-    # First, try to find all JSON objects using brace matching
-    # This handles nested objects correctly
-    def find_all_json_objects(s: str) -> list[str]:
-        """Find all JSON objects in a string using brace matching."""
-        objects = []
-        i = 0
-        while i < len(s):
-            if s[i] == '{':
-                # Found start of object, find matching end
-                depth = 0
-                in_string = False
-                escape_next = False
-                start = i
-                for j in range(i, len(s)):
-                    c = s[j]
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    if c == '\\' and in_string:
-                        escape_next = True
-                        continue
-                    if c == '"':
-                        in_string = not in_string
-                        continue
-                    if in_string:
-                        continue
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            objects.append(s[start:j + 1])
-                            i = j + 1
-                            break
-                else:
-                    i += 1
-            else:
-                i += 1
-        return objects
-
-    # Find all JSON objects in the text
+    # Find all JSON objects in the text using shared utility
     json_objects = find_all_json_objects(text)
 
     for json_str in json_objects:
@@ -238,8 +209,8 @@ def detect_text_tool_calls(text: str) -> list[TextToolCall]:
     # Also check for arrays of tool calls
     if '"tool_calls"' in text or '"tools"' in text:
         try:
-            cleaned = _strip_wrappers(text)
-            json_str = _find_json_string(cleaned)
+            cleaned = strip_wrappers(text)
+            json_str = find_json_string(cleaned)
             if json_str:
                 data = json.loads(json_str)
                 if isinstance(data, dict):
@@ -256,201 +227,15 @@ def detect_text_tool_calls(text: str) -> list[TextToolCall]:
     return calls
 
 
-class JSONParseError(Exception):
-    """Raised when JSON cannot be extracted from LLM output."""
-
-    def __init__(self, raw: str, reason: str):
-        self.raw = raw
-        self.reason = reason
-        super().__init__(f"JSON parse failed ({reason}): {raw[:200]}...")
-
-
-def extract_json(text: str, repair: bool = True) -> dict | list:
-    """
-    Extract and parse JSON from LLM output that may contain mixed content.
-
-    Handles:
-    - Plain JSON response
-    - JSON wrapped in markdown code blocks (```json ... ```)
-    - JSON preceded by thinking/reasoning tags (<think>...</think>)
-    - JSON wrapped in output tags (<output>...</output>)
-    - JSON with minor syntax errors (trailing commas, unquoted keys)
-
-    Parameters
-    ----------
-    text : str
-        Raw LLM output text
-    repair : bool
-        Whether to attempt JSON repair on parse failures
-
-    Returns
-    -------
-    dict | list
-        Parsed JSON object or array
-
-    Raises
-    ------
-    JSONParseError
-        If no valid JSON could be extracted
-    """
-    if not text or not text.strip():
-        raise JSONParseError(text, "empty input")
-
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Strip common wrappers and try again
-    cleaned = _strip_wrappers(text)
-
-    # Try to find JSON in the cleaned text
-    json_str = _find_json_string(cleaned)
-
-    if json_str:
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            if repair:
-                try:
-                    repaired = _repair_json(json_str)
-                    return json.loads(repaired)
-                except json.JSONDecodeError:
-                    pass
-
-    # Last resort: try repairing the whole cleaned text
-    if repair:
-        try:
-            repaired = _repair_json(cleaned)
-            return json.loads(repaired)
-        except json.JSONDecodeError:
-            pass
-
-    raise JSONParseError(text, "no valid JSON found")
-
-
-def _strip_wrappers(text: str) -> str:
-    """Remove common LLM output wrappers."""
-    result = text.strip()
-
-    # Remove thinking/reasoning tags (DeepSeek-R1, Qwen3, etc.)
-    # Pattern: <think>...</think> or <thinking>...</thinking>
-    think_patterns = [
-        r'<think>.*?</think>\s*',
-        r'<thinking>.*?</thinking>\s*',
-        r'<reasoning>.*?</reasoning>\s*',
-    ]
-    for pattern in think_patterns:
-        result = re.sub(pattern, '', result, flags=re.DOTALL | re.IGNORECASE)
-
-    # Remove output wrapper tags
-    output_patterns = [
-        r'<output>\s*(.*?)\s*</output>',
-        r'<response>\s*(.*?)\s*</response>',
-        r'<json>\s*(.*?)\s*</json>',
-    ]
-    for pattern in output_patterns:
-        match = re.search(pattern, result, re.DOTALL | re.IGNORECASE)
-        if match:
-            result = match.group(1)
-            break
-
-    # Strip markdown code blocks
-    # Pattern: ```json ... ``` or ``` ... ```
-    code_block = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result, re.IGNORECASE)
-    if code_block:
-        result = code_block.group(1)
-
-    return result.strip()
-
-
-def _find_json_string(text: str) -> str | None:
-    """
-    Find a JSON object or array in text that may contain other content.
-
-    Uses brace/bracket matching to handle nested structures.
-    """
-    text = text.strip()
-
-    # Look for object or array start
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
-        start_idx = text.find(start_char)
-        if start_idx == -1:
-            continue
-
-        # Track nesting depth
-        depth = 0
-        in_string = False
-        escape_next = False
-
-        for i, char in enumerate(text[start_idx:], start_idx):
-            if escape_next:
-                escape_next = False
-                continue
-
-            if char == '\\' and in_string:
-                escape_next = True
-                continue
-
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-
-            if in_string:
-                continue
-
-            if char == start_char:
-                depth += 1
-            elif char == end_char:
-                depth -= 1
-                if depth == 0:
-                    return text[start_idx:i + 1]
-
-    return None
-
-
-def _repair_json(text: str) -> str:
-    """
-    Attempt to repair common JSON syntax errors.
-
-    Handles:
-    - Trailing commas before ] or }
-    - Unquoted property names
-    - Single quotes instead of double quotes
-    - Missing quotes around string values
-    - Comments (// and /* */)
-    """
-    result = text
-
-    # Remove JavaScript-style comments
-    result = re.sub(r'//.*$', '', result, flags=re.MULTILINE)
-    result = re.sub(r'/\*.*?\*/', '', result, flags=re.DOTALL)
-
-    # Remove trailing commas before ] or }
-    result = re.sub(r',\s*([}\]])', r'\1', result)
-
-    # Quote unquoted property names
-    # Pattern: {name: or ,name: or [name: (where name is not already quoted)
-    def quote_unquoted_key(match):
-        prefix = match.group(1)  # The { or , before the key
-        key = match.group(2)     # The unquoted key name
-        return f'{prefix}"{key}":'
-
-    result = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', quote_unquoted_key, result)
-
-    # Convert single quotes to double quotes (carefully)
-    # This is a simplified approach - may not handle all edge cases
-    def fix_quotes(match):
-        content = match.group(1)
-        # Escape any double quotes inside
-        content = content.replace('\\"', '"').replace('"', '\\"')
-        return f'"{content}"'
-
-    # Match single-quoted strings (simplified)
-    result = re.sub(r"'([^']*(?:\\'[^']*)*)'", fix_quotes, result)
-
-    return result
+# Re-export JSON utilities for backwards compatibility
+__all__ = [
+    'ChatResponseInfo',
+    'ToolCallResponse',
+    'TextToolCall',
+    'TextToolCallResponse',
+    'JSONParseError',
+    'extract_json',
+]
 
 
 class LLMClient:
@@ -499,7 +284,7 @@ class LLMClient:
         Inject /no_think directive to disable thinking mode for JSON responses.
 
         For Qwen models, adding '/no_think' to the last user message disables
-        the 󿰌...󿿿 thinking blocks that would otherwise break JSON grammar.
+        the <think>...</think> thinking blocks that would otherwise break JSON grammar.
         """
         if not messages:
             return messages
@@ -550,7 +335,7 @@ class LLMClient:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-            # Disable thinking mode for models that emit 󿰌...󿿿 tags
+            # Disable thinking mode for models that emit <think>...</think> tags
             # This prevents grammar conflicts in llama.cpp when using JSON mode
             if self._disable_thinking_for_json and self._is_thinking_model(model):
                 kwargs["messages"] = self._inject_no_think(messages)
@@ -568,7 +353,7 @@ class LLMClient:
                 if usage:
                     self._total_tokens_in  += getattr(usage, "prompt_tokens",     0)
                     self._total_tokens_out += getattr(usage, "completion_tokens",  0)
-                
+
                 message = response.choices[0].message
 
                 # Check for tool calls
@@ -768,7 +553,7 @@ class LLMClient:
         Handles output from:
         - OpenAI-compatible APIs (native JSON mode)
         - llama.cpp / Ollama (may wrap in code blocks)
-        - Reasoning models (DeepSeek-R1, Qwen3) with 󿰌...󿿿 tags
+        - Reasoning models (DeepSeek-R1, Qwen3) with <think>...</think> tags
         - Models using <output> or similar wrapper tags
 
         For thinking models (Qwen3, DeepSeek-R1), this automatically injects

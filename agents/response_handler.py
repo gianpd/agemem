@@ -11,7 +11,6 @@ Provides robust handling of LLM responses including:
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +18,7 @@ from typing import Any, Optional, Union
 
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse, JSONParseError
 from core.tracing import get_tracer
+from core.json_utils import repair_json, find_json_string, strip_wrappers
 
 
 class ResponseType(Enum):
@@ -171,57 +171,33 @@ class ResponseHandler:
     def _repair_json_arguments(self, json_str: str) -> Optional[str]:
         """
         Attempt to repair common JSON formatting issues in tool arguments.
-        
+
+        Uses core.json_utils for consistent JSON repair across the codebase.
+
         Args:
             json_str: The potentially malformed JSON string
-            
+
         Returns:
             Repaired JSON string or None if repair failed
         """
         if not json_str or not json_str.strip():
             return None
-        
-        # Remove common prefixes/suffixes that break JSON
-        json_str = json_str.strip()
-        
-        # Remove markdown code blocks
-        if json_str.startswith("```json"):
-            json_str = json_str[7:]
-        if json_str.startswith("```"):
-            json_str = json_str[3:]
-        if json_str.endswith("```"):
-            json_str = json_str[:-3]
-        
-        json_str = json_str.strip()
-        
-        # Try to find JSON object in the string
-        # Look for { ... } pattern
-        match = re.search(r'\{.*\}', json_str, re.DOTALL)
-        if match:
-            json_str = match.group(0)
-        else:
-            # No JSON object found
+
+        # Strip wrappers (markdown code blocks, etc.)
+        cleaned = strip_wrappers(json_str)
+
+        # Find the JSON object in the cleaned text
+        json_obj_str = find_json_string(cleaned)
+        if not json_obj_str:
             return None
-        
-        # Fix common JSON issues
-        # 1. Remove trailing commas
-        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-        
-        # 2. Quote unquoted keys
-        json_str = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', json_str)
-        
-        # 3. Fix single quotes
-        json_str = json_str.replace("'", '"')
-        
-        # 4. Remove comments (// and /* */)
-        json_str = re.sub(r'//.*?$', '', json_str, flags=re.MULTILINE)
-        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
-        
-        # 5. Clean up extra whitespace
-        json_str = re.sub(r'\s+', ' ', json_str)
-        json_str = json_str.strip()
-        
-        return json_str
+
+        # Apply comprehensive JSON repair
+        repaired = repair_json(json_obj_str)
+
+        # Clean up extra whitespace
+        repaired = ' '.join(repaired.split())
+
+        return repaired.strip()
 
     def chat_with_recovery(
         self,

@@ -91,7 +91,7 @@ class LTMStore:
         """Initialize SQLite database and embedding model for semantic search."""
         try:
             # Apply schema migrations
-            from core.db_migrations import apply_semantic_schema
+            from memory.migrations import apply_semantic_schema
             apply_semantic_schema(str(self._semantic_db_path))
 
             # Open connection
