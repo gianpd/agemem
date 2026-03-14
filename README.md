@@ -1,4 +1,4 @@
-# AgeMem — Agentic Memory for the Open AI Era
+# AgeMem — Memory Data Layer for the Agentic AI Era
 
 **Inference-only, privacy-first, long-term + short-term memory management for LLM agents on any hardware.**
 
