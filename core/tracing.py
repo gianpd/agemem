@@ -191,6 +191,10 @@ class InteractionLogger:
         self._current_trace: Optional[InteractionRecord] = None
         self._trace_start_time: float = 0.0
 
+        # State tracking to reduce log noise
+        self._last_message_count: int = 0
+        self._raw_response_logged: bool = False
+
         # Set up loggers
         self._setup_loggers()
 
@@ -276,21 +280,30 @@ class InteractionLogger:
             turn_index=turn_index,
         )
         self._trace_start_time = time.time()
+        self._last_message_count = 0
+        self._raw_response_logged = False
 
-        # Log the user input
+        # Build input preview
+        input_preview = user_input[:150] + "..." if len(user_input) > 150 else user_input
+
+        # Log to structured logger
         self._logger.debug(
-            f"USER_INPUT: {user_input[:200]}{'...' if len(user_input) > 200 else ''}",
+            f"TRACE_START: id={trace_id[:8]} turn={turn_index} input_len={len(user_input)}",
             extra={
                 "trace_id": trace_id,
-                "interaction_type": "user_input",
+                "interaction_type": "trace_start",
                 "turn_index": turn_index,
                 "input_length": len(user_input),
             }
         )
+
+        # Log to debug with clear visual separation
         self._debug_logger.debug(
+            f"\n{'═' * 60}\n"
             f"[TRACE_START] trace_id={trace_id} turn={turn_index}\n"
-            f"USER_INPUT:\n{user_input}\n"
-            f"{'─' * 40}"
+            f"{'─' * 60}\n"
+            f"USER_INPUT: {input_preview}\n"
+            f"{'═' * 60}"
         )
 
         return trace_id
@@ -304,30 +317,93 @@ class InteractionLogger:
         self._current_trace.final_response = final_response
         self._current_trace.error = error
 
-        # Log the final response
+        # Build memory operations summary
+        mem_summary = self._build_memory_summary()
+        tool_summary = self._build_tool_summary()
+
+        # Log to main interaction logger
         self._logger.debug(
-            f"FINAL_RESPONSE: {final_response[:200] if final_response else 'None'}{'...' if final_response and len(final_response) > 200 else ''}",
+            f"TRACE_END: id={self._current_trace.trace_id[:8]} "
+            f"duration={self._current_trace.processing_time_ms:.1f}ms "
+            f"tools={len(self._current_trace.tool_calls)} "
+            f"memory_ops={len(self._current_trace.memory_ops)}",
             extra={
                 "trace_id": self._current_trace.trace_id,
-                "interaction_type": "final_response",
+                "interaction_type": "trace_end",
                 "duration_ms": self._current_trace.processing_time_ms,
-                "response_length": len(final_response) if final_response else 0,
+                "tool_calls_count": len(self._current_trace.tool_calls),
+                "memory_ops_count": len(self._current_trace.memory_ops),
                 "error": error,
             }
         )
 
-        # Log complete interaction to debug log
+        # Log complete trace summary to debug log
         self._debug_logger.debug(
+            f"\n{'═' * 60}\n"
             f"[TRACE_END] trace_id={self._current_trace.trace_id}\n"
-            f"Duration: {self._current_trace.processing_time_ms:.1f}ms\n"
-            f"Turn: {self._current_trace.turn_index}\n"
-            f"Tool Calls: {len(self._current_trace.tool_calls)}\n"
-            f"Memory Ops: {len(self._current_trace.memory_ops)}\n"
-            f"FINAL_RESPONSE:\n{final_response or 'None'}\n"
-            f"{'─' * 40}"
+            f"{'─' * 60}\n"
+            f"Duration: {self._current_trace.processing_time_ms:.1f}ms | Turn: {self._current_trace.turn_index}\n"
+            f"{tool_summary}\n"
+            f"{mem_summary}\n"
+            f"{'═' * 60}"
         )
 
+        # Reset state for next trace
         self._current_trace = None
+        self._last_message_count = 0
+        self._raw_response_logged = False
+
+    def _build_tool_summary(self) -> str:
+        """Build a concise summary of tool calls."""
+        if not self._current_trace or not self._current_trace.tool_calls:
+            return "Tools: none"
+
+        tools = self._current_trace.tool_calls
+        by_name = {}
+        for t in tools:
+            name = t["tool_name"]
+            by_name[name] = by_name.get(name, 0) + 1
+
+        tool_list = ", ".join([f"{name}({count})" for name, count in by_name.items()])
+        return f"Tools ({len(tools)} total): {tool_list}"
+
+    def _build_memory_summary(self) -> str:
+        """Build a clear summary of memory operations."""
+        if not self._current_trace or not self._current_trace.memory_ops:
+            return "Memory: no operations"
+
+        ops = self._current_trace.memory_ops
+        by_type = {}
+        for op in ops:
+            op_type = op.get("op_type", "unknown")
+            by_type[op_type] = by_type.get(op_type, 0) + 1
+
+        # Format each operation type
+        summary_parts = []
+
+        # STM
+        if "stm_snapshot" in by_type:
+            stm_tokens = self._current_trace.stm_stats.get("total_tokens", 0) if self._current_trace else 0
+            summary_parts.append(f"STM: {by_type['stm_snapshot']} snapshots ({stm_tokens} tokens)")
+
+        # LTM Retrieval
+        if "ltm_retrieval" in by_type:
+            summary_parts.append(f"LTM: {by_type['ltm_retrieval']} retrievals")
+
+        # LTM Storage
+        if "ltm_storage" in by_type:
+            summary_parts.append(f"LTM: {by_type['ltm_storage']} stored")
+
+        # Introspection
+        intro_count = by_type.get("introspection_trigger", 0) + by_type.get("introspection_result", 0)
+        if intro_count:
+            summary_parts.append(f"Introspection: {intro_count} ops")
+
+        # Consolidation
+        if "consolidation" in by_type:
+            summary_parts.append(f"Consolidation: {by_type['consolidation']} ops")
+
+        return "Memory: " + " | ".join(summary_parts) if summary_parts else "Memory: operations logged"
 
     # ── Raw Response Logging ──────────────────────────────────────────────────
 
@@ -341,25 +417,30 @@ class InteractionLogger:
             return
 
         self._current_trace.raw_response = response
+        self._raw_response_logged = True  # Flag to prevent duplication
 
-        # Always log raw response to debug log (this is the key acceptance criteria)
+        # Determine response type for better categorization
+        is_tool_call = "function" in response or "tool_calls" in response
+        response_type = "TOOL_CALL" if is_tool_call else "TEXT"
+
+        # Log to debug with clear boundaries
         self._debug_logger.debug(
-            f"[RAW_RESPONSE] trace_id={self._current_trace.trace_id}\n"
-            f"Model: {model}\n"
-            f"Length: {len(response)} chars\n"
-            f"{'─' * 40}\n"
+            f"[RAW_RESPONSE:{response_type}] trace_id={self._current_trace.trace_id[:8]}\n"
+            f"Model: {model} | Length: {len(response)} chars\n"
+            f"{'─' * 50}\n"
             f"{response}\n"
-            f"{'─' * 40}"
+            f"{'─' * 50}"
         )
 
         # Also log summary to main logger
         self._logger.debug(
-            f"RAW_RESPONSE: model={model} length={len(response)}",
+            f"RAW_RESPONSE: type={response_type} model={model} length={len(response)}",
             extra={
                 "trace_id": self._current_trace.trace_id,
                 "interaction_type": "raw_response",
                 "model": model,
                 "response_length": len(response),
+                "is_tool_call": is_tool_call,
             }
         )
 
@@ -379,46 +460,68 @@ class InteractionLogger:
         temperature: float,
         has_tools: bool = False,
     ) -> str:
-        """Log an LLM API call. Returns a call_id for matching with response."""
+        """
+        Log an LLM API call. Returns a call_id for matching with response.
+        Only shows NEW messages added since last call (reduces noise).
+        """
         call_id = str(uuid.uuid4())[:8]
 
+        # Calculate what's new (only log messages beyond previous count)
+        prev_count = getattr(self, '_last_message_count', 0)
+        new_count = len(messages)
+        new_messages = messages[prev_count:] if prev_count > 0 else messages
+        self._last_message_count = new_count
+
+        # Log to LLM logger (structured)
         self._llm_logger.debug(
-            f"LLM_CALL: model={model} messages={len(messages)} max_tokens={max_tokens}",
+            f"LLM_CALL: model={model} total_messages={new_count} "
+            f"new_messages={len(new_messages)} max_tokens={max_tokens}",
             extra={
                 "call_id": call_id,
                 "trace_id": self._current_trace.trace_id if self._current_trace else None,
                 "model": model,
-                "message_count": len(messages),
+                "total_messages": new_count,
+                "new_messages": len(new_messages),
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "has_tools": has_tools,
             }
         )
 
-        # Log message summary to debug
-        # Include message role and content preview for each message
-        msg_summaries = []
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if content:
-                preview = content[:200] + "..." if len(content) > 200 else content
-            else:
-                # Check for tool_calls in assistant message
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    preview = f"[tool_calls: {len(tool_calls)}]"
+        # Build concise summary of NEW messages only
+        if new_messages:
+            msg_summaries = []
+            for i, msg in enumerate(new_messages):
+                actual_idx = prev_count + i
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+
+                if role == "tool":
+                    # Tool results - show tool name and result size
+                    tool_name = msg.get("name", "unknown")
+                    result_preview = content[:80] + "..." if len(content) > 80 else content
+                    msg_summaries.append(f"  [{actual_idx}] tool:{tool_name} → {result_preview}")
+                elif role == "assistant" and msg.get("tool_calls"):
+                    # Assistant requesting tool calls - list tool names
+                    tool_calls = msg.get("tool_calls", [])
+                    tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                    msg_summaries.append(f"  [{actual_idx}] assistant: calls [{', '.join(tool_names)}]")
+                elif content:
+                    # Regular message - content preview
+                    preview = content[:100] + "..." if len(content) > 100 else content
+                    msg_summaries.append(f"  [{actual_idx}] {role}: {preview}")
                 else:
-                    preview = "[empty]"
-            msg_summaries.append(f"  [{i}] {role}: {preview}")
+                    msg_summaries.append(f"  [{actual_idx}] {role}: [empty]")
+
+            new_msg_info = f"\nNew messages ({len(new_messages)} of {new_count} total):\n" + "\n".join(msg_summaries)
+        else:
+            new_msg_info = "\nNo new messages (all messages previously logged)"
 
         self._debug_logger.debug(
             f"[LLM_CALL] call_id={call_id} model={model}\n"
-            f"Messages: {len(messages)}\n"
-            f"Max tokens: {max_tokens}\n"
-            f"Temperature: {temperature}\n"
-            f"Tools: {has_tools}\n"
-            f"Message details:\n" + "\n".join(msg_summaries)
+            f"Config: max_tokens={max_tokens} temp={temperature} tools={has_tools}\n"
+            f"Context: {new_count} messages total"
+            f"{new_msg_info}"
         )
 
         return call_id
@@ -435,14 +538,18 @@ class InteractionLogger:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
     ):
-        """Log an LLM API response."""
+        """
+        Log an LLM API response.
+        NOTE: Raw response content is logged separately via log_raw_response()
+        """
         self._llm_logger.debug(
-            f"LLM_RESPONSE: call_id={call_id} latency={latency_ms:.1f}ms tokens={token_count}",
+            f"LLM_RESPONSE: call_id={call_id} latency={latency_ms:.1f}ms "
+            f"tokens={completion_tokens} finish={finish_reason}",
             extra={
                 "call_id": call_id,
                 "trace_id": self._current_trace.trace_id if self._current_trace else None,
                 "latency_ms": latency_ms,
-                "token_count": token_count,
+                "token_count": completion_tokens,
                 "response_length": len(response) if response else 0,
                 "error": error,
                 "model": model,
@@ -452,19 +559,18 @@ class InteractionLogger:
             }
         )
 
-        # Log detailed response info to debug log
+        # Log response metadata only (content goes to raw_response)
         is_empty = not response or not response.strip()
+        has_tool_calls = "tool_calls" in (response or "")
+
         self._debug_logger.debug(
             f"[LLM_RESPONSE] call_id={call_id} model={model}\n"
-            f"Latency: {latency_ms:.1f}ms\n"
-            f"Tokens: prompt={prompt_tokens} completion={completion_tokens}\n"
-            f"Finish reason: {finish_reason}\n"
-            f"Response length: {len(response) if response else 0} chars\n"
-            f"Is empty: {is_empty}"
+            f"Latency: {latency_ms:.1f}ms | Tokens: {prompt_tokens}→{completion_tokens}\n"
+            f"Finish: {finish_reason} | Has tool_calls: {has_tool_calls} | Empty: {is_empty}"
         )
 
-        # Log raw response for testing
-        if response:
+        # Raw response logged separately - don't duplicate here
+        if response and not getattr(self, '_raw_response_logged', False):
             self.log_raw_response(response, model=model)
 
     # ── Tool Call Logging ─────────────────────────────────────────────────────
@@ -477,8 +583,13 @@ class InteractionLogger:
         result: Optional[str] = None,
         success: bool = True,
         error: Optional[str] = None,
+        validation_errors: Optional[list] = None,
+        validation_warnings: Optional[list] = None,
     ):
-        """Log a tool call execution."""
+        """
+        Log a tool call execution with consolidated information.
+        Replaces the scattered TOOL_CALL_DETECTED + TOOL_CALL logs.
+        """
         if self._current_trace:
             self._current_trace.tool_calls.append({
                 "tool_name": tool_name,
@@ -488,8 +599,14 @@ class InteractionLogger:
                 "error": error,
             })
 
+        # Build single-line summary for structured logger
+        status = "OK" if success else "FAIL"
+        result_preview = (result or "None")[:100]
+        if result and len(result) > 100:
+            result_preview += "..."
+
         self._tool_logger.debug(
-            f"TOOL_CALL: {tool_name} success={success}",
+            f"TOOL:{tool_name} status={status} duration={duration_ms:.1f}ms",
             extra={
                 "trace_id": self._current_trace.trace_id if self._current_trace else None,
                 "tool_name": tool_name,
@@ -497,15 +614,23 @@ class InteractionLogger:
                 "duration_ms": duration_ms,
                 "success": success,
                 "error": error,
+                "result_preview": result_preview,
             }
         )
 
+        # Build detailed debug log with validation info
+        validation_info = ""
+        if validation_errors:
+            validation_info = f"\n  Validation ERRORS: {validation_errors}"
+        elif validation_warnings:
+            validation_info = f"\n  Validation WARNINGS: {validation_warnings}"
+
         self._debug_logger.debug(
-            f"[TOOL_CALL] tool={tool_name} success={success}\n"
-            f"Arguments: {json.dumps(arguments, ensure_ascii=False)[:200]}\n"
-            f"Duration: {duration_ms:.1f}ms\n"
-            f"Result: {(result or 'None')[:200]}{'...' if result and len(result) > 200 else ''}\n"
-            f"Error: {error or 'None'}"
+            f"[TOOL_EXEC] {tool_name} | status={status} | duration={duration_ms:.1f}ms\n"
+            f"  Args: {json.dumps(arguments, ensure_ascii=False)[:150]}\n"
+            f"  Result: {result_preview}"
+            f"{validation_info}"
+            f"{f' Error: {error}' if error else ''}"
         )
 
     # ── Memory Operation Logging ──────────────────────────────────────────────
@@ -526,15 +651,157 @@ class InteractionLogger:
                 "trigger": trigger,
             })
 
-        self._memory_logger.debug(
-            f"MEMORY_OP: {op_type} success={success}",
-            extra={
-                "trace_id": self._current_trace.trace_id if self._current_trace else None,
-                "op_type": op_type,
-                "detail": detail[:200] if detail else None,
-                "success": success,
+    def log_stm_snapshot(self, stats: dict, trigger: str = "turn_start"):
+        """
+        Log STM state snapshot at key moments.
+        Use this instead of scattered STM_STATS logs.
+        """
+        if self._current_trace:
+            self._current_trace.stm_stats = stats
+
+        self._debug_logger.debug(
+            f"[MEMORY:STM] trigger={trigger} "
+            f"tokens={stats.get('total_tokens', 0)} "
+            f"util={stats.get('utilisation_ratio', 0):.1%} "
+            f"messages={stats.get('message_count', 0)}"
+        )
+
+    def log_ltm_retrieval(
+        self,
+        query: str,
+        hits: list[dict],
+        duration_ms: float,
+        search_method: str = "semantic",
+        trigger: str = "user_input",
+    ):
+        """
+        Log LTM retrieval operation with clear hit/miss visibility.
+
+        Args:
+            query: The search query used
+            hits: List of retrieved memory entries
+            duration_ms: Time taken for retrieval
+            search_method: How the search was performed (semantic, keyword, hybrid)
+            trigger: What triggered the retrieval (user_input, tool_result, etc.)
+        """
+        if self._current_trace:
+            self._current_trace.memory_ops.append({
+                "op_type": "ltm_retrieval",
+                "query": query[:100],
+                "hits_count": len(hits),
+                "duration_ms": duration_ms,
                 "trigger": trigger,
-            }
+            })
+
+        # Format hit summary
+        if hits:
+            hit_summaries = [f"{h.get('doc_id', 'unknown')[:8]}:{h.get('score', 0):.2f}" for h in hits[:3]]
+            hit_detail = f"hits={len(hits)} top=[{', '.join(hit_summaries)}]"
+        else:
+            hit_detail = "hits=0"
+
+        self._debug_logger.debug(
+            f"[MEMORY:LTM:RETRIEVE] trigger={trigger} method={search_method} "
+            f"duration={duration_ms:.1f}ms {hit_detail}"
+        )
+
+    def log_ltm_storage(
+        self,
+        doc_id: str,
+        content_type: str,
+        token_count: int,
+        labels: Optional[list] = None,
+        trigger: str = "ingestion",
+    ):
+        """Log LTM storage operation."""
+        if self._current_trace:
+            self._current_trace.memory_ops.append({
+                "op_type": "ltm_storage",
+                "doc_id": doc_id,
+                "content_type": content_type,
+                "token_count": token_count,
+                "trigger": trigger,
+            })
+
+        self._debug_logger.debug(
+            f"[MEMORY:LTM:STORE] doc_id={doc_id[:16]} type={content_type} "
+            f"tokens={token_count} labels={labels or []} trigger={trigger}"
+        )
+
+    def log_introspection_trigger(
+        self,
+        trigger_type: str,
+        confidence: float,
+        context_summary: str,
+    ):
+        """
+        Log when self-introspection is triggered.
+
+        Args:
+            trigger_type: Why introspection was triggered (memory_threshold, user_request, etc.)
+            confidence: Model confidence in triggering introspection
+            context_summary: Brief summary of what triggered it
+        """
+        if self._current_trace:
+            self._current_trace.memory_ops.append({
+                "op_type": "introspection_trigger",
+                "trigger_type": trigger_type,
+                "confidence": confidence,
+            })
+
+        self._debug_logger.debug(
+            f"[MEMORY:INTROSPECTION:TRIGGER] type={trigger_type} "
+            f"confidence={confidence:.2f} context='{context_summary[:60]}'"
+        )
+
+    def log_introspection_result(
+        self,
+        action: str,
+        target_memory: str,
+        success: bool,
+        detail: str,
+    ):
+        """
+        Log the result of a self-introspection operation.
+
+        Args:
+            action: What action was taken (consolidate, prune, summarize, etc.)
+            target_memory: Which memory was affected (stm, ltm_doc_xxx, etc.)
+            success: Whether the operation succeeded
+            detail: Brief description of the result
+        """
+        if self._current_trace:
+            self._current_trace.memory_ops.append({
+                "op_type": "introspection_result",
+                "action": action,
+                "target": target_memory,
+                "success": success,
+            })
+
+        status = "OK" if success else "FAIL"
+        self._debug_logger.debug(
+            f"[MEMORY:INTROSPECTION:RESULT] status={status} action={action} "
+            f"target={target_memory[:30]} detail='{detail[:60]}'"
+        )
+
+    def log_memory_consolidation(
+        self,
+        source_count: int,
+        target_count: int,
+        consolidation_type: str,
+        duration_ms: float,
+    ):
+        """Log memory consolidation operation (STM→LTM or LTM merge)."""
+        if self._current_trace:
+            self._current_trace.memory_ops.append({
+                "op_type": "consolidation",
+                "source_count": source_count,
+                "target_count": target_count,
+            })
+
+        self._debug_logger.debug(
+            f"[MEMORY:CONSOLIDATION] type={consolidation_type} "
+            f"{source_count}→{target_count} duration={duration_ms:.1f}ms"
         )
 
     def log_query_expansion(

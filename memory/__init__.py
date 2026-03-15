@@ -93,6 +93,9 @@ from memory.ltm_introspection import (
 # QUERY_EXPANSION: Export QueryExpander for external use
 from tools.query_expansion import QueryExpander
 
+# Introspection tool definitions for agent use
+from memory.ltm_introspection_tools import introspection_tool_definitions
+
 __all__ = [
     # Vector index
     "ensure_table_exists",
@@ -166,4 +169,6 @@ __all__ = [
     "clear_state",
     # Query expansion
     "QueryExpander",
+    # Introspection tool definitions
+    "introspection_tool_definitions",
 ]

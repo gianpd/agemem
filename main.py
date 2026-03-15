@@ -60,6 +60,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich import markup as rich_markup
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.history import FileHistory
@@ -151,6 +152,7 @@ WEB_SEARCH_TOOL_SCHEMA = {
 # Import all tool definitions
 from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
 from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
+from memory import introspection_tool_definitions
 
 def get_llm_client() -> OpenAI:
     """Get the OpenAI-compatible client with automatic API key handling.
@@ -211,7 +213,11 @@ def build_orchestrator() -> Orchestrator:
     orch = Orchestrator(llm=llm, config=cfg)
 
     # Set up tools - combine all tool definitions
-    all_tools = WEB_TOOL_DEFINITIONS + CORPUS_TOOL_DEFINITIONS
+    all_tools = (
+        WEB_TOOL_DEFINITIONS +
+        CORPUS_TOOL_DEFINITIONS +
+        introspection_tool_definitions
+    )
     orch.set_tools(all_tools)
 
     return orch
@@ -533,15 +539,12 @@ def main():
 
             # Log STM stats before processing
             stats_before = orch.stm_stats()
-            tracer.log_stm_stats({
+            tracer.log_stm_snapshot({
                 "total_tokens": stats_before.total_tokens,
                 "utilisation_ratio": stats_before.utilisation_ratio,
                 "message_count": stats_before.message_count,
                 "pinned_count": stats_before.pinned_count,
-            })
-
-            # Log LTM count
-            tracer.log_ltm_count(len(orch.ltm_snapshot()))
+            }, trigger="turn_start")
 
             with Progress(
                 SpinnerColumn(),
@@ -558,12 +561,12 @@ def main():
 
             # Log STM stats after processing
             stats_after = orch.stm_stats()
-            tracer.log_stm_stats({
+            tracer.log_stm_snapshot({
                 "total_tokens": stats_after.total_tokens,
                 "utilisation_ratio": stats_after.utilisation_ratio,
                 "message_count": stats_after.message_count,
                 "pinned_count": stats_after.pinned_count,
-            })
+            }, trigger="turn_end")
 
             # Render response as markdown
             console.print()
@@ -583,7 +586,7 @@ def main():
 
         except Exception as e:
             tracer.end_trace(error=str(e))
-            console.print(f"\n[red bold]ERROR:[/red bold] {e}\n")
+            console.print(f"\n[red bold]ERROR:[/red bold] {rich_markup.escape(str(e))}\n")
 
 
 if __name__ == "__main__":

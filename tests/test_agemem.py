@@ -825,6 +825,25 @@ class TestOrchestrator(unittest.TestCase):
         self.assertGreater(len(add_ops), 0,
             "LTM should promote even with empty affected_content - fallback to response text")
 
+    def test_T22_readiness_check_uses_correct_parameters(self):
+        """
+        REGRESSION TEST: _execute_readiness_check should use 'query' parameter
+        (not 'current_query') when calling are_you_ready_to_get_in_context_ltm.
+        """
+        import json
+        orch = self._make_orchestrator()
+
+        # Execute readiness check with current_query argument
+        result_json = orch._execute_readiness_check({
+            "current_query": "What is Python?",
+            "urgency": "helpful"
+        })
+
+        # Should return valid JSON
+        result = json.loads(result_json)
+        self.assertIn("should_retrieve", result)
+        self.assertIn("retrieval_rationale", result)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Corpus Search with Query Expansion Tests

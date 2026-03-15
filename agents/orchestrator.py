@@ -37,6 +37,7 @@ from __future__ import annotations
 import re
 import json
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
@@ -394,7 +395,255 @@ class Orchestrator:
             except Exception as e:
                 return f"[TOOL ERROR] fetch_url failed: {e}"
 
+        # === Introspection Tools ===
+        if name == "assess_conversation_drift":
+            return self._execute_assess_drift(arguments)
+
+        if name == "are_you_ready_to_get_in_context_ltm":
+            return self._execute_readiness_check(arguments)
+
+        if name == "paraphrase_for_coverage":
+            return self._execute_paraphrase(arguments)
+
+        if name == "trigger_contextual_ltm_retrieval":
+            return self._execute_trigger_retrieval(arguments)
+
+        if name == "validate_ltm_relevance":
+            return self._execute_validate(arguments)
+
+        if name == "refine_retrieval_target":
+            return self._execute_refine(arguments)
+
+        if name == "log_retrieval_decision":
+            return self._execute_log_decision(arguments)
+
         return f"[TOOL ERROR] Unknown tool: {name}"
+
+    # === Introspection Tool Execution Handlers ===
+
+    def _execute_assess_drift(self, arguments: dict) -> str:
+        """Execute assess_conversation_drift with access to current state."""
+        from memory.ltm_introspection import assess_conversation_drift
+        from memory.ltm_introspection_types import Turn, ConfidenceLevel
+
+        current_query = arguments.get("current_query", "")
+        recent_context = arguments.get("recent_context", "")
+
+        # Get recent messages from STM if not provided
+        if not recent_context:
+            recent_msgs = self._stm.messages()[-4:]  # Last 4 messages
+            recent_context = "\n".join([
+                f"{m.role}: {m.content[:200]}"
+                for m in recent_msgs
+            ])
+
+        # Build turns from STM history
+        turns = [
+            Turn(
+                role=m.role,
+                content=m.content[:500],  # Truncate for efficiency
+                turn_index=getattr(m, 'turn_index', 0),
+                timestamp=getattr(m, 'timestamp', None)
+            )
+            for m in self._stm.messages()[-10:]
+        ]
+
+        result = assess_conversation_drift(
+            current_query=current_query,
+            recent_turns=turns,
+        )
+
+        # Map ConfidenceLevel to float for tracing
+        confidence_map = {
+            ConfidenceLevel.HIGH: 0.9,
+            ConfidenceLevel.MEDIUM: 0.6,
+            ConfidenceLevel.LOW: 0.3,
+        }
+        confidence_float = confidence_map.get(result.confidence, 0.5)
+
+        # Log to tracing
+        get_tracer().log_introspection_trigger(
+            trigger_type="drift_assessment",
+            confidence=confidence_float,
+            context_summary=f"drift_type={result.drift_type.value}, score={result.topic_drift_score:.2f}",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_readiness_check(self, arguments: dict) -> str:
+        """Execute are_you_ready_to_get_in_context_ltm."""
+        from memory.ltm_introspection import are_you_ready_to_get_in_context_ltm
+
+        query = arguments.get("current_query", "")
+        urgency = arguments.get("urgency", "helpful")
+
+        result = are_you_ready_to_get_in_context_ltm(
+            query=query,
+            urgency=urgency,
+            current_messages=self._stm.messages()[-5:] if self._stm else None,
+            current_turn=self._stm.current_turn() if self._stm else 0,
+            ltm_store=self._ltm,
+        )
+
+        # Log readiness assessment
+        confidence_score = result.confidence_report.overall_score if result.confidence_report else 0.5
+        get_tracer().log_introspection_trigger(
+            trigger_type="readiness_check",
+            confidence=confidence_score,
+            context_summary=f"should_retrieve={result.should_retrieve}, strategy={result.suggested_retrieval_strategy}",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_paraphrase(self, arguments: dict) -> str:
+        """Execute paraphrase_for_coverage."""
+        from memory.ltm_introspection import paraphrase_for_coverage
+
+        query = arguments.get("query", "")
+        n_variants = arguments.get("n_variants", 3)
+
+        result = paraphrase_for_coverage(
+            query=query,
+            llm_client=self._llm,
+            model=self._config.MEMORY_AGENT_MODEL,
+            n_variants=min(n_variants, 5),
+        )
+
+        return json.dumps(result.to_dict() if hasattr(result, 'to_dict') else result, indent=2)
+
+    def _execute_trigger_retrieval(self, arguments: dict) -> str:
+        """Execute trigger_contextual_ltm_retrieval."""
+        from memory.ltm_introspection import trigger_contextual_ltm_retrieval
+
+        query = arguments.get("query", "")
+        mode = arguments.get("mode", "single_query")
+        top_k = arguments.get("top_k", 5)
+
+        result = trigger_contextual_ltm_retrieval(
+            query=query,
+            llm_client=self._llm,
+            model=self._config.MEMORY_AGENT_MODEL,
+            mode=mode,
+            top_k=top_k,
+            ltm_store=self._ltm,
+        )
+
+        # If retrieval successful, inject into STM automatically
+        if result.memories:
+            entries = [
+                {
+                    "content": m.entry.content if hasattr(m.entry, 'content') else str(m.entry),
+                    "score": m.retrieval_score,
+                    "source": m.source_query,
+                }
+                for m in result.memories
+            ]
+            self._stm.retrieve(entries, trigger=TriggerKind.MAIN_AGENT)
+
+            # Log introspection result
+            get_tracer().log_introspection_result(
+                action="ltm_retrieval",
+                target_memory=f"{len(result.memories)} memories via {mode}",
+                success=True,
+                detail=f"Retrieved {len(result.memories)} memories, injected into STM",
+            )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_validate(self, arguments: dict) -> str:
+        """Execute validate_ltm_relevance."""
+        from memory.ltm_introspection import validate_ltm_relevance
+        from memory.ltm_introspection_types import RetrievedMemory, MemoryEntry
+
+        memories = arguments.get("retrieved_memories", [])
+        current_query = arguments.get("current_query", "")
+
+        # Convert strings to RetrievedMemory objects
+        retrieved = []
+        for i, mem in enumerate(memories):
+            if isinstance(mem, str):
+                entry = MemoryEntry(content=mem, entry_id=f"val_{i}")
+                retrieved.append(RetrievedMemory(
+                    entry=entry,
+                    retrieval_score=0.5,
+                    source_query=current_query,
+                    rank=i,
+                ))
+            else:
+                retrieved.append(mem)
+
+        result = validate_ltm_relevance(
+            retrieved_memories=retrieved,
+            current_turn_content=current_query,
+            llm_client=self._llm,
+            model=self._config.MEMORY_AGENT_MODEL,
+        )
+
+        # Log validation result
+        get_tracer().log_introspection_result(
+            action="validate_ltm",
+            target_memory=f"{result.total_count} memories",
+            success=result.coverage_sufficient,
+            detail=f"{result.relevant_count}/{result.total_count} relevant, coverage={result.coverage_score:.2f}",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_refine(self, arguments: dict) -> str:
+        """Execute refine_retrieval_target."""
+        from memory.ltm_introspection import refine_retrieval_target
+        from memory.ltm_introspection_types import FailureMode, RetrievalAttempt
+
+        original_query = arguments.get("original_query", "")
+        failure_mode_str = arguments.get("failure_mode", "TOO_NARROW")
+
+        # Map string to enum
+        try:
+            failure_mode = FailureMode(failure_mode_str)
+        except ValueError:
+            failure_mode = FailureMode.TOO_NARROW
+
+        attempt = RetrievalAttempt(
+            query=original_query,
+            retrieval_mode="single_query",
+            results_count=0,
+        )
+        attempt.failure_mode = failure_mode
+
+        result = refine_retrieval_target(
+            failed_attempt=attempt,
+            llm_client=self._llm,
+            model=self._config.MEMORY_AGENT_MODEL,
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_log_decision(self, arguments: dict) -> str:
+        """Execute log_retrieval_decision."""
+        from memory.ltm_introspection import log_retrieval_decision
+        from memory.ltm_introspection_types import RetrievalDecision
+
+        decision_chain = arguments.get("decision_chain", [])
+        utility_score = arguments.get("utility_score", 0.5)
+        was_skipped = arguments.get("was_retrieval_skipped", False)
+
+        decision = RetrievalDecision(
+            trigger="->".join(decision_chain),
+            utility_score=utility_score,
+            was_retrieved=not was_skipped,
+            strategy_used=decision_chain[-1] if decision_chain else "unknown",
+        )
+
+        result = log_retrieval_decision(decision)
+
+        # Also log to tracer for consistency
+        get_tracer().log_memory_op(
+            op_type="RETRIEVAL_DECISION_LOGGED",
+            detail=f"chain={'->'.join(decision_chain)}, utility={utility_score:.2f}",
+            success=True,
+        )
+
+        return json.dumps(result, indent=2)
 
     # ── Main public API ───────────────────────────────────────────────────────
 
