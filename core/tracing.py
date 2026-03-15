@@ -402,7 +402,7 @@ class InteractionLogger:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if content:
-                preview = content[:100] + "..." if len(content) > 100 else content
+                preview = content[:200] + "..." if len(content) > 200 else content
             else:
                 # Check for tool_calls in assistant message
                 tool_calls = msg.get("tool_calls")

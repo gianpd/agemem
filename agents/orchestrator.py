@@ -53,6 +53,10 @@ from core.types import (
 from core.config import AgememConfig, DEFAULT_CONFIG
 from memory.ltm_store import LTMStore
 from memory.stm_context import STMContext
+from memory.context_retrieval import (
+    ContextAwareRetriever,
+    ContextRetrievalConfig,
+)
 from triggers.system_rules import SystemRules, RuleID
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
 from agents.memory_agent import MemoryAgent
@@ -165,6 +169,12 @@ class Orchestrator:
             enable_semantic_search=config.ENABLE_SEMANTIC_SEARCH,
             llm_client=self._llm,
         )
+
+        # CONTEXT_AWARE_RETRIEVAL: Initialize context-aware retriever if enabled
+        self._context_retriever: Optional[ContextAwareRetriever] = None
+        if config.CONTEXT_AWARE_RETRIEVAL:
+            ctx_config = ContextRetrievalConfig.from_agemem_config(config)
+            self._context_retriever = ContextAwareRetriever(self._ltm, ctx_config)
 
         # Memory agent and scorer
         self._memory_agent = MemoryAgent(llm, config)
@@ -419,7 +429,16 @@ class Orchestrator:
             )
 
         # ── 1b. Retrieve relevant LTM entries into STM ───────────────────────
-        relevant = self._ltm.search(user_input, top_k=5)
+        # CONTEXT_AWARE_RETRIEVAL: Use context-aware retrieval if enabled
+        if self._context_retriever is not None:
+            relevant = self._context_retriever.retrieve(
+                current_query=user_input,
+                recent_messages=self._stm.messages(),
+                current_turn=self._stm.current_turn(),
+                top_k=5,
+            )
+        else:
+            relevant = self._ltm.search(user_input, top_k=5)
         if relevant:
             retrieve_op = self._stm.retrieve(relevant, trigger=TriggerKind.SYSTEM_RULE)
             ops.append(retrieve_op)

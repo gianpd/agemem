@@ -44,6 +44,7 @@ Notes on persistence:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import signal
 import time
@@ -66,6 +67,9 @@ from prompt_toolkit.formatted_text import HTML
 
 # ── Tracing System ──────────────────────────────────────────────────────────
 from core.tracing import init_tracing, get_tracer, shutdown_tracing
+
+# ── Text Cleaning Utilities ─────────────────────────────────────────────────
+from cli_text_utils import clean_pasted_text, is_likely_paste
 
 
 # ── Configuration from environment ───────────────────────────────────────────
@@ -227,11 +231,12 @@ def get_history_path() -> Path:
 
 
 def create_prompt_session() -> PromptSession:
-    """Create a PromptSession with multiline support and history.
+    """Create a PromptSession with multiline support, history, and paste handling.
 
     Keybindings:
     - Enter: submit message
     - Alt+Enter / Escape+Enter: insert newline
+    - Bracketed paste: automatically handles multi-line paste
     """
     bindings = KeyBindings()
 
@@ -305,11 +310,11 @@ def print_diagnostics(orch: Orchestrator):
 
     # Learning feedback
     if trace.feedback:
-        console.print(f"  [dim][LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:50]}...[/dim]")
+        console.print(f"  [dim][LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:150]}...[/dim]")
 
     # Memory Agent rationale
     if trace.memory_agent_rationale:
-        console.print(f"  [dim][AGENT] {trace.memory_agent_rationale[:60]}...[/dim]")
+        console.print(f"  [dim][AGENT] {trace.memory_agent_rationale[:100]}...[/dim]")
 
 
 # ── REPL Commands ────────────────────────────────────────────────────────────
@@ -331,7 +336,12 @@ def print_help():
   [cyan]Alt+Enter[/cyan]         Insert newline (may be Escape+Enter on some terminals)
   [cyan]Escape, Enter[/cyan]     Insert newline (two separate keypresses)
 
-[dim]You can paste long text directly - it will be preserved.[/dim]
+[bold]Paste handling:[/bold]
+  [dim]Paste large text directly - it will be automatically cleaned:[/dim]
+  [dim]• Removes invisible characters (zero-width spaces, BOM)[/dim]
+  [dim]• Normalizes smart quotes: " " ' ' → ASCII equivalents[/dim]
+  [dim]• Collapses excessive empty lines[/dim]
+  [dim]• Preserves code blocks and intentional formatting[/dim]
 """
     console.print(Panel(help_text, border_style="dim", padding=(0, 1)))
 
@@ -373,7 +383,7 @@ def print_memory(orch: Orchestrator):
     lines = []
     for entry in entries:
         score = entry.get('learning_score', 0)
-        content = entry.get('content', '')[:100]
+        content = entry.get('content', '')[:200]
         entry_id = entry.get('entry_id', 'unknown')
         lines.append(f"  [{entry_id}] score={score:.2f}: {content}{'...' if len(entry.get('content', '')) > 80 else ''}")
 
@@ -422,7 +432,7 @@ def print_banner(orch: Orchestrator):
   [dim]Memory  :[/dim] STM resets on /clear — LTM persists across sessions
   [dim]Tools   :[/dim] {tools_count} available (type /tools to list)
 
-[dim]Enter sends, Escape+Enter for newline, Ctrl+C to exit[/dim]"""
+[dim]Enter sends, Escape+Enter for newline, paste large text for auto-clean[/dim]"""
 
     console.print(Panel(banner, border_style="blue", padding=(0, 1)))
 
@@ -460,7 +470,7 @@ def main():
             # Use prompt_toolkit for multiline input
             user_input = session.prompt(
                 HTML('<ansicyan><b>You:</b></ansicyan> '),
-            ).strip()
+            )
 
         except KeyboardInterrupt:
             # Ctrl+C: exit cleanly
@@ -473,32 +483,47 @@ def main():
             shutdown_tracing()
             break
 
-        if not user_input:
+        if not user_input or not user_input.strip():
             continue
 
-        # Handle commands
-        if user_input == "/help":
+        # Handle commands (check before cleaning to preserve command intent)
+        stripped_input = user_input.strip()
+
+        if stripped_input == "/help":
             print_help()
             continue
 
-        if user_input == "/tools":
+        if stripped_input == "/tools":
             print_tools(orch)
             continue
 
-        if user_input == "/clear":
+        if stripped_input == "/clear":
             cmd_clear(orch)
             continue
 
-        if user_input == "/memory":
+        if stripped_input == "/memory":
             print_memory(orch)
             continue
 
-        if user_input == "/stats":
+        if stripped_input == "/stats":
             print_stats(orch)
             continue
 
-        if user_input == "/forget":
+        if stripped_input == "/forget":
             cmd_forget(orch)
+            continue
+
+        # Clean the input text for LLM processing
+        # This handles pasted text with special chars, excessive whitespace, etc.
+        original_input = user_input
+        user_input = clean_pasted_text(user_input)
+
+        # Provide feedback if text was significantly cleaned
+        if is_likely_paste(original_input) and len(original_input) > len(user_input) + 10:
+            console.print(f"  [dim]→ Cleaned pasted text ({len(original_input)} → {len(user_input)} chars)[/dim]")
+
+        if not user_input:
+            console.print("  [yellow]Input is empty after cleaning. Please try again.[/yellow]")
             continue
 
         # Process chat with spinner
