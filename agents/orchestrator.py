@@ -417,6 +417,19 @@ class Orchestrator:
         if name == "log_retrieval_decision":
             return self._execute_log_decision(arguments)
 
+        # Tier 5: Persistence Assurance Tools
+        if name == "assess_persistence_need":
+            return self._execute_assess_persistence_need(arguments)
+
+        if name == "force_memory_persistence":
+            return self._execute_force_memory_persistence(arguments)
+
+        if name == "validate_memory_commit":
+            return self._execute_validate_memory_commit(arguments)
+
+        if name == "log_persistence_failure":
+            return self._execute_log_persistence_failure(arguments)
+
         return f"[TOOL ERROR] Unknown tool: {name}"
 
     # === Introspection Tool Execution Handlers ===
@@ -644,6 +657,120 @@ class Orchestrator:
         )
 
         return json.dumps(result, indent=2)
+
+    # === Tier 5: Persistence Assurance Tool Handlers ===
+
+    def _execute_assess_persistence_need(self, arguments: dict) -> str:
+        """Execute assess_persistence_need with access to current state."""
+        from memory.ltm_introspection import assess_persistence_need
+
+        user_input = arguments.get("user_input", "")
+        check_patterns = arguments.get("check_patterns")
+
+        # Note: recent_context is not currently used by assess_persistence_need
+        # but available in the tool definition for future enrichment
+        result = assess_persistence_need(
+            user_input=user_input,
+            recent_context=None,
+            check_patterns=check_patterns,
+        )
+
+        # Log the assessment
+        get_tracer().log_memory_op(
+            op_type="PERSISTENCE_ASSESSMENT",
+            detail=f"should_persist={result.should_persist}, urgency={result.urgency.value}",
+            success=True,
+            trigger="MAIN_AGENT",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_force_memory_persistence(self, arguments: dict) -> str:
+        """Execute force_memory_persistence - CRITICAL for memory integrity."""
+        from memory.ltm_introspection import force_memory_persistence
+
+        content = arguments.get("content", "")
+        learning_score = arguments.get("learning_score", 0.9)
+        trigger = arguments.get("trigger", "user_command")
+        bypass_scoring = arguments.get("bypass_scoring", True)
+
+        if not content:
+            return json.dumps({
+                "success": False,
+                "error": "No content provided for persistence",
+            }, indent=2)
+
+        # Execute with LTM store access
+        result = force_memory_persistence(
+            content=content,
+            ltm_store=self._ltm,
+            learning_score=learning_score,
+            source_turn=self._stm.current_turn(),
+            trigger=trigger,
+            bypass_scoring=bypass_scoring,
+        )
+
+        # Log the persistence attempt
+        get_tracer().log_memory_op(
+            op_type="FORCE_PERSISTENCE",
+            detail=f"content_preview={content[:100]}..., success={result.success}",
+            success=result.success,
+            trigger="MAIN_AGENT",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_validate_memory_commit(self, arguments: dict) -> str:
+        """Execute validate_memory_commit to verify persistence."""
+        from memory.ltm_introspection import validate_memory_commit
+
+        memory_id = arguments.get("memory_id")
+        expected_content = arguments.get("expected_content", "")
+
+        result = validate_memory_commit(
+            memory_id=memory_id,
+            expected_content=expected_content,
+            ltm_store=self._ltm,
+        )
+
+        # Log validation result
+        get_tracer().log_memory_op(
+            op_type="PERSISTENCE_VALIDATION",
+            detail=f"memory_id={memory_id}, validated={result.is_validated}",
+            success=result.is_validated,
+            trigger="MAIN_AGENT",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
+
+    def _execute_log_persistence_failure(self, arguments: dict) -> str:
+        """Execute log_persistence_failure for debugging."""
+        from memory.ltm_introspection import log_persistence_failure
+
+        content = arguments.get("content", "")
+        error_message = arguments.get("error_message", "Unknown error")
+        retry_count = arguments.get("retry_count", 0)
+        context = arguments.get("context", {})
+
+        # Convert error_message string to Exception for the function signature
+        error = Exception(error_message)
+
+        result = log_persistence_failure(
+            content=content,
+            error=error,
+            retry_count=retry_count,
+            context=context,
+        )
+
+        # Log failure to tracer
+        get_tracer().log_memory_op(
+            op_type="PERSISTENCE_FAILURE_LOGGED",
+            detail=f"error={error_message}, retry_count={retry_count}",
+            success=False,
+            trigger="MAIN_AGENT",
+        )
+
+        return json.dumps(result.to_dict(), indent=2)
 
     # ── Main public API ───────────────────────────────────────────────────────
 
