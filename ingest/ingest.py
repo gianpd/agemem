@@ -706,6 +706,62 @@ def update_index(doc_id: str, title: str, doc_type: str,
 
 
 # ═══════════════════════════════════════════════════════════════
+# Markdown Ingestion — Direct processing without docling
+# ═══════════════════════════════════════════════════════════════
+
+def ingest_markdown(
+    md_path: Path,
+    doc_type: str = "document",
+    labels_arg: Optional[str] = None,
+) -> str:
+    """
+    Ingest a markdown file directly (no PDF parsing needed).
+
+    Args:
+        md_path: Path to the markdown file
+        doc_type: Document type/category
+        labels_arg: Label configuration (built-in name or path:key)
+
+    Returns:
+        Document ID string
+    """
+    global _current_label_config
+
+    md_path = Path(md_path)
+    if not md_path.exists():
+        print(f"[error] File not found: {md_path}")
+        sys.exit(1)
+
+    # Load label configuration
+    print(f"[0/3] Loading labels configuration...")
+    _current_label_config = load_labels(labels_arg)
+    print(f"      Using: {_current_label_config['description']}")
+
+    # Read markdown directly
+    print(f"[1/3] Reading    {md_path.name}...")
+    markdown = md_path.read_text(encoding="utf-8")
+    sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+
+    print(f"[2/3] Extracting entities  ({NER_BACKEND}) ...")
+    entities = extract_entities(markdown)
+
+    print(f"[3/3] Writing markdown ...")
+    out_path = write_document(md_path, markdown, sections, entities, doc_type, _current_label_config)
+
+    doc_id = out_path.stem
+    title = _guess_title(markdown, md_path.stem)
+    doc_date = detect_doc_date(markdown, entities)
+
+    update_index(doc_id, title, doc_type, doc_date, out_path)
+
+    print(f"\n✓  {out_path}  ({len(markdown):,} chars, {len(sections)} sections)")
+    print(f"   doc_id : {doc_id}")
+    print(f"   entities found : { {k: len(v) for k, v in entities.items()} }")
+
+    return doc_id
+
+
+# ═══════════════════════════════════════════════════════════════
 # 4. INGEST — orchestrate
 # ═══════════════════════════════════════════════════════════════
 def ingest(
@@ -774,19 +830,119 @@ def ingest(
     return doc_id
 
 
+def ingest_directory(
+    dir_path: Path,
+    doc_type: str = "document",
+    labels_arg: Optional[str] = None,
+    auto_detect_ocr: bool = True,
+    force_ocr: bool = False,
+    fast_mode: bool = True,
+    disable_tables: bool = False,
+    recursive: bool = True,
+) -> List[str]:
+    """
+    Ingest all PDF and markdown documents from a directory into the corpus.
+
+    Args:
+        dir_path: Path to the directory containing documents
+        doc_type: Document type/category for all files
+        labels_arg: Label configuration (built-in name or path:key)
+        auto_detect_ocr: Automatically detect if PDFs need OCR
+        force_ocr: Force OCR on (for known scanned PDFs)
+        fast_mode: Use fast table mode (default: True)
+        disable_tables: Disable table structure recognition (fastest)
+        recursive: Search subdirectories recursively (default: True)
+
+    Returns:
+        List of document IDs that were successfully ingested
+    """
+    dir_path = Path(dir_path)
+    if not dir_path.exists():
+        print(f"[error] Directory not found: {dir_path}")
+        sys.exit(1)
+
+    if not dir_path.is_dir():
+        print(f"[error] Not a directory: {dir_path}")
+        sys.exit(1)
+
+    # Find all PDF and markdown files
+    base_pattern = "**/*" if recursive else "*"
+    pdf_files = sorted(dir_path.glob(f"{base_pattern}.pdf"))
+    md_files = sorted(dir_path.glob(f"{base_pattern}.md"))
+
+    all_files = pdf_files + md_files
+
+    if not all_files:
+        print(f"[warn] No PDF or markdown files found in {dir_path}")
+        return []
+
+    print(f"\n{'='*60}")
+    print(f"Directory Ingestion: {dir_path}")
+    print(f"Found {len(pdf_files)} PDF file(s), {len(md_files)} markdown file(s)")
+    if recursive:
+        print("(searching subdirectories recursively)")
+    print(f"{'='*60}\n")
+
+    successful = []
+    failed = []
+
+    for i, file_path in enumerate(all_files, 1):
+        file_type = "markdown" if file_path.suffix == ".md" else "PDF"
+        print(f"\n[{i}/{len(all_files)}] Processing ({file_type}): {file_path.relative_to(dir_path)}")
+        try:
+            if file_path.suffix == ".md":
+                doc_id = ingest_markdown(
+                    file_path,
+                    doc_type,
+                    labels_arg,
+                )
+            else:
+                doc_id = ingest(
+                    str(file_path),
+                    doc_type,
+                    labels_arg,
+                    auto_detect_ocr=auto_detect_ocr,
+                    force_ocr=force_ocr,
+                    fast_mode=fast_mode,
+                    disable_tables=disable_tables,
+                )
+            successful.append(doc_id)
+        except Exception as e:
+            print(f"[error] Failed to ingest {file_path.name}: {e}")
+            failed.append((file_path.name, str(e)))
+            # Continue with next file
+            continue
+
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"Ingestion Complete")
+    print(f"{'='*60}")
+    print(f"  Successful: {len(successful)}")
+    print(f"  Failed:     {len(failed)}")
+    if failed:
+        print("\nFailed files:")
+        for name, err in failed:
+            print(f"  - {name}: {err}")
+    print()
+
+    return successful
+
+
 def main():
     """Main entry point with argument parsing."""
     parser = argparse.ArgumentParser(
-        description="Ingest PDF documents into the corpus with NER extraction.",
+        description="Ingest PDF and markdown documents into the corpus with NER extraction.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s report.pdf
+  %(prog)s notes.md                          # ingest a markdown file
   %(prog)s contracts/acme.pdf contract --labels legal
   %(prog)s papers/ml_paper.pdf research --labels research
   %(prog)s bandi/gara.pdf bando --labels edilizia
   %(prog)s doc.pdf custom --labels /path/to/my_labels.yaml:medical
   %(prog)s scanned.pdf document --ocr          # force OCR for scanned PDFs
+  %(prog)s documents/                          # ingest all PDFs and .md files in directory
 
 Built-in label sets:
   edilizia  - Italian construction and public tenders
@@ -797,7 +953,7 @@ For custom labels, create a YAML file with the same structure as
 ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         """
     )
-    parser.add_argument("pdf_path", nargs="?", default=None, help="Path to the PDF file to ingest")
+    parser.add_argument("path", nargs="?", default=None, help="Path to PDF/markdown file or directory to ingest")
     parser.add_argument(
         "doc_type",
         nargs="?",
@@ -868,18 +1024,39 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         _ensure_models_downloaded()
         return
     
-    if args.pdf_path is None:
-        parser.error("pdf_path is required unless using --verify-models or --audit")
+    if args.path is None:
+        parser.error("path is required unless using --verify-models or --audit")
 
-    ingest(
-        args.pdf_path,
-        args.doc_type,
-        args.labels_arg,
-        auto_detect_ocr=args.auto_detect_ocr,
-        force_ocr=args.force_ocr,
-        fast_mode=not args.accurate_tables,  # FAST by default
-        disable_tables=args.disable_tables,
-    )
+    input_path = Path(args.path)
+
+    # Handle directory ingestion
+    if input_path.is_dir():
+        ingest_directory(
+            input_path,
+            args.doc_type,
+            args.labels_arg,
+            auto_detect_ocr=args.auto_detect_ocr,
+            force_ocr=args.force_ocr,
+            fast_mode=not args.accurate_tables,
+            disable_tables=args.disable_tables,
+        )
+    elif input_path.suffix.lower() == ".md":
+        # Handle markdown file directly
+        ingest_markdown(
+            input_path,
+            args.doc_type,
+            args.labels_arg,
+        )
+    else:
+        ingest(
+            str(input_path),
+            args.doc_type,
+            args.labels_arg,
+            auto_detect_ocr=args.auto_detect_ocr,
+            force_ocr=args.force_ocr,
+            fast_mode=not args.accurate_tables,
+            disable_tables=args.disable_tables,
+        )
 
 
 if __name__ == "__main__":

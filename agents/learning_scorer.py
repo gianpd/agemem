@@ -103,7 +103,8 @@ class LearningScorer:
         try:
             raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=probe_messages,
-                max_tokens=1024,
+                model=self._config.LEARNING_SCORER_MODEL,
+                max_tokens=self._config.LEARNING_SCORER_MAX_TOKENS,
             )
             # Handle case where LLM returns just a float instead of a dict
             if isinstance(raw, (int, float)):

@@ -177,7 +177,7 @@ class MemoryAgent:
         try:
             response, metrics = self._response_handler.chat_with_recovery(
                 messages=[{"role": "user", "content": prompt}],
-                model=self._config.MEMORY_AGENT_MODEL,
+                model=self._config.LEARNING_SCORER_MODEL,
                 max_tokens=1024,
                 temperature=0.1,
             )

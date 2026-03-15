@@ -32,12 +32,14 @@ import time
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+import numpy as np
+
 from core.types import MemoryEntry, MemoryOp, MemoryOpResult, TriggerKind
 from core.config import AgememConfig, DEFAULT_CONFIG
 
 # SEMANTIC_SEARCH: Lazy imports for embedding and vector modules
 if TYPE_CHECKING:
-    import numpy as np
+    pass  # numpy already imported above for runtime use
 
 # QUERY_EXPANSION: Import QueryExpander
 from tools.query_expansion import QueryExpander
@@ -323,6 +325,78 @@ class LTMStore:
             # All scores are now normalized to [0, 1] similarity scale
             merged = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
             return [entry for entry, _ in merged[:effective_top_k]]
+
+    def search_by_vector(
+        self,
+        query_vector: np.ndarray,
+        top_k: int = 5,
+        min_similarity: Optional[float] = None,
+    ) -> list[MemoryEntry]:
+        """
+        Retrieve LTM entries using a pre-computed query vector.
+
+        This is the core method for context-aware retrieval, allowing
+        retrieval based on a weighted context embedding rather than
+        just the current query string.
+
+        Args:
+            query_vector: Pre-computed embedding vector (must be normalized).
+            top_k: Number of results to return.
+            min_similarity: Minimum similarity score (0-1) to include a result.
+                           Entries below this threshold are filtered out.
+
+        Returns:
+            List of MemoryEntry objects sorted by similarity.
+        """
+        with self._lock:
+            if not self._entries:
+                return []
+
+            if not self._semantic_enabled or not self._db:
+                # Semantic search not available - can't use vector search
+                logger.warning("Semantic search not available for vector search")
+                return []
+
+            try:
+                from memory.vector_index import query_similar
+
+                # Query vector index for similar entries
+                # Returns list of (entry_id, cosine_distance) tuples
+                candidate_count = top_k * 3  # Retrieve more for filtering
+                similar_results = query_similar(self._db, query_vector, limit=candidate_count)
+
+                if not similar_results:
+                    return []
+
+                # Convert distances to similarities and filter
+                min_sim = min_similarity or 0.0
+                scored_entries: list[tuple[float, MemoryEntry]] = []
+
+                for entry_id, distance in similar_results:
+                    entry = self._entries.get(entry_id)
+                    if not entry:
+                        continue
+
+                    # Convert cosine distance to similarity (0-1 scale)
+                    # Cosine distance: 0 = identical, 2 = opposite
+                    similarity = 1.0 - (distance / 2.0)
+
+                    if similarity < min_sim:
+                        continue
+
+                    # Increment access count
+                    entry.access_count += 1
+                    scored_entries.append((similarity, entry))
+
+                # Sort by similarity descending
+                scored_entries.sort(key=lambda x: x[0], reverse=True)
+
+                # Return top_k entries
+                return [entry for _, entry in scored_entries[:top_k]]
+
+            except Exception as e:
+                logger.error(f"Vector search failed: {e}")
+                return []
 
     # SEMANTIC_SEARCH: Semantic search implementation
     def _semantic_search(self, query: str, top_k: int) -> list[MemoryEntry]:
