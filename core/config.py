@@ -37,7 +37,7 @@ CORPUS = Path("corpus")
 ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "true").lower() == "true"
 ORACLE_API_KEY = os.getenv("ORACLE_API_KEY", "")
 ORACLE_BASE_URL = os.getenv("ORACLE_BASE_URL", "https://api.openai.com")
-ORACLE_MODEL = os.getenv("ORACLE_MODEL", "gpt-4o-mini")
+ORACLE_MODEL = os.getenv("ORACLE_MODEL", "kimi-k2.5")
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG — uWOT Search Service
@@ -52,7 +52,7 @@ UWOT_API_KEY = os.getenv("UWOT_API_KEY")
 
 
 SLIDING_WINDOW_TURNS = 4
-SUMMARY_MAX_TOKENS = 1200
+SUMMARY_MAX_TOKENS = 2400
 TOP_FACTS_COUNT = 5
 
 # ─────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 class AgememConfig:
 
     # ── STM / context window ──────────────────────────────────────────────────
-    STM_TOKEN_LIMIT: int = 6_000
+    STM_TOKEN_LIMIT: int = 9_000
     """Hard upper bound on tokens in the active context (excluding system prompt)."""
 
     STM_WARNING_THRESHOLD: float = 0.75
@@ -93,7 +93,7 @@ class AgememConfig:
     LTM_MAX_ENTRIES: int = 5000
     """Maximum entries in the LTM store before least-scored entries are pruned."""
 
-    LTM_ENTRY_MAX_CHARS: int = 2000
+    LTM_ENTRY_MAX_CHARS: int = 5000
     """Maximum characters per LTM entry. Larger content is truncated."""
 
     LTM_PROMOTE_THRESHOLD: float = 0.65
@@ -164,15 +164,25 @@ class AgememConfig:
     LEARNING_SCORE_THRESHOLD_IMMEDIATE: float = 0.8
     """If agent self-reports >= this score, skip the N-turn cadence and act now."""
 
+    LEARNING_SCORER_MODEL: str = "google/gemini-3-flash-preview"
+    """Model used for learning score calculation and context summarization.
+
+    Uses a different model than the main agent to reduce cost and leverage
+    models optimized for structured JSON output and summarization tasks.
+    """
+
+    LEARNING_SCORER_MAX_TOKENS: int = 1024
+    """Max tokens for learning scorer model."""
+
     # ── Memory agent ──────────────────────────────────────────────────────────
-    MEMORY_AGENT_MODEL: str = "gpt-4o-mini"
+    MEMORY_AGENT_MODEL: str = "kimi-k2.5"
     """Model used by the dedicated MemoryAgent.  Can differ from main model."""
 
-    MEMORY_AGENT_MAX_TOKENS: int = 512
+    MEMORY_AGENT_MAX_TOKENS: int = 1024
 
     # ── LLM client defaults ───────────────────────────────────────────────────
-    DEFAULT_MODEL: str = "gpt-4o-mini"
-    DEFAULT_MAX_TOKENS: int = 1024
+    DEFAULT_MODEL: str = "kimi-k2.5"
+    DEFAULT_MAX_TOKENS: int = 10240
     DEFAULT_TEMPERATURE: float = 0.2
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -241,6 +251,56 @@ class AgememConfig:
         default_factory=dict
     )
     """User-supplied acronym expansion dictionary, e.g. {"LTM": "long term memory"}."""
+
+    # ── Context-Aware LTM Retrieval ────────────────────────────────────────────
+    CONTEXT_AWARE_RETRIEVAL: bool = True
+    """Enable context-aware LTM retrieval using conversation window."""
+
+    CONTEXT_WINDOW_SIZE: int = 3
+    """Number of recent turns to include in context window."""
+
+    CONTEXT_CURRENT_QUERY_WEIGHT: float = 0.50
+    """Weight for current query in context embedding (0.0-1.0)."""
+
+    CONTEXT_PREVIOUS_TURN_WEIGHT: float = 0.30
+    """Weight for previous turn in context embedding."""
+
+    CONTEXT_TURN_BEFORE_WEIGHT: float = 0.15
+    """Weight for turn-before-previous in context embedding."""
+
+    CONTEXT_OLDEST_TURN_WEIGHT: float = 0.05
+    """Weight for oldest turn in context window."""
+
+    CONTEXT_MIN_SIMILARITY_THRESHOLD: float = 0.65
+    """Minimum similarity score to include an LTM entry in context-aware retrieval."""
+
+    CONTEXT_FALLBACK_TO_QUERY_ONLY: bool = True
+    """If True, falls back to query-only search when context-aware returns no results."""
+
+    # ── LTM Introspection (Self-Management Toolkit) ────────────────────────────
+    DRIFT_LOW_THRESHOLD: float = 0.3
+    """Topic drift score below this indicates low drift (stable conversation)."""
+
+    DRIFT_MEDIUM_THRESHOLD: float = 0.7
+    """Topic drift score between low and this indicates medium drift."""
+
+    CONFIDENCE_HIGH_THRESHOLD: float = 0.8
+    """Confidence score above this indicates high confidence (no retrieval needed)."""
+
+    CONFIDENCE_LOW_THRESHOLD: float = 0.5
+    """Confidence score below this indicates low confidence (retrieval recommended)."""
+
+    RETRIEVAL_READINESS_MIN_SCORE: float = 0.6
+    """Minimum composite score to consider agent 'ready' for LTM retrieval."""
+
+    RETRIEVAL_MAX_RETRIES: int = 2
+    """Maximum retry attempts for retrieval refinement to prevent infinite loops."""
+
+    VALIDATION_COVERAGE_THRESHOLD: float = 0.6
+    """Minimum coverage score for validated LTM batch to be considered sufficient."""
+
+    COMPRESSION_TOKEN_THRESHOLD: int = 8000
+    """Token count threshold above which compression is strongly recommended."""
 
     @property
     def SYSTEM_PROMPT_HEADER(self) -> str:
