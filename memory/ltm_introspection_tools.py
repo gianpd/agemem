@@ -224,6 +224,154 @@ LOG_RETRIEVAL_DECISION_TOOL = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tier 5: Persistence Assurance (Memory Integrity)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ASSESS_PERSISTENCE_NEED_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "assess_persistence_need",
+        "description": (
+            "Analyze user input for explicit memory commands like 'remember that...', "
+            "'store this in your memory...', or 'save this...'. "
+            "Returns PersistenceNeed with detected patterns, urgency level, and "
+            "extracted content to persist. "
+            "CRITICAL: Call this BEFORE responding to any user message to detect "
+            "memory commands that require immediate persistence."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_input": {
+                    "type": "string",
+                    "description": "The user's message to analyze for memory commands."
+                },
+                "recent_context": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional recent conversation context for enrichment."
+                },
+                "check_patterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["explicit_remember", "explicit_forget", "implied_store", "persistence_confirm"]
+                    },
+                    "description": "Specific pattern categories to check (default: all)."
+                }
+            },
+            "required": ["user_input"]
+        }
+    }
+}
+
+FORCE_MEMORY_PERSISTENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "force_memory_persistence",
+        "description": (
+            "Force immediate persistence of content to LTM, bypassing normal gating. "
+            "Use this when user explicitly requests memory storage. "
+            "CRITICAL: Call this BEFORE confirming to the user that you have recorded "
+            "something. This prevents the 'agent lies about recording' bug. "
+            "Returns PersistenceResult with success status and memory ID."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Content to persist to LTM."
+                },
+                "learning_score": {
+                    "type": "number",
+                    "description": "Learning score to assign (default: 0.9 for explicit commands).",
+                    "default": 0.9,
+                    "minimum": 0.0,
+                    "maximum": 1.0
+                },
+                "trigger": {
+                    "type": "string",
+                    "description": "Trigger reason (default: 'user_command').",
+                    "default": "user_command"
+                },
+                "bypass_scoring": {
+                    "type": "boolean",
+                    "description": "If true, bypass LearningScorer gating (default: true).",
+                    "default": True
+                }
+            },
+            "required": ["content"]
+        }
+    }
+}
+
+VALIDATE_MEMORY_COMMIT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "validate_memory_commit",
+        "description": (
+            "Validate that a memory was successfully persisted to LTM. "
+            "Performs existence, content matching, and integrity checks. "
+            "Returns PersistenceValidation with detailed check results. "
+            "CRITICAL: Call this BEFORE confirming to the user that something "
+            "was remembered. Only claim success if is_validated is true."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "ID of the memory to validate."
+                },
+                "expected_content": {
+                    "type": "string",
+                    "description": "Expected content for matching verification."
+                }
+            },
+            "required": ["memory_id"]
+        }
+    }
+}
+
+LOG_PERSISTENCE_FAILURE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "log_persistence_failure",
+        "description": (
+            "Log a persistence failure for debugging and policy improvement. "
+            "Captures failure category, retry history, and recovery recommendations. "
+            "Returns PersistenceFailure with failure details. "
+            "Call this when force_memory_persistence or validate_memory_commit fails."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Content that failed to persist."
+                },
+                "error_message": {
+                    "type": "string",
+                    "description": "Error message or exception description."
+                },
+                "retry_count": {
+                    "type": "integer",
+                    "description": "Number of retry attempts made.",
+                    "default": 0
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Additional context (user_input, turn_index, etc.)."
+                }
+            },
+            "required": ["content", "error_message"]
+        }
+    }
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Export
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -235,15 +383,29 @@ introspection_tool_definitions = [
     VALIDATE_LTM_RELEVANCE_TOOL,
     REFINE_RETRIEVAL_TARGET_TOOL,
     LOG_RETRIEVAL_DECISION_TOOL,
+    # Tier 5: Persistence Assurance
+    ASSESS_PERSISTENCE_NEED_TOOL,
+    FORCE_MEMORY_PERSISTENCE_TOOL,
+    VALIDATE_MEMORY_COMMIT_TOOL,
+    LOG_PERSISTENCE_FAILURE_TOOL,
 ]
 
 __all__ = [
     "introspection_tool_definitions",
+    # Tier 1
     "ASSESS_CONVERSATION_DRIFT_TOOL",
     "ARE_YOU_READY_TO_GET_IN_CONTEXT_LTM_TOOL",
+    # Tier 2
     "PARAPHRASE_FOR_COVERAGE_TOOL",
     "TRIGGER_CONTEXTUAL_LTM_RETRIEVAL_TOOL",
+    # Tier 3
     "VALIDATE_LTM_RELEVANCE_TOOL",
     "REFINE_RETRIEVAL_TARGET_TOOL",
+    # Tier 4
     "LOG_RETRIEVAL_DECISION_TOOL",
+    # Tier 5
+    "ASSESS_PERSISTENCE_NEED_TOOL",
+    "FORCE_MEMORY_PERSISTENCE_TOOL",
+    "VALIDATE_MEMORY_COMMIT_TOOL",
+    "LOG_PERSISTENCE_FAILURE_TOOL",
 ]

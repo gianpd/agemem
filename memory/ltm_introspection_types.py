@@ -643,3 +643,222 @@ class AnchorSnapshot:
             "turn_index": self.turn_index,
             "summary": self.summary,
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tier 5 — Persistence Assurance (Memory Integrity)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PersistenceUrgency(str, Enum):
+    """Urgency levels for persistence operations."""
+    IMMEDIATE = "immediate"    # Must persist before responding
+    BATCH = "batch"            # Can persist with other operations
+    BACKGROUND = "background"  # Deferred persistence acceptable
+
+
+class PersistenceStatus(str, Enum):
+    """Status of a persistence operation."""
+    PENDING = "pending"        # Not yet attempted
+    CONFIRMED = "confirmed"    # Successfully persisted to LTM
+    FAILED = "failed"          # Persistence failed
+    VALIDATED = "validated"    # Confirmed and validated
+
+
+class FailureCategory(str, Enum):
+    """Categories of persistence failures."""
+    NETWORK = "network"              # Network/storage connectivity issues
+    VALIDATION = "validation"        # Content validation failed
+    RATE_LIMIT = "rate_limit"        # Rate limiting or quota exceeded
+    CORRUPTION = "corruption"        # Data corruption detected
+    UNKNOWN = "unknown"              # Unclassified failure
+
+
+@dataclass
+class MemoryCommandPattern:
+    """Detected memory command pattern in user input."""
+    pattern_type: str = ""
+    """Type of pattern detected (e.g., 'explicit_remember', 'implied_store')."""
+
+    matched_phrase: str = ""
+    """The exact phrase that matched."""
+
+    confidence: float = 0.0
+    """Confidence in pattern detection (0-1)."""
+
+    content_to_persist: str = ""
+    """Extracted content that should be persisted."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pattern_type": self.pattern_type,
+            "matched_phrase": self.matched_phrase,
+            "confidence": self.confidence,
+            "content_to_persist": self.content_to_persist,
+        }
+
+
+@dataclass
+class PersistenceNeed:
+    """
+    Assessment of whether persistence is needed and how urgently.
+
+    Analyzes user input for explicit memory commands and conversation
+    context to determine if immediate persistence is required.
+    """
+    should_persist: bool = False
+    """Whether persistence is recommended."""
+
+    urgency: PersistenceUrgency = PersistenceUrgency.BATCH
+    """Urgency level for persistence."""
+
+    detected_patterns: List[MemoryCommandPattern] = field(default_factory=list)
+    """Memory command patterns detected in user input."""
+
+    persistence_rationale: str = ""
+    """Human-readable reason for persistence recommendation."""
+
+    suggested_content: str = ""
+    """Content that should be persisted (if extraction succeeded)."""
+
+    priority_score: float = 0.0
+    """Priority score (0-1) for this persistence operation."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "should_persist": self.should_persist,
+            "urgency": self.urgency.value,
+            "detected_patterns": [p.to_dict() for p in self.detected_patterns],
+            "persistence_rationale": self.persistence_rationale,
+            "suggested_content": self.suggested_content,
+            "priority_score": self.priority_score,
+        }
+
+
+@dataclass
+class PersistenceResult:
+    """Result of a persistence operation."""
+    success: bool = False
+    """Whether persistence succeeded."""
+
+    memory_id: Optional[str] = None
+    """ID of the persisted memory entry (if successful)."""
+
+    status: PersistenceStatus = PersistenceStatus.PENDING
+    """Current status of the persistence operation."""
+
+    content_preview: str = ""
+    """Preview of persisted content (truncated)."""
+
+    learning_score: float = 0.0
+    """Learning score assigned to the memory."""
+
+    trigger: str = ""
+    """What triggered this persistence (e.g., 'user_command', 'learning_spike')."""
+
+    timestamp: float = field(default_factory=lambda: __import__('time').time())
+    """When persistence was attempted."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self.success,
+            "memory_id": self.memory_id,
+            "status": self.status.value,
+            "content_preview": self.content_preview,
+            "learning_score": self.learning_score,
+            "trigger": self.trigger,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass
+class ValidationCheck:
+    """Individual validation check result."""
+    check_name: str = ""
+    """Name of the validation check."""
+
+    passed: bool = False
+    """Whether the check passed."""
+
+    details: str = ""
+    """Details about the check result."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "check_name": self.check_name,
+            "passed": self.passed,
+            "details": self.details,
+        }
+
+
+@dataclass
+class PersistenceValidation:
+    """
+    Validation that a memory was successfully persisted.
+
+    Performs multiple checks to confirm the memory exists in LTM
+    and matches the expected content.
+    """
+    is_validated: bool = False
+    """Whether persistence was confirmed."""
+
+    memory_found: bool = False
+    """Whether the memory exists in LTM."""
+
+    content_matches: bool = False
+    """Whether content matches what was intended."""
+
+    validation_checks: List[ValidationCheck] = field(default_factory=list)
+    """Individual validation check results."""
+
+    memory_id: Optional[str] = None
+    """ID of the validated memory (if found)."""
+
+    validation_rationale: str = ""
+    """Human-readable validation summary."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_validated": self.is_validated,
+            "memory_found": self.memory_found,
+            "content_matches": self.content_matches,
+            "validation_checks": [c.to_dict() for c in self.validation_checks],
+            "memory_id": self.memory_id,
+            "validation_rationale": self.validation_rationale,
+        }
+
+
+@dataclass
+class PersistenceFailure:
+    """
+    Logged record of a persistence failure.
+
+    Captures details about why persistence failed for debugging
+    and future policy improvement.
+    """
+    content_preview: str = ""
+    """Preview of content that failed to persist."""
+
+    failure_category: FailureCategory = FailureCategory.UNKNOWN
+    """Category of the failure."""
+
+    error_message: str = ""
+    """Error message or description."""
+
+    retry_count: int = 0
+    """Number of retry attempts made."""
+
+    recovery_action: str = ""
+    """Recommended recovery action."""
+
+    timestamp: float = field(default_factory=lambda: __import__('time').time())
+    """When the failure occurred."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "content_preview": self.content_preview,
+            "failure_category": self.failure_category.value,
+            "error_message": self.error_message,
+            "retry_count": self.retry_count,
+            "recovery_action": self.recovery_action,
+            "timestamp": self.timestamp,
+        }

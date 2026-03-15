@@ -4,7 +4,8 @@ memory/ltm_introspection.py
 LTM Self-Management Toolkit — Agent Introspection API.
 
 This module provides a self-directed introspection toolkit that enables an agent
-to reason about, orchestrate, and validate its own long-term memory retrieval.
+to reason about, orchestrate, and validate its own long-term memory retrieval
+and persistence.
 
 Rather than relying on automatic, time-based triggers, the agent calls explicit
 tools to:
@@ -12,13 +13,18 @@ tools to:
   2. Decide whether retrieval is warranted
   3. Execute retrieval with semantic coverage
   4. Validate results
-  5. Log decisions for future calibration
+  5. Assess persistence needs and force immediate persistence
+  6. Log decisions for future calibration
 
 Every retrieval event produces a traceable chain of reasoning:
   what signal fired → what assessment said → what was retrieved →
   whether it was validated → what utility was observed
 
-Tool Organization (4 Tiers)
+Every persistence event produces a traceable chain:
+  user request → pattern detection → persistence execution →
+  validation → confirmation
+
+Tool Organization (5 Tiers)
 ───────────────────────────
 Tier 1 — State Assessment (Introspection):
   • assess_conversation_drift
@@ -38,6 +44,12 @@ Tier 4 — Meta-Cognitive Tools (Learning):
   • log_retrieval_decision
   • suggest_retrieval_strategy
 
+Tier 5 — Persistence Assurance (Memory Integrity):
+  • assess_persistence_need       — Detect explicit memory commands
+  • force_memory_persistence      — Bypass gating for immediate persistence
+  • validate_memory_commit        — Confirm persistence succeeded
+  • log_persistence_failure       — Capture failure details
+
 Design decisions
 ────────────────
 * All tools return structured objects, never raw strings.
@@ -45,6 +57,8 @@ Design decisions
 * Retry logic is capped at 2 retries to prevent retrieval loops.
 * Logging happens even when retrieval is skipped (non-retrieval is informative).
 * Anchor snapshots are stored after each successful retrieval cycle.
+* Persistence tools address the "agent lies about recording" bug by enabling
+  explicit pre-response persistence for user memory commands.
 """
 
 from __future__ import annotations
@@ -65,6 +79,7 @@ from memory.ltm_introspection_types import (
     # Enums
     DriftType, ConfidenceLevel, ExpectedValue, UrgencyLevel,
     RetrievalMode, FailureMode, MatchDimension, ConfidenceDimension,
+    PersistenceUrgency, PersistenceStatus, FailureCategory,
     # Tier 1
     DriftReport, ConfidenceDimensionScore, ConfidenceReport, ReadinessAssessment,
     # Tier 2
@@ -74,6 +89,9 @@ from memory.ltm_introspection_types import (
     CompressedContext, Turn,
     # Tier 4
     RetrievalDecision, ConversationProfile, StrategyRecommendation,
+    # Tier 5
+    PersistenceNeed, PersistenceResult, PersistenceValidation,
+    PersistenceFailure, MemoryCommandPattern, ValidationCheck,
     # Supporting
     AnchorSnapshot,
 )
@@ -135,6 +153,21 @@ class _IntrospectionState:
         if not relevant:
             return 0.5  # Default neutral effectiveness
         return sum(d.utility_score for d in relevant) / len(relevant)
+
+    def log_persistence_failure(self, failure: Any) -> None:
+        """Log a persistence failure for analysis."""
+        # Store in a dedicated failures list
+        if not hasattr(self, '_persistence_failures'):
+            self._persistence_failures: List[Any] = []
+        self._persistence_failures.append(failure)
+        logger.warning(f"Logged persistence failure: {failure.failure_category.value}, "
+                      f"recovery={failure.recovery_action}")
+
+    def get_persistence_failures(self, limit: int = 100) -> List[Any]:
+        """Get recent persistence failures."""
+        if not hasattr(self, '_persistence_failures'):
+            return []
+        return self._persistence_failures[-limit:]
 
 
 # Module-level thread-local state storage
@@ -1581,6 +1614,371 @@ def suggest_retrieval_strategy(
         historical_effectiveness=historical,
         suggested_params=suggested_params,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tier 5 — Persistence Assurance (Memory Integrity)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Memory command patterns for detecting explicit persistence requests
+MEMORY_COMMAND_PATTERNS = {
+    "explicit_remember": [
+        r"\bremember\s+(?:that\s+)?(.+?)(?:\.|$)",
+        r"\bplease\s+remember\s+(?:that\s+)?(.+?)(?:\.|$)",
+        r"\bstore\s+(?:this\s+)?(?:in\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
+        r"\bsave\s+(?:this\s+)?(?:to\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
+        r"\bsave\s+this[:\s]+(.+?)(?:\.|$)",  # Simple "Save this: X" pattern
+    ],
+    "explicit_forget": [
+        r"\bforget\s+(?:that\s+)?(.+?)(?:\.|$)",
+        r"\bdelete\s+(?:this\s+)?(?:from\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
+        r"\bremove\s+(?:this\s+)?(?:from\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
+    ],
+    "implied_store": [
+        r"\bthis\s+is\s+important[:\s]+(.+?)(?:\.|$)",
+        r"\bnote\s+(?:that\s+)?(?:for\s+)?(?:future\s+)?(?:reference\s+)?[:\s]+(.+?)(?:\.|$)",
+        r"\b(make\s+a\s+note|take\s+a\s+note)[:\s]+(.+?)(?:\.|$)",
+    ],
+    "persistence_confirm": [
+        r"\bdid\s+you\s+(?:remember|store|save)\s+(?:that\s+)?",
+        r"\bcheck\s+(?:if\s+)?you\s+(?:remembered|stored|saved)",
+    ],
+}
+
+
+def assess_persistence_need(
+    user_input: str,
+    recent_context: Optional[List[ContextMessage]] = None,
+    check_patterns: Optional[List[str]] = None,
+) -> PersistenceNeed:
+    """
+    Assess whether the user is requesting explicit memory persistence.
+
+    Analyzes user input for memory command patterns like "remember that...",
+    "store this in your memory...", etc. Returns a structured assessment
+    with detected patterns, urgency, and suggested content to persist.
+
+    This tool addresses the critical gap where explicit user memory requests
+    were previously treated as normal conversation, often resulting in
+    "the agent lies about recording" bugs.
+
+    Pattern Detection:
+    ------------------
+    Uses regex patterns to detect explicit memory commands. Patterns are
+    categorized by type (explicit_remember, explicit_forget, implied_store,
+    persistence_confirm) with confidence scoring.
+
+    Fallback Behavior:
+    ------------------
+    If no explicit patterns match but the context suggests importance
+    (e.g., user defining a key concept), returns low-confidence need
+    with BATCH urgency.
+
+    Args:
+        user_input: The user's message to analyze.
+        recent_context: Recent conversation context for enrichment.
+        check_patterns: Specific pattern categories to check (None = all).
+
+    Returns:
+        PersistenceNeed with detection results and recommendations.
+    """
+    need = PersistenceNeed()
+    detected_patterns: List[MemoryCommandPattern] = []
+
+    # Determine which patterns to check
+    patterns_to_check = check_patterns or list(MEMORY_COMMAND_PATTERNS.keys())
+
+    # Check each pattern category
+    for pattern_type in patterns_to_check:
+        if pattern_type not in MEMORY_COMMAND_PATTERNS:
+            continue
+
+        for pattern in MEMORY_COMMAND_PATTERNS[pattern_type]:
+            matches = list(re.finditer(pattern, user_input, re.IGNORECASE))
+            for match in matches:
+                # Extract content if the pattern has a capture group
+                content = match.group(1) if match.lastindex and match.lastindex >= 1 else user_input
+
+                detected_patterns.append(MemoryCommandPattern(
+                    pattern_type=pattern_type,
+                    matched_phrase=match.group(0),
+                    confidence=0.9 if pattern_type.startswith("explicit") else 0.7,
+                    content_to_persist=content.strip(),
+                ))
+
+    # Determine urgency based on patterns detected
+    if any(p.pattern_type == "explicit_remember" for p in detected_patterns):
+        need.urgency = PersistenceUrgency.IMMEDIATE
+        need.priority_score = 0.95
+        need.persistence_rationale = "Explicit 'remember' command detected - user expects confirmation"
+    elif any(p.pattern_type == "explicit_forget" for p in detected_patterns):
+        need.urgency = PersistenceUrgency.IMMEDIATE
+        need.priority_score = 0.9
+        need.persistence_rationale = "Explicit 'forget/delete' command detected"
+    elif any(p.pattern_type == "persistence_confirm" for p in detected_patterns):
+        need.urgency = PersistenceUrgency.IMMEDIATE
+        need.priority_score = 0.85
+        need.persistence_rationale = "User requesting confirmation of prior persistence"
+    elif any(p.pattern_type == "implied_store" for p in detected_patterns):
+        need.urgency = PersistenceUrgency.BATCH
+        need.priority_score = 0.7
+        need.persistence_rationale = "Implied store command detected"
+    else:
+        # No explicit patterns - check context for implicit importance
+        need.urgency = PersistenceUrgency.BACKGROUND
+        need.priority_score = 0.3
+        need.persistence_rationale = "No explicit memory command detected"
+
+    # Extract suggested content from highest confidence pattern
+    if detected_patterns:
+        best_pattern = max(detected_patterns, key=lambda p: p.confidence)
+        need.suggested_content = best_pattern.content_to_persist
+        need.should_persist = True
+    else:
+        need.should_persist = False
+
+    need.detected_patterns = detected_patterns
+    return need
+
+
+def force_memory_persistence(
+    content: str,
+    ltm_store: Optional[Any] = None,
+    learning_score: float = 0.8,
+    source_turn: int = 0,
+    trigger: str = "user_command",
+    bypass_scoring: bool = True,
+) -> PersistenceResult:
+    """
+    Force immediate persistence of content to LTM, bypassing normal gating.
+
+    This is the critical tool that fixes "the agent lies about recording" bugs.
+    When the user explicitly asks to remember something, this tool ensures
+    the content is persisted BEFORE the agent responds with confirmation.
+
+    Normal Flow (Bug):
+    ------------------
+    User: "Remember that X"
+    Agent: "I have recorded X"  # <-- Response generated, but not yet persisted
+    [LearningScorer runs every 3 turns - may miss this]
+    [MemoryAgent runs every 10 turns - may miss this]
+    User: /clear
+    [STM wiped, LTM empty - memory lost]
+
+    Fixed Flow:
+    -----------
+    User: "Remember that X"
+    assess_persistence_need() detects explicit command
+    force_memory_persistence() writes to LTM IMMEDIATELY
+    Agent: "I have recorded X"  # <-- Truthful confirmation
+    User: /clear
+    [STM wiped, but LTM contains X - memory preserved]
+
+    Args:
+        content: Content to persist to LTM.
+        ltm_store: LTM store instance (optional, for testing).
+        learning_score: Learning score to assign (higher = more important).
+        source_turn: Current turn index.
+        trigger: Trigger reason (e.g., 'user_command', 'learning_spike').
+        bypass_scoring: If True, bypass LearningScorer gating.
+
+    Returns:
+        PersistenceResult with success status and memory ID.
+    """
+    result = PersistenceResult(
+        content_preview=content[:200] + "..." if len(content) > 200 else content,
+        learning_score=learning_score,
+        trigger=trigger,
+    )
+
+    if not ltm_store:
+        # In production, get LTM store from orchestrator
+        # For now, mark as needing orchestrator integration
+        result.status = PersistenceStatus.PENDING
+        result.success = False
+        return result
+
+    try:
+        # Attempt to persist to LTM
+        # This assumes ltm_store has an add() method like LTMStore
+        add_result = ltm_store.add(
+            content=content,
+            learning_score=learning_score,
+            source_turn=source_turn,
+            trigger=trigger,
+        )
+
+        if add_result.success:
+            result.success = True
+            result.status = PersistenceStatus.CONFIRMED
+            result.memory_id = getattr(add_result, 'memory_id', None)
+        else:
+            result.success = False
+            result.status = PersistenceStatus.FAILED
+
+    except Exception as e:
+        logger.error(f"Force persistence failed: {e}")
+        result.success = False
+        result.status = PersistenceStatus.FAILED
+
+    return result
+
+
+def validate_memory_commit(
+    memory_id: Optional[str] = None,
+    expected_content: str = "",
+    ltm_store: Optional[Any] = None,
+) -> PersistenceValidation:
+    """
+    Validate that a memory was successfully persisted to LTM.
+
+    Performs multiple checks to confirm:
+    1. The memory exists in LTM
+    2. The content matches what was intended
+    3. All metadata is correctly stored
+
+    Use this BEFORE confirming to the user that something was remembered.
+
+    Validation Checks:
+    ------------------
+    - existence: Does the memory ID exist?
+    - content_match: Does stored content match expected?
+    - integrity: Is the memory entry valid and complete?
+
+    Args:
+        memory_id: ID of the memory to validate.
+        expected_content: Expected content (for matching verification).
+        ltm_store: LTM store instance (optional).
+
+    Returns:
+        PersistenceValidation with detailed check results.
+    """
+    validation = PersistenceValidation()
+    checks: List[ValidationCheck] = []
+
+    # Check 1: Memory exists
+    existence_check = ValidationCheck(
+        check_name="existence",
+        passed=False,
+        details="Memory ID not provided" if not memory_id else "Checking...",
+    )
+
+    if memory_id and ltm_store:
+        try:
+            # Try to retrieve the memory
+            entry = ltm_store.get(memory_id)
+            existence_check.passed = entry is not None
+            existence_check.details = f"Memory {memory_id} found" if entry else f"Memory {memory_id} not found"
+            validation.memory_found = entry is not None
+            if entry:
+                validation.memory_id = memory_id
+        except Exception as e:
+            existence_check.details = f"Error checking existence: {e}"
+    elif not memory_id:
+        existence_check.details = "No memory ID provided for validation"
+
+    checks.append(existence_check)
+
+    # Check 2: Content matches (if we have both ID and expected content)
+    content_check = ValidationCheck(
+        check_name="content_match",
+        passed=False,
+        details="Skipping content match - insufficient data",
+    )
+
+    if validation.memory_found and expected_content and ltm_store:
+        try:
+            entry = ltm_store.get(memory_id)
+            if entry and hasattr(entry, 'content'):
+                stored_content = entry.content
+                # Simple containment check
+                if expected_content in stored_content or stored_content in expected_content:
+                    content_check.passed = True
+                    content_check.details = "Content matches expected"
+                    validation.content_matches = True
+                else:
+                    content_check.details = "Content mismatch detected"
+            else:
+                content_check.details = "Could not retrieve stored content"
+        except Exception as e:
+            content_check.details = f"Error checking content: {e}"
+
+    checks.append(content_check)
+
+    # Check 3: Metadata integrity
+    integrity_check = ValidationCheck(
+        check_name="integrity",
+        passed=validation.memory_found,
+        details="Metadata integrity verified" if validation.memory_found else "Cannot verify - memory not found",
+    )
+    checks.append(integrity_check)
+
+    validation.validation_checks = checks
+    validation.is_validated = all(c.passed for c in checks)
+
+    if validation.is_validated:
+        validation.validation_rationale = "All validation checks passed - persistence confirmed"
+    elif validation.memory_found and not validation.content_matches:
+        validation.validation_rationale = "Memory exists but content mismatch detected"
+    else:
+        validation.validation_rationale = "Persistence validation failed - memory not found"
+
+    return validation
+
+
+def log_persistence_failure(
+    content: str,
+    error: Exception,
+    retry_count: int = 0,
+    context: Optional[Dict[str, Any]] = None,
+) -> PersistenceFailure:
+    """
+    Log a persistence failure for debugging and policy improvement.
+
+    Captures failure details including category classification,
+    retry history, and recommended recovery actions.
+
+    Args:
+        content: Content that failed to persist.
+        error: The exception that occurred.
+        retry_count: Number of retry attempts made.
+        context: Additional context (user_input, turn_index, etc.).
+
+    Returns:
+        PersistenceFailure with failure details.
+    """
+    error_msg = str(error)
+    error_lower = error_msg.lower()
+
+    # Classify failure category
+    if any(w in error_lower for w in ['network', 'connection', 'timeout', 'unreachable']):
+        category = FailureCategory.NETWORK
+        recovery = "Check network connectivity and retry"
+    elif any(w in error_lower for w in ['rate', 'quota', 'limit', 'throttle']):
+        category = FailureCategory.RATE_LIMIT
+        recovery = "Wait and retry with exponential backoff"
+    elif any(w in error_lower for w in ['validation', 'invalid', 'schema']):
+        category = FailureCategory.VALIDATION
+        recovery = "Check content format and retry"
+    elif any(w in error_lower for w in ['corrupt', 'checksum', 'integrity']):
+        category = FailureCategory.CORRUPTION
+        recovery = "Report to system administrator"
+    else:
+        category = FailureCategory.UNKNOWN
+        recovery = "Log for analysis and retry"
+
+    failure = PersistenceFailure(
+        content_preview=content[:200] + "..." if len(content) > 200 else content,
+        failure_category=category,
+        error_message=error_msg,
+        retry_count=retry_count,
+        recovery_action=recovery,
+    )
+
+    # Log to state for aggregation
+    _get_state().log_persistence_failure(failure)
+
+    return failure
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

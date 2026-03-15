@@ -33,6 +33,10 @@ from memory.ltm_introspection_types import (
     RetrievalDecision, ConversationProfile, StrategyRecommendation,
     Turn, RetrievedMemory, MemoryValidationResult,
     RetrievalAttempt, ConfidenceDimensionScore,
+    # Tier 5 types
+    PersistenceNeed, PersistenceResult, PersistenceValidation,
+    PersistenceFailure, MemoryCommandPattern, PersistenceUrgency,
+    PersistenceStatus, FailureCategory, ValidationCheck,
 )
 
 # Import tools
@@ -50,6 +54,11 @@ from memory.ltm_introspection import (
     set_anchor_from_context,
     get_decision_history,
     clear_state,
+    # Tier 5 tools
+    assess_persistence_need,
+    force_memory_persistence,
+    validate_memory_commit,
+    log_persistence_failure,
 )
 
 
@@ -1021,6 +1030,335 @@ class TestStateManagement:
 
         history = get_decision_history()
         assert len(history) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tier 5 Tests — Persistence Assurance (Memory Integrity)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAssessPersistenceNeed:
+    """Tests for assess_persistence_need tool."""
+
+    def test_detects_explicit_remember(self):
+        """Detects explicit 'remember that...' commands."""
+        need = assess_persistence_need(
+            user_input="Remember that uwot-swarm is a framework for agent orchestration",
+        )
+
+        assert isinstance(need, PersistenceNeed)
+        assert need.should_persist is True
+        assert need.urgency == PersistenceUrgency.IMMEDIATE
+        assert any(p.pattern_type == "explicit_remember" for p in need.detected_patterns)
+        assert "uwot-swarm" in need.suggested_content
+
+    def test_detects_store_commands(self):
+        """Detects 'store this in your memory...' commands."""
+        need = assess_persistence_need(
+            user_input="Store this in your memory: the password is 12345",
+        )
+
+        assert need.should_persist is True
+        assert any(p.pattern_type in ["explicit_remember", "implied_store"]
+                  for p in need.detected_patterns)
+
+    def test_detects_save_commands(self):
+        """Detects 'save this...' commands."""
+        need = assess_persistence_need(
+            user_input="Save this: my favorite color is blue",
+        )
+
+        assert need.should_persist is True
+        assert need.urgency == PersistenceUrgency.IMMEDIATE
+        assert any(p.pattern_type == "explicit_remember" for p in need.detected_patterns)
+
+    def test_detects_forget_commands(self):
+        """Detects 'forget that...' commands."""
+        need = assess_persistence_need(
+            user_input="Forget that I told you my password",
+        )
+
+        assert need.should_persist is True
+        assert need.urgency == PersistenceUrgency.IMMEDIATE
+        assert any(p.pattern_type == "explicit_forget" for p in need.detected_patterns)
+
+    def test_detects_confirmation_requests(self):
+        """Detects 'did you remember...' confirmation requests."""
+        need = assess_persistence_need(
+            user_input="Did you remember what I told you about the project?",
+        )
+
+        assert any(p.pattern_type == "persistence_confirm" for p in need.detected_patterns)
+
+    def test_no_patterns_returns_false(self):
+        """No persistence needed for normal conversation."""
+        need = assess_persistence_need(
+            user_input="What's the weather like today?",
+        )
+
+        assert need.should_persist is False
+        assert need.urgency == PersistenceUrgency.BACKGROUND
+        assert len(need.detected_patterns) == 0
+
+    def test_pattern_confidence_scoring(self):
+        """Explicit patterns have higher confidence than implied."""
+        explicit_need = assess_persistence_need(
+            user_input="Remember that X is important",
+        )
+        implied_need = assess_persistence_need(
+            user_input="This is important: X",
+        )
+
+        explicit_confidences = [p.confidence for p in explicit_need.detected_patterns
+                               if p.pattern_type == "explicit_remember"]
+        implied_confidences = [p.confidence for p in implied_need.detected_patterns
+                              if p.pattern_type == "implied_store"]
+
+        if explicit_confidences and implied_confidences:
+            assert explicit_confidences[0] > implied_confidences[0]
+
+    def test_content_extraction(self):
+        """Content is extracted from matched patterns."""
+        need = assess_persistence_need(
+            user_input="Remember that the API key is secret123",
+        )
+
+        assert "secret123" in need.suggested_content
+
+    def test_returns_structured_object(self):
+        """Returns PersistenceNeed, not raw string."""
+        need = assess_persistence_need(user_input="Remember this")
+
+        assert isinstance(need, PersistenceNeed)
+        assert hasattr(need, 'to_dict')
+        assert isinstance(need.to_dict(), dict)
+
+
+class TestForceMemoryPersistence:
+    """Tests for force_memory_persistence tool."""
+
+    def test_returns_persistence_result(self):
+        """Returns structured PersistenceResult."""
+        result = force_memory_persistence(
+            content="Test content to persist",
+            learning_score=0.9,
+            trigger="user_command",
+        )
+
+        assert isinstance(result, PersistenceResult)
+        assert hasattr(result, 'success')
+        assert hasattr(result, 'status')
+
+    def test_no_ltm_store_returns_pending(self):
+        """Without LTM store, returns PENDING status."""
+        result = force_memory_persistence(
+            content="Test content",
+        )
+
+        assert result.status == PersistenceStatus.PENDING
+        assert result.success is False
+
+    def test_content_preview_truncated(self):
+        """Long content is previewed with truncation."""
+        long_content = "x" * 500
+
+        result = force_memory_persistence(content=long_content)
+
+        assert len(result.content_preview) < 300
+        assert "..." in result.content_preview
+
+    def test_defaults_for_explicit_commands(self):
+        """Sets appropriate defaults for explicit user commands."""
+        result = force_memory_persistence(
+            content="Important fact",
+        )
+
+        # Uses defaults: learning_score=0.8, trigger=user_command
+        assert result.learning_score == 0.8
+        assert result.trigger == "user_command"
+
+    def test_returns_structured_object(self):
+        """Returns PersistenceResult with to_dict method."""
+        result = force_memory_persistence(content="Test")
+
+        assert isinstance(result, PersistenceResult)
+        assert isinstance(result.to_dict(), dict)
+
+
+class TestValidateMemoryCommit:
+    """Tests for validate_memory_commit tool."""
+
+    def test_returns_validation_object(self):
+        """Returns structured PersistenceValidation."""
+        validation = validate_memory_commit(
+            memory_id="test-memory-id",
+            expected_content="Test content",
+        )
+
+        assert isinstance(validation, PersistenceValidation)
+        assert hasattr(validation, 'is_validated')
+        assert hasattr(validation, 'validation_checks')
+
+    def test_no_memory_id_reports_error(self):
+        """Validation without memory_id reports appropriate error."""
+        validation = validate_memory_commit(
+            memory_id=None,
+            expected_content="Test",
+        )
+
+        existence_check = [c for c in validation.validation_checks
+                          if c.check_name == "existence"][0]
+        assert existence_check.passed is False
+        assert "no memory id" in existence_check.details.lower()
+
+    def test_no_ltm_store_returns_not_found(self):
+        """Without LTM store, memory is not found."""
+        validation = validate_memory_commit(
+            memory_id="test-id",
+            expected_content="Test content",
+        )
+
+        assert validation.memory_found is False
+        assert validation.is_validated is False
+
+    def test_validation_checks_structure(self):
+        """All validation checks have required fields."""
+        validation = validate_memory_commit(memory_id="test")
+
+        for check in validation.validation_checks:
+            assert hasattr(check, 'check_name')
+            assert hasattr(check, 'passed')
+            assert hasattr(check, 'details')
+            assert isinstance(check.to_dict(), dict)
+
+    def test_returns_structured_object(self):
+        """Returns PersistenceValidation with to_dict method."""
+        validation = validate_memory_commit(memory_id="test")
+
+        assert isinstance(validation, PersistenceValidation)
+        assert isinstance(validation.to_dict(), dict)
+
+
+class TestLogPersistenceFailure:
+    """Tests for log_persistence_failure tool."""
+
+    def test_returns_failure_object(self):
+        """Returns structured PersistenceFailure."""
+        error = Exception("Test error")
+        failure = log_persistence_failure(
+            content="Test content",
+            error=error,
+            retry_count=2,
+        )
+
+        assert isinstance(failure, PersistenceFailure)
+        assert failure.error_message == "Test error"
+        assert failure.retry_count == 2
+
+    def test_classifies_network_errors(self):
+        """Correctly classifies network-related errors."""
+        error = Exception("Network connection timeout")
+        failure = log_persistence_failure(content="Test", error=error)
+
+        assert failure.failure_category == FailureCategory.NETWORK
+
+    def test_classifies_rate_limit_errors(self):
+        """Correctly classifies rate limit errors."""
+        error = Exception("Rate limit exceeded, quota exhausted")
+        failure = log_persistence_failure(content="Test", error=error)
+
+        assert failure.failure_category == FailureCategory.RATE_LIMIT
+
+    def test_classifies_validation_errors(self):
+        """Correctly classifies validation errors."""
+        error = Exception("Content validation failed: invalid schema")
+        failure = log_persistence_failure(content="Test", error=error)
+
+        assert failure.failure_category == FailureCategory.VALIDATION
+
+    def test_provides_recovery_action(self):
+        """Failure includes recommended recovery action."""
+        error = Exception("Network timeout")
+        failure = log_persistence_failure(content="Test", error=error)
+
+        assert len(failure.recovery_action) > 0
+        assert "retry" in failure.recovery_action.lower()
+
+    def test_content_preview_truncated(self):
+        """Long content is previewed with truncation."""
+        long_content = "x" * 500
+        error = Exception("Test")
+
+        failure = log_persistence_failure(content=long_content, error=error)
+
+        assert len(failure.content_preview) < 300
+        assert "..." in failure.content_preview
+
+    def test_logs_to_state(self):
+        """Failure is logged to introspection state."""
+        clear_state()
+
+        error = Exception("Test error")
+        failure = log_persistence_failure(
+            content="Test",
+            error=error,
+        )
+
+        from memory.ltm_introspection import get_introspection_state
+        state = get_introspection_state()
+        failures = state.get_persistence_failures()
+
+        assert len(failures) > 0
+
+    def test_returns_structured_object(self):
+        """Returns PersistenceFailure with to_dict method."""
+        error = Exception("Test")
+        failure = log_persistence_failure(content="Test", error=error)
+
+        assert isinstance(failure, PersistenceFailure)
+        assert isinstance(failure.to_dict(), dict)
+
+
+class TestTier5ReturnTypes:
+    """Tests for Tier 5 return type consistency."""
+
+    def test_all_persistence_types_serializable(self):
+        """All Tier 5 types can be serialized to dict."""
+        # PersistenceNeed
+        need = assess_persistence_need(user_input="Remember this")
+        assert isinstance(need.to_dict(), dict)
+
+        # PersistenceResult
+        result = force_memory_persistence(content="Test")
+        assert isinstance(result.to_dict(), dict)
+
+        # PersistenceValidation
+        validation = validate_memory_commit(memory_id="test")
+        assert isinstance(validation.to_dict(), dict)
+
+        # PersistenceFailure
+        error = Exception("Test")
+        failure = log_persistence_failure(content="Test", error=error)
+        assert isinstance(failure.to_dict(), dict)
+
+    def test_persistence_need_serialization(self):
+        """PersistenceNeed serializes correctly."""
+        need = assess_persistence_need(user_input="Remember that X")
+        d = need.to_dict()
+
+        assert "should_persist" in d
+        assert "urgency" in d
+        assert "detected_patterns" in d
+        assert "priority_score" in d
+
+    def test_persistence_result_serialization(self):
+        """PersistenceResult serializes correctly."""
+        result = force_memory_persistence(content="Test")
+        d = result.to_dict()
+
+        assert "success" in d
+        assert "status" in d
+        assert "content_preview" in d
+        assert "timestamp" in d
 
 
 if __name__ == "__main__":
