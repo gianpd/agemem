@@ -418,7 +418,7 @@ class LLMClient:
                 return content
             except Exception as exc:
                 # Don't retry on tool calls - let them propagate
-                if isinstance(exc, ToolCallResponse):
+                if isinstance(exc, (ToolCallResponse, TextToolCallResponse)):
                     raise
                 last_exc = exc
                 if attempt < retries:
