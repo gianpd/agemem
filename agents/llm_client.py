@@ -164,11 +164,28 @@ def parse_text_tool_call(text: str) -> TextToolCall | None:
                 tool_args = {}
 
     # Format 4: {"tool_name": {...}} where key is a known tool name
+    # This is a shorthand format but can cause false positives when the LLM
+    # outputs JSON that happens to have a key matching a tool name.
+    # We add heuristics to reduce false positives.
     else:
+        # Keys that suggest this is data ABOUT a tool, not a tool call
+        DATA_KEYS = {
+            "description", "last_used", "results", "count", "status",
+            "enabled", "available", "name", "type", "id", "created_at",
+            "updated_at", "version", "author", "documentation", "example",
+        }
         for key in data:
             if key in KNOWN_TOOL_NAMES:
+                value = data[key]
+                # Skip if value is not a dict (tool calls have dict arguments)
+                if not isinstance(value, dict):
+                    continue
+                # Skip if value has keys that suggest it's metadata, not arguments
+                if any(k in DATA_KEYS for k in value):
+                    continue
+                # This looks like a tool call
                 tool_name = key
-                tool_args = data[key] if isinstance(data[key], dict) else {}
+                tool_args = value
                 break
 
     # Validate tool name
@@ -207,8 +224,12 @@ def detect_text_tool_calls(text: str) -> list[TextToolCall]:
 
     calls = []
 
-    # Find all JSON objects in the text using shared utility
-    json_objects = find_all_json_objects(text)
+    # Strip thinking blocks and other wrappers before detection
+    # to avoid false positives from content inside thinking blocks
+    cleaned_text = strip_wrappers(text)
+
+    # Find all JSON objects in the cleaned text using shared utility
+    json_objects = find_all_json_objects(cleaned_text)
 
     for json_str in json_objects:
         call = parse_text_tool_call(json_str)
@@ -371,14 +392,29 @@ class LLMClient:
                     # TRACE: Log raw response before raising tool call
                     from core.tracing import get_tracer
                     tracer = get_tracer()
+
+                    # Validate the tool call before raising
+                    tool_name = getattr(tool_calls[0].function, 'name', None)
+                    tool_args_raw = getattr(tool_calls[0].function, 'arguments', None)
+
                     if tracer:
                         tracer._debug_logger.debug(
                             f"[RAW_RESPONSE_TOOL_CALL] type=ToolCallResponse\n"
-                            f"Tool name: {getattr(tool_calls[0].function, 'name', 'UNKNOWN')}\n"
-                            f"Tool args: {getattr(tool_calls[0].function, 'arguments', 'N/A')!r}\n"
+                            f"Tool name: {tool_name!r}\n"
+                            f"Tool args: {tool_args_raw!r}\n"
                             f"Full message content: {message.content!r}"
                         )
-                    raise ToolCallResponse(tool_calls[0])
+
+                    # Skip malformed tool calls (empty name or non-string name)
+                    if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
+                        if tracer:
+                            tracer._debug_logger.debug(
+                                f"[TOOL_CALL_VALIDATION] Skipping malformed tool call with empty name"
+                            )
+                        # Treat as regular text response
+                        content = message.content or ""
+                    else:
+                        raise ToolCallResponse(tool_calls[0])
 
                 content = message.content or ""
 
@@ -487,14 +523,29 @@ class LLMClient:
                     # TRACE: Log raw response before raising tool call
                     from core.tracing import get_tracer
                     tracer = get_tracer()
+
+                    # Validate the tool call before raising
+                    tool_name = getattr(tool_calls[0].function, 'name', None)
+                    tool_args_raw = getattr(tool_calls[0].function, 'arguments', None)
+
                     if tracer:
                         tracer._debug_logger.debug(
                             f"[RAW_RESPONSE_TOOL_CALL] type=ToolCallResponse\n"
-                            f"Tool name: {getattr(tool_calls[0].function, 'name', 'UNKNOWN')}\n"
-                            f"Tool args: {getattr(tool_calls[0].function, 'arguments', 'N/A')!r}\n"
+                            f"Tool name: {tool_name!r}\n"
+                            f"Tool args: {tool_args_raw!r}\n"
                             f"Full message content: {message.content!r}"
                         )
-                    raise ToolCallResponse(tool_calls[0])
+
+                    # Skip malformed tool calls (empty name or non-string name)
+                    if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
+                        if tracer:
+                            tracer._debug_logger.debug(
+                                f"[TOOL_CALL_VALIDATION] Skipping malformed tool call with empty name"
+                            )
+                        # Treat as regular text response
+                        content = message.content or ""
+                    else:
+                        raise ToolCallResponse(tool_calls[0])
 
                 content = message.content or ""
 

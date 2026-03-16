@@ -163,3 +163,92 @@ class TestTextToolCallPropagation:
         assert len(calls) == 1
         assert calls[0].function.name == "list_documents"
         assert calls[0].function.arguments == {}
+
+    def test_detect_text_tool_calls_rejects_metadata_json(self):
+        """
+        Format 4 heuristic should reject JSON that looks like metadata, not tool calls.
+
+        This tests the fix for Bug 1: aggressive text-based tool call detection.
+        JSON like {"web_search": {"description": "..."}} should NOT be detected as a tool call.
+        """
+        # This should NOT be detected as a tool call (it's metadata about web_search)
+        text = '{"web_search": {"description": "A tool for searching the web", "last_used": "2024-01-01"}}'
+        calls = detect_text_tool_calls(text)
+        assert len(calls) == 0
+
+        # This also should NOT be detected (has "results" key suggesting metadata)
+        text = '{"search_metadata": {"results": 5, "status": "complete"}}'
+        calls = detect_text_tool_calls(text)
+        assert len(calls) == 0
+
+        # But this SHOULD be detected (looks like actual tool arguments)
+        text = '{"web_search": {"query": "test search"}}'
+        calls = detect_text_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0].function.name == "web_search"
+        assert calls[0].function.arguments == {"query": "test search"}
+
+    def test_detect_text_tool_calls_strips_thinking_blocks(self):
+        """
+        Tool calls inside thinking blocks should not be detected.
+
+        This tests the fix for Bug 3: tool call detection in thinking blocks.
+        """
+        # Tool call inside thinking block should be ignored
+        text = '<think>{"web_search": {"query": "test"}}</think>Some actual response text.'
+        calls = detect_text_tool_calls(text)
+        # The thinking block should be stripped, so no tool call should be found
+        assert len(calls) == 0
+
+        # Tool call outside thinking block should still be detected
+        text = '<think>Let me think...</think>{"web_search": {"query": "actual query"}}'
+        calls = detect_text_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0].function.name == "web_search"
+
+    def test_malformed_native_tool_call_skipped(self):
+        """
+        Native tool calls with empty/missing names should be skipped, not raised.
+
+        This tests the fix for Bug 2: malformed native tool calls from the LLM.
+        """
+        mock_openai_client = Mock()
+        mock_response = Mock()
+        mock_message = Mock()
+        mock_message.content = "Here is my response text."
+        mock_message.tool_calls = None  # Will be set below
+
+        # Mock usage
+        mock_usage = Mock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 5
+        mock_response.usage = mock_usage
+
+        # Mock malformed native tool call (empty name)
+        mock_tool_call = Mock()
+        mock_tool_call.function.name = ""  # Empty name - malformed
+        mock_tool_call.function.arguments = '{"query": "test"}'
+        mock_message.tool_calls = [mock_tool_call]
+
+        mock_response.choices = [Mock(message=mock_message)]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        llm = LLMClient(client=mock_openai_client, default_model="test-model")
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }]
+
+        # Should NOT raise ToolCallResponse - should return content instead
+        result = llm.chat(
+            messages=[{"role": "user", "content": "Search for test"}],
+            tools=tools,
+        )
+
+        assert result == "Here is my response text."
+        assert mock_openai_client.chat.completions.create.call_count == 1
