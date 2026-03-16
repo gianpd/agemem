@@ -133,6 +133,29 @@ class STMContext:
         )
         self._messages.append(msg)
 
+    def update_pinned_system_message(self, new_content: str) -> bool:
+        """
+        Update the content of the pinned system message (main prompt).
+
+        Args:
+            new_content: The new system prompt content
+
+        Returns:
+            True if a pinned system message was found and updated, False otherwise
+        """
+        for i, msg in enumerate(self._messages):
+            if msg.role == "system" and msg.is_pinned:
+                # Create updated message with new content
+                from dataclasses import replace
+                updated_msg = replace(
+                    msg,
+                    content=new_content,
+                    token_estimate=self._tc.count(new_content),
+                )
+                self._messages[i] = updated_msg
+                return True
+        return False
+
     def increment_turn(self) -> None:
         self._turn_index += 1
 

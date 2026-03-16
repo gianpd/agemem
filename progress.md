@@ -1,3 +1,154 @@
+# AgeMem — Prompt Registry Caching Fix
+
+**Feature:** Fix prompt caching bug where modified prompts weren't being reloaded
+**Status:** ✅ FIXED
+**Date:** 2026-03-16
+**Target branch:** `main`
+
+---
+
+## Summary
+
+Fixed a critical caching bug where the orchestrator was loading old versions of prompts even after the prompt files were modified on disk. The system now properly reloads prompts from disk when `reload_prompts()` is called.
+
+**Key Result:** Prompts reload correctly from disk; STM pinned system message updates automatically.
+
+---
+
+## The Problem We Solved
+
+### Original Behavior (Before)
+
+When prompt files were modified on disk (e.g., updating `main-system.md`), the system continued to use cached versions:
+
+1. **PromptLoader cache**: The loader maintained an in-memory cache that wasn't cleared when files changed
+2. **STM pinned message**: The orchestrator added the system prompt as a pinned message in STM during initialization, and it was never updated
+
+**Failure Mode:**
+```
+Edit main-system.md (v1.0.0 → v2.0.0)
+         ↓
+Call orchestrator.reload_prompts()
+         ↓
+Still receives v1.0.0 from cache
+         ↓
+STM still has old pinned system message
+```
+
+**Root Cause:**
+- `reload_prompts()` only updated the version tracking dictionary, not the actual prompt content
+- No mechanism existed to update the STM pinned system message
+
+---
+
+## The Solution
+
+### Changes Made
+
+**1. `agents/orchestrator.py:251`** — Fixed `reload_prompts()` to actually reload:
+- Added call to `prompts.reload()` to clear registry cache and reload from disk
+- Added call to `self._stm.update_pinned_system_message()` to update STM's cached system message
+
+**2. `agents/orchestrator.py:202`** — Fixed initialization to update pinned system message:
+- On startup, now updates existing pinned system message with fresh prompt from registry
+- Previously only added a system message if none existed, leaving stale prompts in STM
+
+**3. `memory/stm_context.py:136`** — Fixed `update_pinned_system_message()` method:
+- Finds the pinned system message in STM
+- Updates its content and token estimate with the new prompt
+- Fixed bug: was calling `self._tc(new_content)` instead of `self._tc.count(new_content)`
+
+### Code Changes
+
+```python
+# agents/orchestrator.py - reload_prompts()
+def reload_prompts(self) -> dict[str, str]:
+    # Actually reload prompts from disk to pick up changes
+    try:
+        from prompts import reload as reload_prompts_registry
+        reload_prompts_registry()  # Clear cache and reload
+    except Exception as e:
+        print(f"[Orchestrator] Failed to reload prompts: {e}")
+
+    self._init_prompt_registry()
+
+    # Update the pinned system message in STM
+    try:
+        new_system_prompt = self._config.SYSTEM_PROMPT_HEADER
+        self._stm.update_pinned_system_message(new_system_prompt)
+    except Exception as e:
+        print(f"[Orchestrator] Failed to update STM system message: {e}")
+
+    return dict(self._prompt_versions)
+```
+
+```python
+# agents/orchestrator.py - __init__() after loading STM from disk
+# Ensure pinned system prompt is up-to-date with registry
+has_system = any(
+    m.role == "system" and m.is_pinned
+    for m in self._stm.messages()
+)
+current_prompt = config.SYSTEM_PROMPT_HEADER
+if has_system:
+    # Update existing pinned system message with fresh content
+    self._stm.update_pinned_system_message(current_prompt)
+else:
+    # Add new pinned system message
+    self._stm.add_message(
+        role="system",
+        content=current_prompt,
+        is_pinned=True,
+    )
+```
+
+```python
+# memory/stm_context.py
+def update_pinned_system_message(self, new_content: str) -> bool:
+    """Update the content of the pinned system message (main prompt)."""
+    for i, msg in enumerate(self._messages):
+        if msg.role == "system" and msg.is_pinned:
+            from dataclasses import replace
+            updated_msg = replace(
+                msg,
+                content=new_content,
+                token_estimate=self._tc.count(new_content),  # Fixed: was self._tc(new_content)
+            )
+            self._messages[i] = updated_msg
+            return True
+    return False
+```
+
+---
+
+## Test Coverage
+
+Added comprehensive tests in `tests/test_prompt_registry.py`:
+
+| Test | Purpose |
+|------|---------|
+| `test_update_pinned_system_message_success` | Verifies STM pinned message updates correctly |
+| `test_update_pinned_system_message_not_found` | Handles case when no pinned system msg exists |
+| `test_update_preserves_other_pinned_messages` | Only updates main prompt, not memory injections |
+| `test_reload_clears_registry_cache` | Verifies global registry reload works |
+
+---
+
+## Usage
+
+After modifying prompt files, call:
+
+```python
+orchestrator.reload_prompts()
+```
+
+This will:
+1. Clear the prompt registry cache
+2. Reload prompts from disk
+3. Update the STM pinned system message with the new content
+
+---
+
 # AgeMem — LTM Self-Management Toolkit (Introspection)
 
 **Feature:** Agent introspection API for self-directed LTM retrieval

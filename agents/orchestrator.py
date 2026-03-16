@@ -199,16 +199,21 @@ class Orchestrator:
             # (config may have changed between sessions)
             self._stm.force_fit()
 
-        # Only add the pinned system prompt if STM was empty after load
-        # (avoids duplicating it on every restart)
+        # Ensure pinned system prompt is up-to-date with registry
+        # Always update on startup to pick up prompt changes
         has_system = any(
             m.role == "system" and m.is_pinned
             for m in self._stm.messages()
         )
-        if not has_system:
+        current_prompt = config.SYSTEM_PROMPT_HEADER
+        if has_system:
+            # Update existing pinned system message with fresh content
+            self._stm.update_pinned_system_message(current_prompt)
+        else:
+            # Add new pinned system message
             self._stm.add_message(
                 role="system",
-                content=config.SYSTEM_PROMPT_HEADER,
+                content=current_prompt,
                 is_pinned=True,
             )
 
@@ -252,10 +257,29 @@ class Orchestrator:
         """
         Reload prompts from the registry and return current versions.
 
+        Also updates the pinned system message in STM with the new prompt content.
+
         Returns:
             Dictionary mapping prompt_id -> active_version
         """
+        # Actually reload prompts from disk to pick up changes
+        try:
+            from prompts import reload as reload_prompts_registry
+            reload_prompts_registry()
+        except Exception as e:
+            print(f"[Orchestrator] Failed to reload prompts: {e}")
+
         self._init_prompt_registry()
+
+        # Update the pinned system message in STM with the new prompt
+        try:
+            new_system_prompt = self._config.SYSTEM_PROMPT_HEADER
+            updated = self._stm.update_pinned_system_message(new_system_prompt)
+            if updated:
+                print(f"[Orchestrator] Updated system prompt to version: {self._prompt_versions.get('main-system', 'unknown')}")
+        except Exception as e:
+            print(f"[Orchestrator] Failed to update STM system message: {e}")
+
         return dict(self._prompt_versions)
 
     def get_prompt_versions(self) -> dict[str, str]:
