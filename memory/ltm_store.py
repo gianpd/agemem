@@ -505,6 +505,11 @@ class LTMStore:
         with self._lock:
             return list(self._entries.values())
 
+    def get(self, entry_id: str) -> Optional[MemoryEntry]:
+        """Retrieve a specific entry by ID."""
+        with self._lock:
+            return self._entries.get(entry_id)
+
     def size(self) -> int:
         with self._lock:
             return len(self._entries)

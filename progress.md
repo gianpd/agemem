@@ -1574,3 +1574,137 @@ Build evaluation harness with MRR@K metrics. Compare context-aware vs query-only
 ---
 
 *Implementation complete. Feature is opt-in (default: disabled) for backward compatibility.*
+
+---
+
+# AgeMem — Memory Persistence Flow Fix
+
+**Feature:** Fix memory persistence when user explicitly requests LTM storage
+**Status:** ✅ FIXED
+**Date:** 2026-03-16
+**Target branch:** `main`
+
+---
+
+## Summary
+
+Fixed a critical bug where explicit user requests to store memories ("I want you to store this in LTM") were not being persisted. The system now correctly detects explicit storage commands and completes the full persistence chain without requiring agent cognitive effort.
+
+**Key Result:** Memory persistence works end-to-end; user can say "store this in LTM" and it actually gets stored.
+
+---
+
+## The Problem We Solved
+
+### Original Behavior (Before)
+
+When users explicitly requested memory storage, the system failed at multiple layers:
+
+1. **Parameter mismatch**: Agent passed `content` but tool expected `user_input`
+2. **Pattern gap**: Patterns didn't match "I want you to store this in LTM"
+3. **Content extraction failure**: Agent stripped the command before calling tool
+4. **Missing LTMStore method**: `validate_memory_commit` called non-existent `get()` method
+5. **Wrong attribute access**: `force_memory_persistence` tried to read `memory_id` from wrong field
+
+**Failure Mode:**
+```
+User: "I want you to store this in LTM, TODO: raining at Luar worksite"
+         ↓
+Agent calls assess_persistence_need(content="TODO: raining...")  # stripped command
+         ↓
+Tool receives user_input="" (wrong param name)
+         ↓
+No patterns match → should_persist=false
+         ↓
+Agent asks user to confirm instead of persisting
+         ↓
+Memory NOT stored
+```
+
+---
+
+## The Solution
+
+### Changes Made
+
+**1. `agents/orchestrator.py`** — Parameter alias for robustness:
+```python
+# Accept both 'user_input' and 'content' as parameter names
+user_input = arguments.get("user_input") or arguments.get("content", "")
+```
+
+**2. `memory/ltm_introspection.py`** — Expanded pattern detection:
+- Added patterns for "I want you to store/remember this"
+- Added patterns for "store this in the LTM"
+- Added patterns for "this is something I want the system to remember"
+- Added TODO/FIXME markers as implied storage signals
+
+**3. `memory/ltm_introspection.py`** — Smart content extraction:
+```python
+def _extract_content_from_storage_command(user_input: str) -> str:
+    """Strip storage command prefix, return actual content to persist."""
+```
+
+**4. `memory/ltm_introspection.py`** — Fixed memory ID extraction:
+```python
+# Before: result.memory_id = getattr(add_result, 'memory_id', None)
+# After: result.memory_id = add_result.entries_affected[0]
+```
+
+**5. `memory/ltm_store.py`** — Added missing getter method:
+```python
+def get(self, entry_id: str) -> Optional[MemoryEntry]:
+    """Retrieve a specific entry by ID."""
+    with self._lock:
+        return self._entries.get(entry_id)
+```
+
+---
+
+## Test Results
+
+| Test | Status |
+|------|--------|
+| assess_persistence_need (with `content` param) | ✓ `should_persist: true` |
+| force_memory_persistence | ✓ `success: true`, `memory_id` returned |
+| validate_memory_commit | ✓ `is_validated: true` |
+| All 19 persistence unit tests | ✓ Passed |
+
+**Full end-to-end test:**
+```bash
+uv run python -c "
+# User message from real trace
+user_msg = 'I want you to store this in the LTM immediatly...'
+result = orch._execute_tool('assess_persistence_need', {'content': user_msg})
+# → should_persist: true, urgency: immediate
+
+result = orch._execute_tool('force_memory_persistence', {'content': content_to_store})
+# → success: true, memory_id: '6b6bbd33daf7'
+
+result = orch._execute_tool('validate_memory_commit', {'memory_id': memory_id})
+# → is_validated: true
+"
+```
+
+---
+
+## Design Principle
+
+All fixes are at the infrastructure layer — no changes to agent prompts or behavior required. The agent simply calls the tools and they work correctly regardless of:
+- Which parameter name is used (`user_input` or `content`)
+- Whether the command prefix is included or stripped
+- How the user phrases the storage request
+
+---
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `agents/orchestrator.py` | Parameter alias for `assess_persistence_need` |
+| `memory/ltm_introspection.py` | Expanded patterns, content extraction, memory ID fix |
+| `memory/ltm_store.py` | Added `get()` method |
+
+---
+
+*Implementation complete. Memory persistence now works reliably for explicit user commands.*

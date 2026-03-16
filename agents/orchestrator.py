@@ -688,7 +688,9 @@ class Orchestrator:
         """Execute assess_persistence_need with access to current state."""
         from memory.ltm_introspection import assess_persistence_need
 
-        user_input = arguments.get("user_input", "")
+        # Accept both 'user_input' and 'content' as parameter aliases
+        # This handles variations in how agents invoke the tool
+        user_input = arguments.get("user_input") or arguments.get("content", "")
         check_patterns = arguments.get("check_patterns")
 
         # Note: recent_context is not currently used by assess_persistence_need

@@ -1623,11 +1623,23 @@ def suggest_retrieval_strategy(
 # Memory command patterns for detecting explicit persistence requests
 MEMORY_COMMAND_PATTERNS = {
     "explicit_remember": [
+        # Direct imperatives with content capture
         r"\bremember\s+(?:that\s+)?(.+?)(?:\.|$)",
         r"\bplease\s+remember\s+(?:that\s+)?(.+?)(?:\.|$)",
         r"\bstore\s+(?:this\s+)?(?:in\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
         r"\bsave\s+(?:this\s+)?(?:to\s+)?(?:your\s+)?memory[:\s]+(.+?)(?:\.|$)",
-        r"\bsave\s+this[:\s]+(.+?)(?:\.|$)",  # Simple "Save this: X" pattern
+        r"\bsave\s+this[:\s]+(.+?)(?:\.|$)",
+        # Intent expressions - capture content after the command phrase
+        r"\bi\s+want\s+you\s+to\s+(?:store|save|remember)\s+this[^.]*\.\s*(.+?)(?:\.|$)",
+        r"\bi\s+want\s+(?:the\s+)?system\s+to\s+remember[^.]*\.\s*(.+?)(?:\.|$)",
+        # LTM-specific storage requests with content
+        r"\bstore\s+this\s+in\s+(?:the\s+)?LTM[^.]*[.:]\s*(.+?)(?:\.|$)",
+        r"\bsave\s+this\s+to\s+(?:the\s+)?LTM[^.]*[.:]\s*(.+?)(?:\.|$)",
+        # Detection-only patterns (no capture) - triggers storage, content extracted separately
+        r"\bi\s+want\s+you\s+to\s+store\s+this",
+        r"\bstore\s+this\s+in\s+(?:the\s+)?LTM",
+        r"\bthis\s+is\s+something\s+i\s+want\s+(?:you\s+|the\s+system\s+)?to\s+remember",
+        r"\bplease\s+(?:store|save|remember)\s+this",
     ],
     "explicit_forget": [
         r"\bforget\s+(?:that\s+)?(.+?)(?:\.|$)",
@@ -1638,12 +1650,58 @@ MEMORY_COMMAND_PATTERNS = {
         r"\bthis\s+is\s+important[:\s]+(.+?)(?:\.|$)",
         r"\bnote\s+(?:that\s+)?(?:for\s+)?(?:future\s+)?(?:reference\s+)?[:\s]+(.+?)(?:\.|$)",
         r"\b(make\s+a\s+note|take\s+a\s+note)[:\s]+(.+?)(?:\.|$)",
+        # TODO/FIXME markers indicate storage intent
+        r"\bTODO[:\s]+(.+?)(?:\.|$)",
+        r"\bFIXME[:\s]+(.+?)(?:\.|$)",
     ],
     "persistence_confirm": [
         r"\bdid\s+you\s+(?:remember|store|save)\s+(?:that\s+)?",
         r"\bcheck\s+(?:if\s+)?you\s+(?:remembered|stored|saved)",
     ],
 }
+
+# Phrases that indicate a storage command prefix (to be stripped from content)
+STORAGE_COMMAND_PREFIXES = [
+    r"i\s+want\s+you\s+to\s+store\s+this\s+in\s+(?:the\s+)?LTM[^.]*[,.]?\s*",
+    r"i\s+want\s+you\s+to\s+store\s+this[^.]*[,.]?\s*",
+    r"this\s+is\s+something\s+i\s+want\s+(?:you\s+|the\s+system\s+)?to\s+remember[^.]*[,.]?\s*",
+    r"(?:please\s+)?(?:store|save)\s+this\s+(?:in\s+(?:the\s+)?LTM\s+)?(?:immediately\s+)?[^.]*[.:]?\s*",
+    r"(?:please\s+)?remember\s+(?:that\s+)?[^.]*[.:]?\s*",
+]
+
+
+def _extract_content_from_storage_command(user_input: str) -> str:
+    """
+    Extract the actual content to persist from a message containing a storage command.
+
+    When user says "I want you to store this in LTM, TODO: ...", this strips
+    the command prefix and returns just the content portion.
+    """
+    content = user_input.strip()
+
+    # Try to strip storage command prefixes
+    for prefix_pattern in STORAGE_COMMAND_PREFIXES:
+        match = re.match(prefix_pattern, content, re.IGNORECASE)
+        if match:
+            # Remove the matched prefix
+            remaining = content[match.end():].strip()
+            if remaining:
+                return remaining
+
+    # Fallback: look for content after common delimiters
+    # Pattern: "command, actual content" or "command. actual content"
+    for delimiter in ['. ', ', ']:
+        parts = content.split(delimiter, 1)
+        if len(parts) > 1:
+            second_part = parts[1].strip()
+            # Only use if the second part looks like content (not another command)
+            if second_part and not any(
+                cmd in second_part.lower()
+                for cmd in ['i want', 'please', 'store this', 'remember']
+            ):
+                return second_part
+
+    return content
 
 
 def assess_persistence_need(
@@ -1697,13 +1755,17 @@ def assess_persistence_need(
             matches = list(re.finditer(pattern, user_input, re.IGNORECASE))
             for match in matches:
                 # Extract content if the pattern has a capture group
-                content = match.group(1) if match.lastindex and match.lastindex >= 1 else user_input
+                if match.lastindex and match.lastindex >= 1:
+                    content = match.group(1).strip()
+                else:
+                    # No capture group - try to extract content by stripping command prefix
+                    content = _extract_content_from_storage_command(user_input)
 
                 detected_patterns.append(MemoryCommandPattern(
                     pattern_type=pattern_type,
                     matched_phrase=match.group(0),
                     confidence=0.9 if pattern_type.startswith("explicit") else 0.7,
-                    content_to_persist=content.strip(),
+                    content_to_persist=content,
                 ))
 
     # Determine urgency based on patterns detected
@@ -1811,7 +1873,9 @@ def force_memory_persistence(
         if add_result.success:
             result.success = True
             result.status = PersistenceStatus.CONFIRMED
-            result.memory_id = getattr(add_result, 'memory_id', None)
+            # MemoryOpResult uses entries_affected list, not memory_id
+            if add_result.entries_affected:
+                result.memory_id = add_result.entries_affected[0]
         else:
             result.success = False
             result.status = PersistenceStatus.FAILED
