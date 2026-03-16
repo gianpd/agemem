@@ -86,8 +86,17 @@ class TextToolCallResponse(Exception):
 
 # Known tool names that the model might call
 KNOWN_TOOL_NAMES = {
+    # Web tools
     "web_search", "fetch_url", "write_file", "ingest_document",
-    "list_documents", "search_metadata", "grep_corpus", "read_document", "read_lines"
+    # Corpus tools
+    "list_documents", "search_metadata", "grep_corpus", "read_document", "read_lines",
+    # Introspection tools (Tier 1-4)
+    "assess_conversation_drift", "are_you_ready_to_get_in_context_ltm",
+    "paraphrase_for_coverage", "trigger_contextual_ltm_retrieval",
+    "validate_ltm_relevance", "refine_retrieval_target", "log_retrieval_decision",
+    # Introspection tools (Tier 5: Persistence)
+    "assess_persistence_need", "force_memory_persistence",
+    "validate_memory_commit", "log_persistence_failure",
 }
 
 

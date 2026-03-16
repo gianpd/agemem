@@ -775,5 +775,150 @@ class TestPromptTypes(unittest.TestCase):
         self.assertEqual(data["active"], True)
 
 
+class TestSTMPinnedSystemMessageUpdate(unittest.TestCase):
+    """Tests for STMContext.update_pinned_system_message() method."""
+
+    def setUp(self):
+        """Create STMContext with mocked token counter."""
+        from memory.stm_context import STMContext
+        from core.types import TokenCounter
+
+        self.tc = TokenCounter()
+        self.stm = STMContext(token_counter=self.tc)
+
+    def test_update_pinned_system_message_success(self):
+        """update_pinned_system_message updates existing pinned message."""
+        # Add initial pinned system message
+        self.stm.add_message(
+            role="system",
+            content="Original system prompt",
+            is_pinned=True,
+        )
+
+        # Update the pinned message
+        result = self.stm.update_pinned_system_message("Updated system prompt")
+
+        self.assertTrue(result)
+        messages = self.stm.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].content, "Updated system prompt")
+        self.assertTrue(messages[0].is_pinned)
+
+    def test_update_pinned_system_message_not_found(self):
+        """update_pinned_system_message returns False when no pinned system msg."""
+        # Add non-pinned message
+        self.stm.add_message(
+            role="user",
+            content="User message",
+            is_pinned=False,
+        )
+
+        result = self.stm.update_pinned_system_message("New system prompt")
+
+        self.assertFalse(result)
+        messages = self.stm.messages()
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].content, "User message")
+
+    def test_update_preserves_other_pinned_messages(self):
+        """update_pinned_system_message only updates the system prompt."""
+        # Add multiple pinned messages
+        self.stm.add_message(
+            role="system",
+            content="Main system prompt",
+            is_pinned=True,
+        )
+        self.stm.add_message(
+            role="system",
+            content="[MEMORY:abc123] Memory content",
+            is_pinned=True,
+        )
+
+        result = self.stm.update_pinned_system_message("Updated main prompt")
+
+        self.assertTrue(result)
+        messages = self.stm.messages()
+        self.assertEqual(len(messages), 2)
+
+        # Find the main system prompt (first one)
+        main_prompt = messages[0]
+        self.assertEqual(main_prompt.content, "Updated main prompt")
+        self.assertTrue(main_prompt.is_pinned)
+
+        # Memory message should be unchanged
+        memory_msg = messages[1]
+        self.assertEqual(memory_msg.content, "[MEMORY:abc123] Memory content")
+
+
+class TestPromptReloadIntegration(unittest.TestCase):
+    """Integration tests for prompt reload with STM update."""
+
+    def setUp(self):
+        """Create temporary directory for test prompts."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.prompts_dir = Path(self.temp_dir) / "prompts"
+        self.prompts_dir.mkdir()
+
+    def tearDown(self):
+        """Clean up temporary directory."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_test_file(self, filename: str, content: str) -> Path:
+        """Helper to create a test prompt file."""
+        file_path = self.prompts_dir / filename
+        file_path.write_text(content, encoding="utf-8")
+        return file_path
+
+    def test_reload_clears_registry_cache(self):
+        """reload() clears registry cache and reloads from disk."""
+        from prompts import get_prompt, reload as reload_prompts
+
+        # Create initial version
+        self._create_test_file("test-v1_0_0.md", """---
+prompt_id: test
+name: Test
+version: 1.0.0
+active: true
+created_at: 2026-03-10
+updated_at: 2026-03-10
+author: test
+---
+
+Original content.
+""")
+
+        # Force fresh registry for this test
+        import prompts
+        prompts._registry = None
+
+        # Load via prompts module (uses global registry)
+        original = get_prompt("test")
+        self.assertEqual(original.content, "Original content.")
+
+        # Modify file directly
+        self._create_test_file("test-v1_0_0.md", """---
+prompt_id: test
+name: Test
+version: 1.0.0
+active: true
+created_at: 2026-03-10
+updated_at: 2026-03-10
+author: test
+---
+
+Modified content.
+""")
+
+        # Without reload, still get cached version
+        cached = get_prompt("test")
+        self.assertEqual(cached.content, "Original content.")
+
+        # After reload, get new content
+        reload_prompts()
+        refreshed = get_prompt("test")
+        self.assertEqual(refreshed.content, "Modified content.")
+
+
 if __name__ == "__main__":
     unittest.main()

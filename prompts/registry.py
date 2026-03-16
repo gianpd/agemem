@@ -221,3 +221,9 @@ def get_registry(prompts_dir: Optional[Path] = None) -> PromptRegistry:
     if _global_registry is None:
         _global_registry = PromptRegistry(prompts_dir)
     return _global_registry
+
+
+if __name__ == "__main__":
+    pp = PromptRegistry()
+    print(pp.list_prompts())
+    print(pp.get_prompt("main-system"))
