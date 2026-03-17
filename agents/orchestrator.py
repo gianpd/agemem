@@ -557,10 +557,10 @@ class Orchestrator:
         top_k = arguments.get("top_k", 5)
 
         result = trigger_contextual_ltm_retrieval(
-            query=query,
+            query_or_concept=query,
             llm_client=self._llm,
             model=self._config.MEMORY_AGENT_MODEL,
-            mode=mode,
+            retrieval_mode=mode,
             top_k=top_k,
             ltm_store=self._ltm,
         )
