@@ -59,6 +59,7 @@ from memory.context_retrieval import (
     ContextRetrievalConfig,
 )
 from triggers.system_rules import SystemRules, RuleID
+from triggers.memory_trigger_engine import MemoryTriggerEngine
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
 from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
@@ -181,7 +182,7 @@ class Orchestrator:
         self._memory_agent = MemoryAgent(llm, config)
         self._scorer = LearningScorer(llm, config)
         self._rules = SystemRules(config)
-        
+
         # Response handler for enhanced error recovery
         self._response_handler = ResponseHandler(llm, max_retries=2, enable_validation=True)
 
@@ -198,6 +199,15 @@ class Orchestrator:
             # Revalidate context size against current config
             # (config may have changed between sessions)
             self._stm.force_fit()
+
+        # MemoryTriggerEngine — unified entry point for memory triggers
+        # Created after stm and ltm are initialized
+        self._trigger_engine = MemoryTriggerEngine(
+            config=config,
+            llm=llm,
+            stm=self._stm,
+            ltm=self._ltm,
+        )
 
         # Ensure pinned system prompt is up-to-date with registry
         # Always update on startup to pick up prompt changes
@@ -1106,89 +1116,17 @@ class Orchestrator:
             if feedback:
                 feedback.turn_index = turn_after
 
-        # ── 3b. Evaluate system rules ─────────────────────────────────────────
-        current_stats = self._stm.stats()
-        decisions = self._rules.evaluate(current_stats, turn_after, feedback)
+        # ── 3b–e. Memory Trigger Engine ───────────────────────────────────────
+        # Unified entry point for all memory trigger logic (RFC-001)
+        report = self._trigger_engine.process_turn(
+            turn_index=turn_after,
+            feedback=feedback,
+            assistant_response=assistant_text,
+        )
+        ops.extend(report.operations)
+        ma_rationale = report.agent_rationale or ""
 
-        ma_rationale = ""
-        should_run_memory_agent = False
-
-        for decision in decisions:
-            if decision.rule_id in (RuleID.OVERFLOW_CRITICAL,):
-                filter_op = self._stm.filter(trigger=TriggerKind.SYSTEM_RULE)
-                ops.append(filter_op)
-                tracer.log_memory_op(
-                    op_type="STM_FILTER",
-                    detail="Critical overflow",
-                    success=True,
-                    trigger="SYSTEM_RULE",
-                )
-                summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
-                ops.append(summary_op)
-                tracer.log_memory_op(
-                    op_type="STM_SUMMARY",
-                    detail="Critical overflow summary",
-                    success=True,
-                    trigger="SYSTEM_RULE",
-                )
-
-            elif decision.rule_id == RuleID.OVERFLOW_WARN:
-                summary_op = self._stm.summary(trigger=TriggerKind.SYSTEM_RULE)
-                ops.append(summary_op)
-                tracer.log_memory_op(
-                    op_type="STM_SUMMARY",
-                    detail="Warning overflow summary",
-                    success=True,
-                    trigger="SYSTEM_RULE",
-                )
-
-            elif decision.rule_id in (RuleID.PERIODIC_REVIEW, RuleID.LEARNING_SPIKE):
-                should_run_memory_agent = True
-
-        # ── 3c. Immediately promote to LTM on learning spike ─────────────────
-        if feedback and feedback.score >= self._config.LTM_PROMOTE_THRESHOLD:
-            # Use affected_content if provided, otherwise build from recent assistant messages
-            content_to_store = feedback.affected_content
-            if not content_to_store:
-                # Cumulative buffer: collect from recent assistant messages until budget exhausted
-                budget = self._config.LTM_ENTRY_MAX_CHARS
-                segments: list[str] = []
-                for msg in reversed(self._stm.messages()):
-                    if msg.role == "assistant" and msg.content:
-                        segments.append(msg.content[:budget])
-                        budget -= len(msg.content)
-                        if budget <= 0:
-                            break
-                content_to_store = "\n\n".join(reversed(segments))
-            else:
-                # Respect budget even for explicit affected_content
-                content_to_store = content_to_store[:self._config.LTM_ENTRY_MAX_CHARS]
-            if content_to_store:
-                add_op = self._ltm.add(
-                    content=content_to_store,
-                    learning_score=feedback.score,
-                    source_turn=turn_after,
-                    trigger=TriggerKind.LEARNING_SCORE,
-                )
-                ops.append(add_op)
-                tracer.log_memory_op(
-                    op_type="LTM_ADD",
-                    detail=f"Learning spike score={feedback.score:.2f}",
-                    success=add_op.success,
-                    trigger="LEARNING_SCORE",
-                )
-
-        # ── 3d–e. Memory agent review ─────────────────────────────────────────
-        if should_run_memory_agent:
-            decision_obj = self._memory_agent.review(
-                recent_messages=self._stm.messages(),
-                ltm_entries=self._ltm.all_entries(),
-                feedback=feedback,
-            )
-            ma_rationale = decision_obj.rationale
-            ops.extend(self._apply_memory_agent_decision(decision_obj, turn_after, feedback))
-
-        stats_after = self._stm.stats()
+        stats_after = report.stm_stats or self._stm.stats()
 
         # ── Persist STM after every turn ──────────────────────────────────────
         # LTM already persists inside LTMStore._maybe_persist() on every write
@@ -1423,82 +1361,3 @@ class Orchestrator:
         """Persist STM to disk if persistence is enabled."""
         if self._stm_persist_path:
             self._stm.save(self._stm_persist_path)
-
-    def _apply_memory_agent_decision(
-        self,
-        decision,
-        turn_index: int,
-        feedback: Optional[LearningFeedback],
-    ) -> list[MemoryOpResult]:
-        ops: list[MemoryOpResult] = []
-        tracer = get_tracer()
-
-        for ltm_op in decision.ltm_operations:
-            # Only apply high-confidence operations
-            if ltm_op.confidence < 0.6:
-                continue
-
-            score = feedback.score if feedback else ltm_op.confidence
-
-            if ltm_op.op == MemoryOp.ADD:
-                result = self._ltm.add(
-                    content=ltm_op.content,
-                    learning_score=score,
-                    tags=ltm_op.tags,
-                    source_turn=turn_index,
-                    trigger=TriggerKind.MEMORY_AGENT,
-                )
-                ops.append(result)
-                tracer.log_memory_op(
-                    op_type="LTM_ADD",
-                    detail=f"MemoryAgent ADD: {ltm_op.content[:100]}...",
-                    success=result.success,
-                    trigger="MEMORY_AGENT",
-                )
-
-            elif ltm_op.op == MemoryOp.UPDATE and ltm_op.entry_id:
-                result = self._ltm.update(
-                    entry_id=ltm_op.entry_id,
-                    content=ltm_op.content,
-                    learning_score=score,
-                    trigger=TriggerKind.MEMORY_AGENT,
-                )
-                ops.append(result)
-                tracer.log_memory_op(
-                    op_type="LTM_UPDATE",
-                    detail=f"MemoryAgent UPDATE: entry_id={ltm_op.entry_id}",
-                    success=result.success,
-                    trigger="MEMORY_AGENT",
-                )
-
-            elif ltm_op.op == MemoryOp.DELETE and ltm_op.entry_id:
-                result = self._ltm.delete(
-                    entry_id=ltm_op.entry_id,
-                    trigger=TriggerKind.MEMORY_AGENT,
-                )
-                ops.append(result)
-                tracer.log_memory_op(
-                    op_type="LTM_DELETE",
-                    detail=f"MemoryAgent DELETE: entry_id={ltm_op.entry_id}",
-                    success=result.success,
-                    trigger="MEMORY_AGENT",
-                )
-
-        # Apply context relevance scores from MemoryAgent to STM messages
-        if decision.context_relevance:
-            for msg in self._stm.messages():
-                if msg.turn_index in decision.context_relevance:
-                    msg.relevance_score = decision.context_relevance[msg.turn_index]
-
-        # SUMMARY if MemoryAgent requested it
-        if decision.summary_needed:
-            summary_op = self._stm.summary(trigger=TriggerKind.MEMORY_AGENT)
-            ops.append(summary_op)
-            tracer.log_memory_op(
-                op_type="STM_SUMMARY",
-                detail="MemoryAgent requested summary",
-                success=True,
-                trigger="MEMORY_AGENT",
-            )
-
-        return ops
