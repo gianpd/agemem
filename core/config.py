@@ -25,7 +25,7 @@ def get_env_with_fallback(new_name: str, old_name: str, default: str) -> str:
 
 BASE_URL = get_env_with_fallback("BASE_URL", "LLAMA_HOST", "http://localhost:8080")
 MODEL_NAME = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "qwen3.5-9b")
-MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "10324"))
+MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "12324"))
 TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.1"))
 MAX_STEPS = int(os.getenv("LLAMA_MAX_STEPS", "50"))
 SHOW_THINKING = os.getenv("SHOW_THINKING", "false").lower() == "true"
@@ -182,7 +182,7 @@ class AgememConfig:
 
     # ── LLM client defaults ───────────────────────────────────────────────────
     DEFAULT_MODEL: str = "kimi-k2.5"
-    DEFAULT_MAX_TOKENS: int = 10240
+    DEFAULT_MAX_TOKENS: int = 12479
     DEFAULT_TEMPERATURE: float = 0.2
 
     # ── Persistence ──────────────────────────────────────────────────────────
