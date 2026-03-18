@@ -29,7 +29,9 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from agents.llm_client import extract_json, JSONParseError, LLMClient
+# Import directly from core.json_utils - the single source of truth
+from core.json_utils import extract_json, JSONParseError
+from agents.llm_client import LLMClient
 
 
 class TestExtractJSON(unittest.TestCase):

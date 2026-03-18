@@ -18,7 +18,7 @@ from typing import Any, Optional, Union
 
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse, JSONParseError
 from core.tracing import get_tracer
-from core.json_utils import repair_json, find_json_string, strip_wrappers
+from core.json_utils import extract_json
 
 
 class ResponseType(Enum):
@@ -127,29 +127,23 @@ class ResponseHandler:
         # Extract and validate arguments
         raw_args = getattr(tool_call.function, 'arguments', None)
         arguments = {}
-        
+
         if raw_args is None:
             warnings.append("No arguments provided")
         elif isinstance(raw_args, dict):
             arguments = raw_args
         elif isinstance(raw_args, str):
-            # Try to parse JSON string
+            # Parse JSON string using centralized extraction from core.json_utils
             try:
-                arguments = json.loads(raw_args)
-            except json.JSONDecodeError as e:
-                # Try to repair common JSON issues
-                repaired = self._repair_json_arguments(raw_args)
-                if repaired:
-                    try:
-                        arguments = json.loads(repaired)
-                        warnings.append(f"Arguments JSON was repaired: {str(e)[:100]}")
-                    except json.JSONDecodeError:
-                        errors.append(f"Invalid JSON in arguments: {str(e)[:200]}")
-                else:
-                    errors.append(f"Invalid JSON in arguments: {str(e)[:200]}")
+                arguments = extract_json(raw_args, repair=True)
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                    warnings.append("Arguments JSON was not an object, using empty dict")
+            except JSONParseError as e:
+                errors.append(f"Invalid JSON in arguments: {str(e)[:200]}")
         else:
             errors.append(f"Arguments must be dict or string, got {type(raw_args)}")
-        
+
         # Validate argument types
         if arguments and self._enable_validation:
             for key, value in arguments.items():
@@ -157,9 +151,9 @@ class ResponseHandler:
                     errors.append(f"Argument key must be string, got {type(key)}")
                 if value is None:
                     warnings.append(f"Argument '{key}' is None")
-        
+
         is_valid = len(errors) == 0
-        
+
         return ToolCallValidation(
             is_valid=is_valid,
             tool_name=tool_name,
@@ -167,37 +161,6 @@ class ResponseHandler:
             errors=errors,
             warnings=warnings,
         )
-
-    def _repair_json_arguments(self, json_str: str) -> Optional[str]:
-        """
-        Attempt to repair common JSON formatting issues in tool arguments.
-
-        Uses core.json_utils for consistent JSON repair across the codebase.
-
-        Args:
-            json_str: The potentially malformed JSON string
-
-        Returns:
-            Repaired JSON string or None if repair failed
-        """
-        if not json_str or not json_str.strip():
-            return None
-
-        # Strip wrappers (markdown code blocks, etc.)
-        cleaned = strip_wrappers(json_str)
-
-        # Find the JSON object in the cleaned text
-        json_obj_str = find_json_string(cleaned)
-        if not json_obj_str:
-            return None
-
-        # Apply comprehensive JSON repair
-        repaired = repair_json(json_obj_str)
-
-        # Clean up extra whitespace
-        repaired = ' '.join(repaired.split())
-
-        return repaired.strip()
 
     def chat_with_recovery(
         self,

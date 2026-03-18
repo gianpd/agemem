@@ -38,7 +38,6 @@ from core.json_utils import (
     extract_json,
     find_all_json_objects,
     find_json_string,
-    repair_json,
     strip_wrappers,
     JSONParseError,
 )
@@ -115,25 +114,11 @@ def parse_text_tool_call(text: str) -> TextToolCall | None:
     if not text or not text.strip():
         return None
 
-    # Try to extract JSON from the text
+    # Use centralized JSON extraction from core.json_utils
     try:
-        # First try direct parse
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # Try extracting from code blocks or wrappers
-        cleaned = strip_wrappers(text)
-        json_str = find_json_string(cleaned)
-        if not json_str:
-            return None
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Try repair
-            try:
-                repaired = repair_json(json_str)
-                data = json.loads(repaired)
-            except (json.JSONDecodeError, TypeError):
-                return None
+        data = extract_json(text, repair=True)
+    except JSONParseError:
+        return None
 
     if not isinstance(data, dict):
         return None

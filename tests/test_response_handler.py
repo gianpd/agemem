@@ -1,10 +1,9 @@
 """
 Tests for the enhanced response handler.
 
-Validates tool call validation, JSON repair, retry logic, and metrics tracking.
+Validates tool call validation, retry logic, and metrics tracking.
 """
 
-import json
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from agents.response_handler import (
@@ -75,12 +74,11 @@ class TestToolCallValidation:
         """Test JSON repair removes markdown code blocks."""
         handler = ResponseHandler(Mock())
         tool_call = MockToolCall("web_search", '```json\n{"query": "test"}\n```')
-        
+
         validation = handler.validate_tool_call(tool_call)
-        
+
         assert validation.is_valid
         assert validation.arguments == {"query": "test"}
-        assert any("repaired" in warning.lower() for warning in validation.warnings)
 
     def test_repair_json_with_trailing_comma(self):
         """Test JSON repair fixes trailing commas."""
@@ -290,95 +288,6 @@ class TestResponseHandlerMetrics:
         # Reset by creating new handler
         handler = ResponseHandler(mock_llm)
         assert len(handler.get_metrics()) == 0
-
-
-class TestJSONRepair:
-    """Test JSON repair functionality."""
-
-    def test_repair_markdown_code_blocks(self):
-        """Test repair removes markdown code blocks."""
-        handler = ResponseHandler(Mock())
-        
-        # Test with ```json wrapper
-        repaired = handler._repair_json_arguments('```json\n{"key": "value"}\n```')
-        assert repaired == '{"key": "value"}'
-        
-        # Test with ``` wrapper
-        repaired = handler._repair_json_arguments('```\n{"key": "value"}\n```')
-        assert repaired == '{"key": "value"}'
-
-    def test_repair_trailing_commas(self):
-        """Test repair removes trailing commas."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments('{"key": "value",}')
-        assert repaired == '{"key": "value"}'
-        
-        repaired = handler._repair_json_arguments('{"key": "value", "key2": "value2",}')
-        assert repaired == '{"key": "value", "key2": "value2"}'
-
-    def test_repair_unquoted_keys(self):
-        """Test repair quotes unquoted keys."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments('{key: "value"}')
-        assert repaired == '{"key": "value"}'
-        
-        repaired = handler._repair_json_arguments('{key1: "value1", key2: "value2"}')
-        assert repaired == '{"key1": "value1", "key2": "value2"}'
-
-    def test_repair_single_quotes(self):
-        """Test repair converts single quotes to double quotes."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments("{'key': 'value'}")
-        assert repaired == '{"key": "value"}'
-
-    def test_repair_comments(self):
-        """Test repair removes comments."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments('{"key": "value"} // comment')
-        assert repaired == '{"key": "value"}'
-        
-        repaired = handler._repair_json_arguments('{"key": "value"} /* comment */')
-        assert repaired == '{"key": "value"}'
-
-    def test_repair_complex_json(self):
-        """Test repair handles complex JSON with multiple issues."""
-        handler = ResponseHandler(Mock())
-        
-        complex_json = '''
-        ```json
-        {
-            key1: "value1",
-            key2: "value2",
-            key3: "value3"
-        }
-        ```
-        '''
-        
-        repaired = handler._repair_json_arguments(complex_json)
-        # Should be valid JSON
-        parsed = json.loads(repaired)
-        assert parsed == {"key1": "value1", "key2": "value2", "key3": "value3"}
-
-    def test_repair_empty_string(self):
-        """Test repair handles empty string."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments("")
-        assert repaired is None
-        
-        repaired = handler._repair_json_arguments("   ")
-        assert repaired is None
-
-    def test_repair_no_json_found(self):
-        """Test repair returns None when no JSON found."""
-        handler = ResponseHandler(Mock())
-        
-        repaired = handler._repair_json_arguments("This is not JSON")
-        assert repaired is None
 
 
 if __name__ == "__main__":
