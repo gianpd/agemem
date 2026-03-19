@@ -151,7 +151,7 @@ class AgememConfig:
     """Number of recent non-pinned messages the SUMMARY operation compresses."""
 
     # ── Trigger: system rule ──────────────────────────────────────────────────
-    TRIGGER_EVERY_N_TURNS: int = 10
+    TRIGGER_EVERY_N_TURNS: int = 5
     """Every N turns the system forces a memory-agent review cycle."""
 
     TRIGGER_IDLE_SECONDS: float = 0.0
@@ -212,7 +212,7 @@ class AgememConfig:
     SKILL_MAX_HINTS_PER_TURN: int = 3
     """Maximum number of skill hints to inject per turn."""
 
-    SKILL_DEFAULT_RELEVANCE: float = 0.5
+    SKILL_DEFAULT_RELEVANCE: float = 0.6
     """Default relevance score for skill hint messages."""
 
     SKILL_TRIGGER_MIN_MATCHES: int = 1

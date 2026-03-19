@@ -891,7 +891,7 @@ class Orchestrator:
 
         # Tool call loop - protected by LoopGuard and max iteration cap
         assistant_text = ""
-        max_tool_iterations = 20  # Prevent infinite tool call loops
+        max_tool_iterations = 30  # Prevent infinite tool call loops
         tool_iterations = 0
 
         while tool_iterations < max_tool_iterations:
