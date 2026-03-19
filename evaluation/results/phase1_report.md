@@ -1,8 +1,8 @@
 # Evaluation Report: AgeMem
 
 **Version:** 1.0
-**Date:** 2026-03-19 09:40:32
-**Session ID:** phase1_20260319_093904
+**Date:** 2026-03-19 10:19:52
+**Session ID:** phase1_20260319_101419
 
 ## Executive Summary
 
@@ -12,13 +12,13 @@
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| MRR@1 | 0.0200 | N/A | N/A |
-| MRR@5 | 0.0200 | N/A | N/A |
-| MRR@10 | 0.0229 | >= 0.85 | FAIL |
-| Precision@5 | 0.0040 | N/A | N/A |
-| Recall@5 | 0.0200 | >= 0.90 | FAIL |
-| NDCG@10 | 0.0267 | N/A | N/A |
-| Avg Latency | 515.38 | < 500ms | FAIL |
+| MRR@1 | 0.0260 | N/A | N/A |
+| MRR@5 | 0.0300 | N/A | N/A |
+| MRR@10 | 0.0300 | >= 0.85 | FAIL |
+| Precision@5 | 0.0120 | N/A | N/A |
+| Recall@5 | 0.8333 | >= 0.90 | FAIL |
+| NDCG@10 | 0.0282 | N/A | N/A |
+| Avg Latency | 525.16 | < 500ms | FAIL |
 
 ## Memory Persistence
 
@@ -42,7 +42,7 @@
 
 | System | MRR@5 | Halluc. Rate | Tokens/Query | Latency (ms) |
 |--------|-------|--------------|--------------|--------------|
-| AgeMem | 0.02 | 0.0% | 515 | 515 |
+| AgeMem | 0.03 | 0.0% | 525 | 525 |
 | MemGPT | 0.72 | 8.0% | 2500 | 450 |
 | Letta | 0.75 | 7.0% | 2200 | 380 |
 | LangChain RAG | 0.68 | 12.0% | 3000 | 350 |

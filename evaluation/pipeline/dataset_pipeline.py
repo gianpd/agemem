@@ -235,12 +235,78 @@ class DatasetPipeline:
         logger.info(f"Ingested {len(entries)} entries and {len(queries)} queries from {path}")
         return entries, queries
 
-    def _parse_longmemeval(self, data: dict) -> tuple[list[BenchmarkEntry], list[BenchmarkQuery]]:
-        """Parse LongMemEval format dataset."""
+    def _parse_longmemeval(self, data: dict | list) -> tuple[list[BenchmarkEntry], list[BenchmarkQuery]]:
+        """
+        Parse LongMemEval format dataset.
+
+        Supports two formats:
+        1. Official LongMemEval format (list): Each item contains haystack_sessions with
+           chat history, a question, and answer. Evidence is marked with has_answer=True.
+        2. Legacy/custom format (dict): {"memories": [...], "questions": [...]}
+        """
         entries = []
         queries = []
 
-        # LongMemEval format: {"memories": [...], "questions": [...]}
+        # Handle official LongMemEval format (list of evaluation instances)
+        if isinstance(data, list):
+            entry_id_counter = 0
+
+            for instance in data:
+                question_id = instance.get("question_id", f"q_{entry_id_counter}")
+                question_text = instance.get("question", "")
+                question_type = instance.get("question_type", "retrieval")
+                question_date = instance.get("question_date")
+
+                # Extract entries from haystack_sessions
+                relevant_entry_ids = []
+                haystack_sessions = instance.get("haystack_sessions", [])
+                haystack_dates = instance.get("haystack_dates", [])
+                session_ids = instance.get("haystack_session_ids", [])
+
+                for session_idx, session in enumerate(haystack_sessions):
+                    session_date = haystack_dates[session_idx] if session_idx < len(haystack_dates) else None
+                    session_id = session_ids[session_idx] if session_idx < len(session_ids) else f"s_{session_idx}"
+
+                    for turn_idx, turn in enumerate(session):
+                        role = turn.get("role", "user")
+                        content = turn.get("content", "")
+                        has_answer = turn.get("has_answer", False)
+
+                        # Create entry for each turn
+                        entry_id = f"{question_id}_{session_id}_{turn_idx}"
+                        entry = BenchmarkEntry(
+                            content=f"[{role}] {content}",
+                            entry_id=entry_id,
+                            created_at=time.time(),
+                            temporal_anchor=session_date,
+                            tags=[question_type, f"session_{session_id}"],
+                        )
+                        entries.append(entry)
+
+                        # Track relevant entries (evidence)
+                        if has_answer:
+                            relevant_entry_ids.append(entry_id)
+
+                        entry_id_counter += 1
+
+                # Create query for this instance
+                query = BenchmarkQuery(
+                    query_id=question_id,
+                    query_text=question_text,
+                    relevant_entry_ids=relevant_entry_ids,
+                    query_type=question_type,
+                    metadata={
+                        "answer": instance.get("answer", ""),
+                        "question_date": question_date,
+                        "answer_session_ids": instance.get("answer_session_ids", []),
+                    },
+                )
+                queries.append(query)
+
+            logger.info(f"Parsed LongMemEval: {len(entries)} entries, {len(queries)} queries")
+            return entries, queries
+
+        # Handle legacy/custom format (dict with memories/questions)
         memories = data.get("memories", data.get("entries", []))
         questions = data.get("questions", data.get("queries", []))
 
