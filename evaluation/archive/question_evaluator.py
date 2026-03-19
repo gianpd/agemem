@@ -178,18 +178,21 @@ class QuestionEvaluator:
             last_trace: The TurnTrace from orchestrator.last_trace()
 
         Returns:
-            Dict with retrieval details
+            Dict with retrieval details including 'results' field for metrics computation.
+            The 'results' field is a list of (entry_id, score) tuples for retrieval metrics.
         """
         if last_trace is None:
             return {
                 "memories_injected": 0,
                 "memory_ops": [],
+                "results": [],  # For MetricsPipeline: list of (entry_id, score) tuples
                 "stm_stats_before": {},
                 "stm_stats_after": {},
             }
 
         # Extract memory operations
         memory_ops = []
+        results = []  # (entry_id, score) tuples for retrieval metrics
         for op in last_trace.ops_applied:
             op_dict = {
                 "op_type": op.op.value if hasattr(op.op, 'value') else str(op.op),
@@ -199,12 +202,22 @@ class QuestionEvaluator:
             }
             if op.entries_affected:
                 op_dict["entries_affected"] = op.entries_affected
+
+                # For RETRIEVE ops, extract entries as results for metrics computation
+                op_type_str = op.op.value if hasattr(op.op, 'value') else str(op.op)
+                if op_type_str.lower() == "retrieve":
+                    for entry_id in op.entries_affected:
+                        # Use placeholder score 1.0 since actual scores aren't captured
+                        # TODO: Capture actual relevance scores from LTM search
+                        results.append((entry_id, 1.0))
+
             memory_ops.append(op_dict)
 
         # Build trace dict
         trace = {
-            "memories_injected": sum(1 for op in memory_ops if "RETRIEVE" in op.get("op_type", "")),
+            "memories_injected": sum(1 for op in memory_ops if op.get("op_type", "").lower() == "retrieve"),
             "memory_ops": memory_ops,
+            "results": results,  # For MetricsPipeline
             "stm_stats_before": last_trace.stm_stats_before.to_dict() if hasattr(last_trace.stm_stats_before, 'to_dict') else {},
             "stm_stats_after": last_trace.stm_stats_after.to_dict() if hasattr(last_trace.stm_stats_after, 'to_dict') else {},
             "latency_ms": last_trace.latency_ms,

@@ -18,81 +18,18 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from openai import OpenAI
-
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
 from evaluation.factory import OrchestratorFactory
 from core.config import BASE_URL, MODEL_NAME, MAX_TOKENS, TEMPERATURE
-
-
-class RealLLMClient(LLMClient):
-    """Real LLM client using OpenAI-compatible API."""
-
-    def __init__(
-        self,
-        base_url: str = BASE_URL,
-        model: str = MODEL_NAME,
-        api_key: str = "dummy",
-        max_tokens: int = MAX_TOKENS,
-        temperature: float = TEMPERATURE,
-    ):
-        self._client = OpenAI(
-            base_url=base_url,
-            api_key=api_key,
-        )
-        self._model = model
-        self._max_tokens = max_tokens
-        self._temperature = temperature
-        self._total_calls = 0
-
-    def chat(
-        self,
-        messages: list[dict],
-        model: str | None = None,
-        max_tokens: int | None = None,
-        json_mode: bool = False,
-        **kwargs,
-    ) -> str:
-        """Send chat request to LLM."""
-        self._total_calls += 1
-
-        response = self._client.chat.completions.create(
-            model=model or self._model,
-            messages=messages,
-            max_tokens=max_tokens or self._max_tokens,
-            temperature=self._temperature,
-            response_format={"type": "json_object"} if json_mode else None,
-        )
-
-        return response.choices[0].message.content or ""
-
-    def chat_json(
-        self,
-        messages: list[dict],
-        model: str | None = None,
-        max_tokens: int | None = None,
-        repair: bool = True,
-        **kwargs,
-    ) -> dict:
-        """Send chat request expecting JSON response."""
-        raw = self.chat(messages, model=model, max_tokens=max_tokens, json_mode=True)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            # Try to extract JSON from response
-            import re
-            match = re.search(r'\{[\s\S]*\}', raw)
-            if match:
-                return json.loads(match.group())
-            raise
+from core.llm_factory import LLMClientFactory
 
 
 def load_one_query(dataset_path: Path) -> dict:
     """Load the first query from the dataset."""
     with open(dataset_path, "r") as f:
         data = json.load(f)
-    return data[0]
+    return data[0][:3]
 
 
 def run_evaluation():
@@ -127,15 +64,12 @@ def run_evaluation():
     persist_dir = Path(temp_dir)
     print(f"Persist dir: {persist_dir}")
 
-    # Initialize real LLM client
+    # Initialize real LLM client using unified factory
     print(f"\nInitializing real LLM client...")
     print(f"  Base URL: {BASE_URL}")
     print(f"  Model: {MODEL_NAME}")
 
-    llm_client = RealLLMClient(
-        base_url=BASE_URL,
-        model=MODEL_NAME,
-    )
+    llm_client = LLMClientFactory().create()
 
     # Build orchestrator
     print("\nBuilding orchestrator...")
@@ -238,7 +172,8 @@ def run_evaluation():
         print(f"  Token count: {final_trace.stm_stats_after.token_count}")
 
     # Print LLM usage
-    print(f"\nLLM calls: {llm_client._total_calls}")
+    stats = llm_client.usage_stats()
+    print(f"\nLLM calls: {stats['total_calls']}")
 
     # Cleanup
     import shutil

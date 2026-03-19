@@ -13,13 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
 
-from openai import OpenAI
-
-from core.config import AgememConfig, DEFAULT_CONFIG, MAX_TOKENS, TEMPERATURE
+from core.config import AgememConfig, DEFAULT_CONFIG
+from core.llm_factory import LLMClientFactory
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
-
-
+from dotenv import load_dotenv
+load_dotenv()
 
 
 @dataclass
@@ -56,17 +55,14 @@ class OrchestratorFactory:
     def _create_real_llm_client(self) -> LLMClient:
         """Create a real LLM client using configured endpoint.
 
-        Uses the same logic as main.py's get_llm_client():
-        - Reads BASE_URL and BASE_MODEL from environment
-        - Auto-detects local vs remote endpoints
-        - Handles API key requirements
+        Uses LLMClientFactory for consistent client creation across
+        main application and evaluation pipeline.
+
+        Returns:
+            Configured LLMClient instance.
         """
-        openai_client, model = _get_llm_client()
-        return LLMClient(
-            client=openai_client,
-            default_model=model,
-            default_temperature=TEMPERATURE,
-        )
+        factory = LLMClientFactory()
+        return factory.create()
 
     def build_for_evaluation(
         self,
@@ -98,20 +94,24 @@ class OrchestratorFactory:
             else:
                 raise ValueError("llm_client is required when use_real_llm=False")
 
+        # Get model from factory config for consistency with LLM client
+        llm_factory = LLMClientFactory()
+        model = llm_factory.config.model
+
         # Create persist dir if not provided
         if persist_dir is None:
             persist_dir = Path(tempfile.mkdtemp(prefix="agemem_eval_"))
         config_values: dict[str, Any] = {
-            "DEFAULT_MODEL": DEFAULT_CONFIG.DEFAULT_MODEL,
-            "MEMORY_AGENT_MODEL": DEFAULT_CONFIG.MEMORY_AGENT_MODEL,
+            "DEFAULT_MODEL": model,  # Use same model as LLM client
+            "MEMORY_AGENT_MODEL": model,  # Consistency with main app
             "STM_TOKEN_LIMIT": DEFAULT_CONFIG.STM_TOKEN_LIMIT,
             "STM_WARNING_THRESHOLD": DEFAULT_CONFIG.STM_WARNING_THRESHOLD,
             "STM_CRITICAL_THRESHOLD": DEFAULT_CONFIG.STM_CRITICAL_THRESHOLD,
             "LTM_PROMOTE_THRESHOLD": DEFAULT_CONFIG.LTM_PROMOTE_THRESHOLD,
             "LEARNING_SCORE_PROMPT_EVERY_N": DEFAULT_CONFIG.LEARNING_SCORE_PROMPT_EVERY_N,
             "TRIGGER_EVERY_N_TURNS": DEFAULT_CONFIG.TRIGGER_EVERY_N_TURNS,
-            "DEFAULT_MAX_TOKENS": DEFAULT_CONFIG.DEFAULT_MAX_TOKENS,
-            "DEFAULT_TEMPERATURE": DEFAULT_CONFIG.DEFAULT_TEMPERATURE,
+            "DEFAULT_MAX_TOKENS": llm_factory.config.max_tokens,  # Use factory config
+            "DEFAULT_TEMPERATURE": llm_factory.config.temperature,  # Use factory config
         }
 
         # Override persist_dir for isolation

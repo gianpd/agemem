@@ -86,6 +86,9 @@ class BenchmarkQuery:
     query_type: str = "retrieval"              # retrieval, temporal, preference, etc.
     metadata: dict = field(default_factory=dict)
 
+    # Content-based relevance for when IDs don't match (e.g., LTM generates its own IDs)
+    relevant_content: list[str] = field(default_factory=list)  # Content snippets that indicate relevance
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -98,6 +101,7 @@ class BenchmarkQuery:
             relevance_scores=data.get("relevance_scores", {}),
             query_type=data.get("query_type", "retrieval"),
             metadata=data.get("metadata", {}),
+            relevant_content=data.get("relevant_content", []),
         )
 
 

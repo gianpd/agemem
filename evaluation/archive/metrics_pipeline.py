@@ -210,6 +210,7 @@ class MetricsPipeline:
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
         k: int = 10,
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> float:
         """
         Calculate Mean Reciprocal Rank at K.
@@ -217,6 +218,12 @@ class MetricsPipeline:
         Formula: MRR@K = (1/N) * sum(1/rank_of_first_relevant)
 
         Per Section 7.3.1 of the technical specification.
+
+        Args:
+            queries: List of benchmark queries with relevance info
+            traces: List of search traces with results
+            k: Cutoff for ranking consideration
+            ltm_content_map: Optional mapping from entry_id to content for content-based matching
         """
         if not queries or not traces:
             return 0.0
@@ -225,24 +232,77 @@ class MetricsPipeline:
 
         for query, trace in zip(queries, traces):
             relevant_ids = set(query.relevant_entry_ids)
+            relevant_content = query.relevant_content  # Content snippets for matching
             found = False
 
             for rank, (entry_id, score) in enumerate(trace.results[:k], start=1):
+                # First try ID-based matching
                 if entry_id in relevant_ids:
                     reciprocal_ranks.append(1.0 / rank)
                     found = True
                     break
+
+                # Fall back to content-based matching if we have the data
+                if ltm_content_map and relevant_content:
+                    entry_content = ltm_content_map.get(entry_id, "")
+                    if self._content_matches_relevance(entry_content, relevant_content):
+                        reciprocal_ranks.append(1.0 / rank)
+                        found = True
+                        break
 
             if not found:
                 reciprocal_ranks.append(0.0)
 
         return mean(reciprocal_ranks) if reciprocal_ranks else 0.0
 
+    def _content_matches_relevance(
+        self,
+        entry_content: str,
+        relevant_content_snippets: list[str],
+        min_overlap: float = 0.5,
+    ) -> bool:
+        """
+        Check if entry content matches any relevant content snippet.
+
+        Uses token overlap to determine relevance when exact IDs don't match.
+
+        Args:
+            entry_content: The content of the retrieved entry
+            relevant_content_snippets: List of content snippets that indicate relevance
+            min_overlap: Minimum token overlap ratio to consider a match
+
+        Returns:
+            True if the entry content matches any relevant snippet
+        """
+        if not entry_content or not relevant_content_snippets:
+            return False
+
+        entry_lower = entry_content.lower()
+
+        for snippet in relevant_content_snippets:
+            snippet_lower = snippet.lower()
+
+            # Check for substring match
+            if snippet_lower in entry_lower or entry_lower in snippet_lower:
+                return True
+
+            # Check token overlap for longer snippets
+            snippet_tokens = set(snippet_lower.split())
+            entry_tokens = set(entry_lower.split())
+
+            if snippet_tokens:
+                overlap = len(snippet_tokens & entry_tokens)
+                if overlap / len(snippet_tokens) >= min_overlap:
+                    return True
+
+        return False
+
     def calculate_precision_at_k(
         self,
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
         k: int = 5,
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> float:
         """
         Calculate Precision at K.
@@ -258,11 +318,17 @@ class MetricsPipeline:
 
         for query, trace in zip(queries, traces):
             relevant_ids = set(query.relevant_entry_ids)
+            relevant_content = query.relevant_content
             top_k = trace.results[:k]
 
-            relevant_in_topk = sum(
-                1 for entry_id, _ in top_k if entry_id in relevant_ids
-            )
+            relevant_in_topk = 0
+            for entry_id, _ in top_k:
+                if entry_id in relevant_ids:
+                    relevant_in_topk += 1
+                elif ltm_content_map and relevant_content:
+                    entry_content = ltm_content_map.get(entry_id, "")
+                    if self._content_matches_relevance(entry_content, relevant_content):
+                        relevant_in_topk += 1
 
             precisions.append(relevant_in_topk / k)
 
@@ -273,6 +339,7 @@ class MetricsPipeline:
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
         k: int = 10,
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> float:
         """
         Calculate Recall at K.
@@ -288,15 +355,26 @@ class MetricsPipeline:
 
         for query, trace in zip(queries, traces):
             relevant_ids = set(query.relevant_entry_ids)
-            if not relevant_ids:
+            relevant_content = query.relevant_content
+
+            # For recall, we need a total relevant count
+            # Use max of ID-based count and content-based count
+            total_relevant = max(len(relevant_ids), len(relevant_content)) if relevant_content else len(relevant_ids)
+            if total_relevant == 0:
                 continue
 
             top_k = trace.results[:k]
-            relevant_in_topk = sum(
-                1 for entry_id, _ in top_k if entry_id in relevant_ids
-            )
+            relevant_in_topk = 0
 
-            recalls.append(relevant_in_topk / len(relevant_ids))
+            for entry_id, _ in top_k:
+                if entry_id in relevant_ids:
+                    relevant_in_topk += 1
+                elif ltm_content_map and relevant_content:
+                    entry_content = ltm_content_map.get(entry_id, "")
+                    if self._content_matches_relevance(entry_content, relevant_content):
+                        relevant_in_topk += 1
+
+            recalls.append(relevant_in_topk / total_relevant)
 
         return mean(recalls) if recalls else 0.0
 
@@ -305,6 +383,7 @@ class MetricsPipeline:
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
         k: int = 10,
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> float:
         """
         Calculate Normalized Discounted Cumulative Gain at K.
@@ -320,21 +399,37 @@ class MetricsPipeline:
         ndcgs = []
 
         for query, trace in zip(queries, traces):
+            relevant_ids = set(query.relevant_entry_ids)
+            relevant_content = query.relevant_content
             relevance_scores = query.relevance_scores
+
             if not relevance_scores:
-                # Binary relevance: 1 if relevant, 0 otherwise
-                relevance_scores = {
-                    entry_id: 1.0 for entry_id in query.relevant_entry_ids
-                }
+                # Build relevance scores from IDs and content
+                relevance_scores = {entry_id: 1.0 for entry_id in relevant_ids}
+                # Content-based relevance also gets 1.0
+                for snippet in relevant_content:
+                    # Use a placeholder key for content-based relevance
+                    pass  # Content matching handled at evaluation time
 
             # Calculate DCG
             dcg = 0.0
             for rank, (entry_id, _) in enumerate(trace.results[:k], start=1):
                 rel = relevance_scores.get(entry_id, 0.0)
+
+                # Content-based relevance check
+                if rel == 0 and ltm_content_map and relevant_content:
+                    entry_content = ltm_content_map.get(entry_id, "")
+                    if self._content_matches_relevance(entry_content, relevant_content):
+                        rel = 1.0
+
                 dcg += (2 ** rel - 1) / math.log2(rank + 1)
 
             # Calculate IDCG (ideal DCG)
             ideal_scores = sorted(relevance_scores.values(), reverse=True)[:k]
+            if relevant_content:
+                # Add content-based ideal scores
+                ideal_scores = sorted(ideal_scores + [1.0] * len(relevant_content), reverse=True)[:k]
+
             idcg = sum(
                 (2 ** rel - 1) / math.log2(i + 2)
                 for i, rel in enumerate(ideal_scores)
@@ -354,22 +449,23 @@ class MetricsPipeline:
         self,
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> RetrievalMetrics:
         """Calculate all retrieval metrics."""
         avg_latency = mean(t.latency_ms for t in traces) if traces else 0.0
 
         return RetrievalMetrics(
-            mrr_at_1=self.calculate_mrr_at_k(queries, traces, k=1),
-            mrr_at_5=self.calculate_mrr_at_k(queries, traces, k=5),
-            mrr_at_10=self.calculate_mrr_at_k(queries, traces, k=10),
-            precision_at_1=self.calculate_precision_at_k(queries, traces, k=1),
-            precision_at_5=self.calculate_precision_at_k(queries, traces, k=5),
-            precision_at_10=self.calculate_precision_at_k(queries, traces, k=10),
-            recall_at_1=self.calculate_recall_at_k(queries, traces, k=1),
-            recall_at_5=self.calculate_recall_at_k(queries, traces, k=5),
-            recall_at_10=self.calculate_recall_at_k(queries, traces, k=10),
-            ndcg_at_5=self.calculate_ndcg_at_k(queries, traces, k=5),
-            ndcg_at_10=self.calculate_ndcg_at_k(queries, traces, k=10),
+            mrr_at_1=self.calculate_mrr_at_k(queries, traces, k=1, ltm_content_map=ltm_content_map),
+            mrr_at_5=self.calculate_mrr_at_k(queries, traces, k=5, ltm_content_map=ltm_content_map),
+            mrr_at_10=self.calculate_mrr_at_k(queries, traces, k=10, ltm_content_map=ltm_content_map),
+            precision_at_1=self.calculate_precision_at_k(queries, traces, k=1, ltm_content_map=ltm_content_map),
+            precision_at_5=self.calculate_precision_at_k(queries, traces, k=5, ltm_content_map=ltm_content_map),
+            precision_at_10=self.calculate_precision_at_k(queries, traces, k=10, ltm_content_map=ltm_content_map),
+            recall_at_1=self.calculate_recall_at_k(queries, traces, k=1, ltm_content_map=ltm_content_map),
+            recall_at_5=self.calculate_recall_at_k(queries, traces, k=5, ltm_content_map=ltm_content_map),
+            recall_at_10=self.calculate_recall_at_k(queries, traces, k=10, ltm_content_map=ltm_content_map),
+            ndcg_at_5=self.calculate_ndcg_at_k(queries, traces, k=5, ltm_content_map=ltm_content_map),
+            ndcg_at_10=self.calculate_ndcg_at_k(queries, traces, k=10, ltm_content_map=ltm_content_map),
             avg_latency_ms=avg_latency,
         )
 
@@ -402,6 +498,7 @@ class MetricsPipeline:
         self,
         queries: list[BenchmarkQuery],
         traces: list[SearchTrace],
+        ltm_content_map: Optional[dict[str, str]] = None,
     ) -> dict[str, BehaviorMetrics]:
         """
         Calculate metrics segmented by question_type (behavior category).
@@ -444,10 +541,10 @@ class MetricsPipeline:
             metrics = BehaviorMetrics(
                 behavior_name=behavior,
                 query_count=len(behavior_queries),
-                mrr_at_10=self.calculate_mrr_at_k(behavior_queries, behavior_traces, k=10),
-                recall_at_5=self.calculate_recall_at_k(behavior_queries, behavior_traces, k=5),
-                precision_at_5=self.calculate_precision_at_k(behavior_queries, behavior_traces, k=5),
-                ndcg_at_10=self.calculate_ndcg_at_k(behavior_queries, behavior_traces, k=10),
+                mrr_at_10=self.calculate_mrr_at_k(behavior_queries, behavior_traces, k=10, ltm_content_map=ltm_content_map),
+                recall_at_5=self.calculate_recall_at_k(behavior_queries, behavior_traces, k=5, ltm_content_map=ltm_content_map),
+                precision_at_5=self.calculate_precision_at_k(behavior_queries, behavior_traces, k=5, ltm_content_map=ltm_content_map),
+                ndcg_at_10=self.calculate_ndcg_at_k(behavior_queries, behavior_traces, k=10, ltm_content_map=ltm_content_map),
                 avg_latency_ms=avg_latency,
             )
             results[behavior] = metrics
