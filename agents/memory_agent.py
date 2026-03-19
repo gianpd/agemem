@@ -260,6 +260,14 @@ class MemoryAgentDecision:
 
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryAgentDecision":
+        # Guard against malformed responses (list instead of dict)
+        if not isinstance(data, dict):
+            return cls(
+                ltm_operations=[],
+                context_relevance={},
+                summary_needed=False,
+                rationale=f"MemoryAgent returned {type(data).__name__}, expected dict",
+            )
         ops: list[LTMOperation] = []
         for item in data.get("ltm_operations", []):
             try:
