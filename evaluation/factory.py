@@ -13,9 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
 
-from core.config import AgememConfig, DEFAULT_CONFIG
+from openai import OpenAI
+
+from core.config import AgememConfig, DEFAULT_CONFIG, MAX_TOKENS, TEMPERATURE
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
+
+
 
 
 @dataclass
@@ -49,25 +53,54 @@ class OrchestratorFactory:
         )
     """
 
+    def _create_real_llm_client(self) -> LLMClient:
+        """Create a real LLM client using configured endpoint.
+
+        Uses the same logic as main.py's get_llm_client():
+        - Reads BASE_URL and BASE_MODEL from environment
+        - Auto-detects local vs remote endpoints
+        - Handles API key requirements
+        """
+        openai_client, model = _get_llm_client()
+        return LLMClient(
+            client=openai_client,
+            default_model=model,
+            default_temperature=TEMPERATURE,
+        )
+
     def build_for_evaluation(
         self,
-        llm_client: LLMClient,
-        persist_dir: Path,
+        llm_client: Optional[LLMClient] = None,
+        persist_dir: Optional[Path] = None,
         config_overrides: Optional[dict[str, Any]] = None,
         tools: Optional[list[dict]] = None,
+        use_real_llm: bool = True,
     ) -> Orchestrator:
         """Build an isolated Orchestrator for evaluation.
 
         Args:
-            llm_client: Pre-built LLMClient (typically a mock for testing).
-            persist_dir: Directory for isolated LTM/STM storage.
+            llm_client: Pre-built LLMClient. If None and use_real_llm=True, creates real client.
+            persist_dir: Directory for isolated LTM/STM storage. If None, uses temp dir.
             config_overrides: Optional dict of AgememConfig field values to override.
             tools: Optional list of tool definitions. If None, no tools are set.
+            use_real_llm: If True and llm_client is None, creates real LLM client.
+                          Set to False to require explicit mock passing.
 
         Returns:
             Orchestrator instance configured for isolated evaluation.
         """
-        # Start with default config values
+        import tempfile
+
+        # Create LLM client if not provided
+        if llm_client is None:
+            if use_real_llm:
+                llm_client = self._create_real_llm_client()
+            else:
+                raise ValueError("llm_client is required when use_real_llm=False")
+
+        # Create persist dir if not provided
+        if persist_dir is None:
+            persist_dir = Path(tempfile.mkdtemp(prefix="agemem_eval_"))
         config_values: dict[str, Any] = {
             "DEFAULT_MODEL": DEFAULT_CONFIG.DEFAULT_MODEL,
             "MEMORY_AGENT_MODEL": DEFAULT_CONFIG.MEMORY_AGENT_MODEL,

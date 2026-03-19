@@ -98,6 +98,11 @@ Modes:
         action="store_true",
         help="Enable verbose logging",
     )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Use mock LLM instead of real LLM (for deterministic testing)",
+    )
 
     return parser.parse_args()
 
@@ -508,25 +513,35 @@ def main() -> int:
             logger.error("No queries found in dataset")
             return 1
 
-        # Build orchestrator with mock LLM
-        logger.info("Building orchestrator with mock LLM...")
-        mock_llm = StatefulMockLLM(strategy="template")
+        # Build orchestrator
+        if args.mock:
+            logger.info("Building orchestrator with MOCK LLM...")
+            mock_llm = StatefulMockLLM(strategy="template")
 
-        # Add some default response templates
-        mock_llm.add_response_template("phone", "Based on our conversation, your phone number is mentioned in the context.")
-        mock_llm.add_response_template("email", "I can see your email address in our conversation history.")
-        mock_llm.add_response_template("address", "Your address was mentioned earlier in our conversation.")
-        mock_llm.add_response_template("preference", "I remember your preference from our earlier discussion.")
-        mock_llm.add_response_template("name", "Your name was mentioned in our conversation.")
+            # Add some default response templates
+            mock_llm.add_response_template("phone", "Based on our conversation, your phone number is mentioned in the context.")
+            mock_llm.add_response_template("email", "I can see your email address in our conversation history.")
+            mock_llm.add_response_template("address", "Your address was mentioned earlier in our conversation.")
+            mock_llm.add_response_template("preference", "I remember your preference from our earlier discussion.")
+            mock_llm.add_response_template("name", "Your name was mentioned in our conversation.")
 
-        orchestrator = OrchestratorFactory().build_for_evaluation(
-            llm_client=mock_llm,
-            persist_dir=persist_dir,
-            config_overrides={
-                "STM_TOKEN_LIMIT": 8000,
-                "LTM_PROMOTE_THRESHOLD": 0.5,
-            },
-        )
+            orchestrator = OrchestratorFactory().build_for_evaluation(
+                llm_client=mock_llm,
+                persist_dir=persist_dir,
+                config_overrides={
+                    "STM_TOKEN_LIMIT": 8000,
+                    "LTM_PROMOTE_THRESHOLD": 0.5,
+                },
+            )
+        else:
+            logger.info("Building orchestrator with REAL LLM...")
+            orchestrator = OrchestratorFactory().build_for_evaluation(
+                persist_dir=persist_dir,
+                config_overrides={
+                    "STM_TOKEN_LIMIT": 8000,
+                    "LTM_PROMOTE_THRESHOLD": 0.5,
+                },
+            )
 
         # Run evaluation based on mode
         session_results = []

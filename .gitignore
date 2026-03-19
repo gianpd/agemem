@@ -10,6 +10,7 @@ __pytest__
 *.jsonr
 *.pdf
 *.log
+*.db
 
 documents/
 corpus/

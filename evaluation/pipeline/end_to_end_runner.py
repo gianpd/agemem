@@ -25,10 +25,12 @@ from core.config import AgememConfig, DEFAULT_CONFIG
 from evaluation.pipeline.phase2_pipeline import (
     Phase2Pipeline,
     Phase2Results,
+    Phase2OrchestratorRunner,
     MemoryOperationMetrics,
     LearningScoreMetrics,
     ContextAwareRetrievalMetrics,
     QueryExpansionMetrics,
+    OrchestratorTestMetrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,11 +44,14 @@ class EndToEndResults:
     phase1_overall_recall: float = 0.0
     phase1_behavior_metrics: dict = field(default_factory=dict)
 
-    # Phase 2: Memory Lifecycle
+    # Phase 2: Memory Lifecycle (Traditional)
     memory_operations: MemoryOperationMetrics = field(default_factory=MemoryOperationMetrics)
     learning_scores: LearningScoreMetrics = field(default_factory=LearningScoreMetrics)
     context_aware_retrieval: ContextAwareRetrievalMetrics = field(default_factory=ContextAwareRetrievalMetrics)
     query_expansion: QueryExpansionMetrics = field(default_factory=QueryExpansionMetrics)
+
+    # Phase 2: Orchestrator-Based (NEW)
+    orchestrator_metrics: Optional[OrchestratorTestMetrics] = None
 
     # Combined metrics
     coverage_score: float = 0.0  # What % of production features are tested
@@ -60,7 +65,7 @@ class EndToEndResults:
     duration_seconds: float = 0.0
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             'phase1': {
                 'overall_mrr': self.phase1_overall_mrr,
                 'overall_recall': self.phase1_overall_recall,
@@ -72,6 +77,7 @@ class EndToEndResults:
                 'context_aware_retrieval': asdict(self.context_aware_retrieval),
                 'query_expansion': asdict(self.query_expansion),
             },
+            'orchestrator': self.orchestrator_metrics.to_dict() if self.orchestrator_metrics else {},
             'combined': {
                 'coverage_score': self.coverage_score,
                 'representativeness_score': self.representativeness_score,
@@ -84,6 +90,7 @@ class EndToEndResults:
                 'duration_seconds': self.duration_seconds,
             },
         }
+        return result
 
 
 class EndToEndRunner:
@@ -106,6 +113,7 @@ class EndToEndRunner:
         config: Optional[AgememConfig] = None,
         enable_query_expansion: bool = True,
         enable_context_aware: bool = True,
+        use_orchestrator_tests: bool = True,  # NEW: Enable orchestrator-based tests
     ) -> None:
         self._dataset_path = dataset_path
         self._output_dir = output_dir
@@ -113,6 +121,8 @@ class EndToEndRunner:
         self._config = config or DEFAULT_CONFIG
         self._enable_query_expansion = enable_query_expansion
         self._enable_context_aware = enable_context_aware
+        self._use_orchestrator_tests = use_orchestrator_tests  # NEW
+        self._orchestrator_metrics: Optional[OrchestratorTestMetrics] = None  # NEW
 
     def run(
         self,
@@ -166,6 +176,10 @@ class EndToEndRunner:
         results.context_aware_retrieval = phase2_results.context_aware_retrieval
         results.query_expansion = phase2_results.query_expansion
 
+        # Capture orchestrator metrics if available
+        if self._use_orchestrator_tests and hasattr(self, '_orchestrator_metrics'):
+            results.orchestrator_metrics = self._orchestrator_metrics
+
         # ── Combined Scores ───────────────────────────────────────────────────
         results.coverage_score = self._calculate_coverage_score(results)
         results.representativeness_score = self._calculate_representativeness_score(results)
@@ -202,18 +216,38 @@ class EndToEndRunner:
 
     def _run_phase2(self, num_queries: int) -> Phase2Results:
         """Run Phase 2 memory lifecycle evaluation."""
-        from evaluation.pipeline.phase2_pipeline import Phase2Runner
+        if self._use_orchestrator_tests:
+            # Use new orchestrator-based runner
+            from evaluation.pipeline.phase2_pipeline import Phase2OrchestratorRunner
 
-        phase2_output = self._output_dir / "phase2"
-        phase2_output.mkdir(parents=True, exist_ok=True)
+            phase2_output = self._output_dir / "phase2"
+            phase2_output.mkdir(parents=True, exist_ok=True)
 
-        runner = Phase2Runner(
-            dataset_path=self._dataset_path,
-            output_dir=phase2_output,
-            config=self._config,
-        )
+            runner = Phase2OrchestratorRunner(
+                dataset_path=self._dataset_path,
+                output_dir=phase2_output,
+                config=self._config,
+                use_mock_llm=True,
+            )
 
-        return runner.run(num_queries=num_queries)
+            phase2_results, orchestrator_metrics = runner.run(num_queries=num_queries)
+            # Store orchestrator metrics for later use
+            self._orchestrator_metrics = orchestrator_metrics
+            return phase2_results
+        else:
+            # Use traditional Phase2Runner
+            from evaluation.pipeline.phase2_pipeline import Phase2Runner
+
+            phase2_output = self._output_dir / "phase2"
+            phase2_output.mkdir(parents=True, exist_ok=True)
+
+            runner = Phase2Runner(
+                dataset_path=self._dataset_path,
+                output_dir=phase2_output,
+                config=self._config,
+            )
+
+            return runner.run(num_queries=num_queries)
 
     def _calculate_coverage_score(self, results: EndToEndResults) -> float:
         """
@@ -225,27 +259,27 @@ class EndToEndRunner:
         - Context-aware retrieval = tested if comparison done
         - Memory operations = tested if any operations recorded
         - Learning scores = tested if scores measured
-        - STM overflow = not tested (evaluation intentionally focuses on LTM)
-        - Skill injection = not tested
-        - Orchestrator = not tested directly
+        - STM overflow = tested via orchestrator (NEW)
+        - Skill injection = tested via orchestrator (NEW)
+        - Orchestrator = tested via orchestrator metrics (NEW)
         """
         score = 0.0
 
-        # Core retrieval (20%)
+        # Core retrieval (15%)
         if results.phase1_overall_mrr > 0:
-            score += 0.20
+            score += 0.15
 
-        # Query expansion (20%)
+        # Query expansion (15%)
         if self._enable_query_expansion and results.query_expansion.baseline_mrr > 0:
-            score += 0.20
+            score += 0.15
 
-        # Context-aware retrieval (20%)
+        # Context-aware retrieval (15%)
         if self._enable_context_aware and results.context_aware_retrieval.baseline_mrr > 0:
-            score += 0.20
+            score += 0.15
 
-        # Memory operations (20%)
+        # Memory operations (15%)
         if results.memory_operations.total_operations > 0:
-            score += 0.20
+            score += 0.15
 
         # Learning scores (10%)
         if results.learning_scores.scores_measured > 0:
@@ -254,6 +288,23 @@ class EndToEndRunner:
         # Behavior segmentation (10%)
         if len(results.phase1_behavior_metrics) >= 5:
             score += 0.10
+
+        # Orchestrator-based tests (NEW - 20%)
+        if results.orchestrator_metrics:
+            orch = results.orchestrator_metrics
+            # STM overflow tested
+            if orch.stm_overflow_guard_triggered > 0:
+                score += 0.05
+            # LTM retrieval via orchestrator
+            if orch.ltm_retrieval_triggered > 0:
+                score += 0.05
+            # Post-turn triggers tested
+            if orch.post_turn_triggers_fired > 0:
+                score += 0.05
+            # All 5 behaviors tested
+            total_behaviors = orch.ie_total + orch.mr_total + orch.ku_total + orch.tr_total + orch.abs_total
+            if total_behaviors >= 5:
+                score += 0.05
 
         return score
 
@@ -483,6 +534,18 @@ def main():
         action="store_true",
         help="Disable context-aware retrieval testing",
     )
+    parser.add_argument(
+        "--use-orchestrator",
+        action="store_true",
+        default=True,
+        help="Use orchestrator-based Phase 2 tests (default: True)",
+    )
+    parser.add_argument(
+        "--no-orchestrator",
+        dest="use_orchestrator",
+        action="store_false",
+        help="Disable orchestrator-based tests, use traditional Phase 2",
+    )
 
     args = parser.parse_args()
 
@@ -500,6 +563,7 @@ def main():
         output_dir=args.output_dir,
         enable_query_expansion=not args.disable_query_expansion,
         enable_context_aware=not args.disable_context_aware,
+        use_orchestrator_tests=args.use_orchestrator,
     )
 
     results = runner.run(
@@ -525,6 +589,13 @@ def main():
     print(f"  Memory Ops Correct Rate: {results.memory_operations.correct_rate:.4f}")
     print(f"  Context-Aware MRR Improvement: {results.context_aware_retrieval.mrr_improvement * 100:.2f}%")
     print(f"  Query Expansion Recall Improvement: {results.query_expansion.recall_improvement * 100:.2f}%")
+    if results.orchestrator_metrics:
+        print("-" * 70)
+        print("Orchestrator-Based Tests (NEW):")
+        print(f"  STM Overflow Guard: {results.orchestrator_metrics.stm_overflow_guard_triggered} times")
+        print(f"  LTM Retrieval: {results.orchestrator_metrics.ltm_retrieval_triggered} times")
+        print(f"  Post-Turn Triggers: {results.orchestrator_metrics.post_turn_triggers_fired} times")
+        print(f"  Behaviors Tested: IE={results.orchestrator_metrics.ie_total}, MR={results.orchestrator_metrics.mr_total}, KU={results.orchestrator_metrics.ku_total}, TR={results.orchestrator_metrics.tr_total}, ABS={results.orchestrator_metrics.abs_total}")
     print("=" * 70)
 
     return 0
