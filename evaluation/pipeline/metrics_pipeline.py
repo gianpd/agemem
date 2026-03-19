@@ -146,6 +146,30 @@ class ComparativeMetrics:
 
 
 @dataclass
+class BehaviorMetrics:
+    """
+    Per-behavior metrics per LongMemEval benchmark specification.
+
+    Maps to the five core memory behaviors:
+    - Information Extraction (IE): Single-Session-User/Assistant questions
+    - Multi-Session Reasoning (MR): Aggregation/Comparison questions
+    - Knowledge Updates (KU): Most-Recent-Value questions
+    - Temporal Reasoning (TR): Time-Reference/Date-Filtering questions
+    - Abstention (ABS): Unknown-Information questions
+    """
+    behavior_name: str
+    query_count: int = 0
+    mrr_at_10: float = 0.0
+    recall_at_5: float = 0.0
+    precision_at_5: float = 0.0
+    ndcg_at_10: float = 0.0
+    avg_latency_ms: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class EvaluationResults:
     """Complete evaluation results for a session."""
     session_id: str
@@ -153,6 +177,7 @@ class EvaluationResults:
     memory_quality: MemoryQualityMetrics = field(default_factory=MemoryQualityMetrics)
     response_quality: ResponseQualityMetrics = field(default_factory=ResponseQualityMetrics)
     comparative: ComparativeMetrics = field(default_factory=ComparativeMetrics)
+    behavior_metrics: dict[str, BehaviorMetrics] = field(default_factory=dict)
     evaluated_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> dict:
@@ -162,6 +187,7 @@ class EvaluationResults:
             "memory_quality": self.memory_quality.to_dict(),
             "response_quality": self.response_quality.to_dict(),
             "comparative": self.comparative.to_dict(),
+            "behavior_metrics": {k: v.to_dict() for k, v in self.behavior_metrics.items()},
             "evaluated_at": self.evaluated_at,
         }
 
@@ -347,6 +373,87 @@ class MetricsPipeline:
             avg_latency_ms=avg_latency,
         )
 
+    # ── Behavior-Segmented Metrics ─────────────────────────────────────────────
+
+    # Mapping from LongMemEval question types to behavior categories
+    BEHAVIOR_MAPPING = {
+        # Information Extraction
+        "single-session-user": "information_extraction",
+        "single-session-assistant": "information_extraction",
+        "preference": "information_extraction",
+        # Multi-Session Reasoning
+        "multi-session": "multi_session_reasoning",
+        "aggregation": "multi_session_reasoning",
+        "comparison": "multi_session_reasoning",
+        # Knowledge Updates
+        "knowledge-update": "knowledge_updates",
+        "knowledge": "knowledge_updates",
+        # Temporal Reasoning
+        "temporal-reasoning": "temporal_reasoning",
+        "temporal": "temporal_reasoning",
+        "time-reference": "temporal_reasoning",
+        "date-filtering": "temporal_reasoning",
+        # Abstention
+        "unknown": "abstention",
+        "abstention": "abstention",
+    }
+
+    def calculate_behavior_metrics(
+        self,
+        queries: list[BenchmarkQuery],
+        traces: list[SearchTrace],
+    ) -> dict[str, BehaviorMetrics]:
+        """
+        Calculate metrics segmented by question_type (behavior category).
+
+        Per LongMemEval benchmark specification, results should be segmented
+        by the five core memory behaviors:
+        - Information Extraction (IE)
+        - Multi-Session Reasoning (MR)
+        - Knowledge Updates (KU)
+        - Temporal Reasoning (TR)
+        - Abstention (ABS)
+
+        Returns:
+            Dictionary mapping behavior names to BehaviorMetrics objects
+        """
+        if not queries or not traces:
+            return {}
+
+        # Group queries and traces by behavior category
+        behavior_groups: dict[str, tuple[list[BenchmarkQuery], list[SearchTrace]]] = {}
+
+        for query, trace in zip(queries, traces):
+            # Map query_type to behavior category
+            query_type_lower = query.query_type.lower().replace("_", "-")
+            behavior = self.BEHAVIOR_MAPPING.get(
+                query_type_lower,
+                query.query_type.lower().replace(" ", "_")
+            )
+
+            if behavior not in behavior_groups:
+                behavior_groups[behavior] = ([], [])
+            behavior_groups[behavior][0].append(query)
+            behavior_groups[behavior][1].append(trace)
+
+        # Calculate metrics for each behavior
+        results = {}
+        for behavior, (behavior_queries, behavior_traces) in behavior_groups.items():
+            avg_latency = mean(t.latency_ms for t in behavior_traces) if behavior_traces else 0.0
+
+            metrics = BehaviorMetrics(
+                behavior_name=behavior,
+                query_count=len(behavior_queries),
+                mrr_at_10=self.calculate_mrr_at_k(behavior_queries, behavior_traces, k=10),
+                recall_at_5=self.calculate_recall_at_k(behavior_queries, behavior_traces, k=5),
+                precision_at_5=self.calculate_precision_at_k(behavior_queries, behavior_traces, k=5),
+                ndcg_at_10=self.calculate_ndcg_at_k(behavior_queries, behavior_traces, k=10),
+                avg_latency_ms=avg_latency,
+            )
+            results[behavior] = metrics
+
+        return results
+
     # ── Memory Quality Metrics ────────────────────────────────────────────────
 
     def calculate_memory_quality_metrics(
@@ -470,10 +577,13 @@ class MetricsPipeline:
             response_quality_data: Optional dict with response quality metrics data
 
         Returns:
-            EvaluationResults object with all metrics
+            EvaluationResults object with all metrics including behavior-segmented metrics
         """
         # Calculate retrieval metrics
         retrieval = self.calculate_retrieval_metrics(queries, traces)
+
+        # Calculate behavior-segmented metrics per LongMemEval specification
+        behavior_metrics = self.calculate_behavior_metrics(queries, traces)
 
         # Calculate memory quality metrics if data provided
         if memory_quality_data:
@@ -502,6 +612,7 @@ class MetricsPipeline:
             memory_quality=memory_quality,
             response_quality=response_quality,
             comparative=comparative,
+            behavior_metrics=behavior_metrics,
         )
 
         return self._results
