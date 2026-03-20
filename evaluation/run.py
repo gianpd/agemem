@@ -19,6 +19,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from agents.orchestrator import Orchestrator
 from evaluation.factory import OrchestratorFactory
 from evaluation.mock_llm import StatefulMockLLM

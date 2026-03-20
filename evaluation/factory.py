@@ -17,8 +17,23 @@ from core.config import AgememConfig, DEFAULT_CONFIG
 from core.llm_factory import LLMClientFactory
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
+from tools.corpus import tool_definitions as corpus_tool_definitions
+from memory import introspection_tool_definitions
 from dotenv import load_dotenv
 load_dotenv()
+
+
+def _get_default_tool_definitions() -> list[dict]:
+    """Get the standard tool definitions matching production (main.py).
+
+    This function handles lazy imports for web_tools to avoid dependency issues.
+    """
+    from tools.web_tools import tool_definitions as web_tool_definitions
+    return (
+        web_tool_definitions +
+        corpus_tool_definitions +
+        introspection_tool_definitions
+    )
 
 
 @dataclass
@@ -71,6 +86,7 @@ class OrchestratorFactory:
         config_overrides: Optional[dict[str, Any]] = None,
         tools: Optional[list[dict]] = None,
         use_real_llm: bool = True,
+        use_default_tools: bool = True,
     ) -> Orchestrator:
         """Build an isolated Orchestrator for evaluation.
 
@@ -78,9 +94,12 @@ class OrchestratorFactory:
             llm_client: Pre-built LLMClient. If None and use_real_llm=True, creates real client.
             persist_dir: Directory for isolated LTM/STM storage. If None, uses temp dir.
             config_overrides: Optional dict of AgememConfig field values to override.
-            tools: Optional list of tool definitions. If None, no tools are set.
+            tools: Optional list of tool definitions. If None and use_default_tools=True,
+                   uses the standard production tool set.
             use_real_llm: If True and llm_client is None, creates real LLM client.
                           Set to False to require explicit mock passing.
+            use_default_tools: If True (default), includes web, corpus, and introspection
+                               tools matching production behavior.
 
         Returns:
             Orchestrator instance configured for isolated evaluation.
@@ -127,9 +146,11 @@ class OrchestratorFactory:
         # Build orchestrator with injected LLM client
         orch = Orchestrator(llm=llm_client, config=cfg)
 
-        # Set tools if provided
+        # Set tools: use provided tools, or default tools if enabled
         if tools is not None:
             orch.set_tools(tools)
+        elif use_default_tools:
+            orch.set_tools(_get_default_tool_definitions())
 
         return orch
 

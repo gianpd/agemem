@@ -442,6 +442,17 @@ class LLMClient:
                 if isinstance(exc, (ToolCallResponse, TextToolCallResponse)):
                     raise
                 last_exc = exc
+
+                # DEBUG: Log the actual error from the API
+                import logging
+                logger = logging.getLogger(__name__)
+                error_body = getattr(exc, 'body', None) or getattr(exc, 'response', None)
+                if hasattr(exc, '__dict__'):
+                    logger.debug(f"[LLM_ERROR] Attempt {attempt+1}/{retries+1}: {type(exc).__name__}: {exc}")
+                    logger.debug(f"[LLM_ERROR] Error details: {exc.__dict__}")
+                if error_body:
+                    logger.debug(f"[LLM_ERROR] Response body: {error_body}")
+
                 if attempt < retries:
                     time.sleep(1.5 ** attempt)
 

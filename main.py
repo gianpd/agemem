@@ -44,9 +44,7 @@ Notes on persistence:
 from __future__ import annotations
 
 import os
-import re
 import sys
-import signal
 import time
 import warnings
 from pathlib import Path
@@ -54,7 +52,6 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from openai import OpenAI
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -66,8 +63,8 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.formatted_text import HTML
 
-# ── Tracing System ──────────────────────────────────────────────────────────
 from core.tracing import init_tracing, get_tracer, shutdown_tracing
+from core.llm_factory import LLMClientFactory
 
 # ── Text Cleaning Utilities ─────────────────────────────────────────────────
 from cli_text_utils import clean_pasted_text, is_likely_paste
@@ -154,59 +151,29 @@ from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
 from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
 from memory import introspection_tool_definitions
 
-def get_llm_client() -> OpenAI:
-    """Get the OpenAI-compatible client with automatic API key handling.
-
-    For local endpoints (localhost/127.0.0.1), no API key is required.
-    For remote endpoints, API_KEY or OPENAI_API_KEY environment variable is required.
-    """
-    base_url = BASE_URL
-
-    # Determine if this is a local endpoint
-    is_local = "localhost" in base_url or "127.0.0.1" in base_url
-
-    if is_local:
-        api_key = "not-needed"
-    else:
-        # Check API_KEY first, then fall back to OPENAI_API_KEY
-        api_key = os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError(
-                f"API_KEY or OPENAI_API_KEY environment variable is required "
-                f"for non-local endpoint: {base_url}"
-            )
-
-    # Ensure base_url ends with /v1 for OpenAI compatibility
-    base_url_normalized = base_url.rstrip("/")
-    if not base_url_normalized.endswith("/v1"):
-        base_url_normalized = f"{base_url_normalized}/v1"
-
-    return OpenAI(api_key=api_key, base_url=base_url_normalized)
-
 # ── Build Orchestrator ───────────────────────────────────────────────────────
 
 def build_orchestrator() -> Orchestrator:
     """
     Wire up AgeMem-hybrid with the configured LLM provider.
+    Uses LLMClientFactory for consistent client creation.
     """
-
-    client = get_llm_client()
+    factory = LLMClientFactory()
+    llm = factory.create()
 
     cfg = AgememConfig(
-        DEFAULT_MODEL=BASE_MODEL,
-        MEMORY_AGENT_MODEL=BASE_MODEL,
+        DEFAULT_MODEL=factory.config.model,
+        MEMORY_AGENT_MODEL=factory.config.model,
         STM_TOKEN_LIMIT=STM_TOKEN_LIMIT,
         STM_WARNING_THRESHOLD=0.75,
         STM_CRITICAL_THRESHOLD=0.90,
         LTM_PROMOTE_THRESHOLD=0.65,
         LEARNING_SCORE_PROMPT_EVERY_N=5,
         TRIGGER_EVERY_N_TURNS=10,
-        DEFAULT_MAX_TOKENS=BASE_MAX_TOKENS,
-        DEFAULT_TEMPERATURE=BASE_TEMPERATURE,
+        DEFAULT_MAX_TOKENS=factory.config.max_tokens,
+        DEFAULT_TEMPERATURE=factory.config.temperature,
         PERSIST_DIR=PERSIST_DIR,
     )
-
-    llm = LLMClient(client, default_model=cfg.DEFAULT_MODEL)
 
     # Orchestrator handles both LTM and STM persistence via config.PERSIST_DIR
     # This ensures both memories use the SAME directory (coherence)
