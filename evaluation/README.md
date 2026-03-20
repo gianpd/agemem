@@ -1,314 +1,298 @@
 # AgeMem Evaluation Pipeline
 
-A comprehensive evaluation framework for testing the AgeMem memory system against the LongMemEval benchmark. The pipeline validates both retrieval quality and end-to-end memory lifecycle behavior through the production `orchestrator.chat()` codepath.
+A simplified evaluation framework for testing the AgeMem memory system against the LongMemEval benchmark. The pipeline validates retrieval quality and memory lifecycle behavior through the production `orchestrator.chat()` codepath.
 
-## What It Evaluates
+## Overview
 
-### Phase 1: Retrieval Quality
+The evaluation suite tests two primary aspects of the memory system:
 
-Tests how effectively the system retrieves relevant memories from the Long-Term Memory (LTM) store.
-
-| Metric | Description | Target |
-|--------|-------------|--------|
-| **MRR@K** | Mean Reciprocal Rank at K - measures rank of first relevant result | >= 0.85 @10 |
-| **Recall@K** | Fraction of relevant items found in top K | >= 0.90 @5 |
-| **Precision@K** | Fraction of top K results that are relevant | - |
-| **NDCG@K** | Normalized Discounted Cumulative Gain - ranking quality | - |
-
-**Implementation:** [`evaluation/pipeline/metrics_pipeline.py:207-350`](evaluation/pipeline/metrics_pipeline.py#L207-L350)
-
-### Phase 2: Memory Lifecycle
-
-Tests the complete memory behaviors users experience in production:
-
-| Test Area | What It Validates |
-|-----------|-------------------|
-| **Memory Operations** | ADD/UPDATE/DELETE trigger accuracy |
-| **Learning Scores** | Score evolution and LTM promotion |
-| **Context-Aware Retrieval** | Retrieval with conversation context vs baseline |
-| **Query Expansion** | Recall improvement from query variants |
-
-**Implementation:** [`evaluation/pipeline/phase2_pipeline.py:175-418`](evaluation/pipeline/phase2_pipeline.py#L175-L418)
-
-### Behavior Testing (LongMemEval Alignment)
-
-Tests all 5 LongMemEval memory behavior categories:
-
-| Behavior | Code | Description |
-|----------|------|-------------|
-| **Information Extraction** | IE | Single-session detail retrieval |
-| **Multi-Session Reasoning** | MR | Synthesis across 30-40 sessions |
-| **Knowledge Updates** | KU | Most recent value tracking |
-| **Temporal Reasoning** | TR | Time-aware queries |
-| **Abstention** | ABS | Correct "I don't know" when info missing |
-
-**Implementation:** [`evaluation/pipeline/metrics_pipeline.py:378-455`](evaluation/pipeline/metrics_pipeline.py#L378-L455)
-
----
-
-## Codebase Components Tested
-
-### Core Production Codepath
-
-The evaluation tests the **exact production codepath** users experience through `orchestrator.chat()`:
-
-```
-User Query
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────┐
-│  agents/orchestrator.py:Orchestrator.chat()                 │  ← Primary entry point
-│                                                             │
-│  ├── memory/stm_context.py:STMContext                       │  ← STM overflow guard
-│  ├── memory/context_retrieval.py:ContextAwareRetriever      │  ← Context-aware retrieval
-│  ├── memory/ltm_store.py:LTMStore.search()                  │  ← Semantic search
-│  ├── triggers/memory_trigger_engine.py:MemoryTriggerEngine  │  ← Post-turn triggers
-│  └── agents/learning_scorer.py:LearningScorer              │  ← Learning feedback
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Implementation:** [`evaluation/orchestrator_test_harness.py:455-562`](evaluation/orchestrator_test_harness.py#L455-L562)
-
-### Component Coverage Matrix
-
-| Component | File | Phase 1 | Phase 2 | Orchestrator |
-|-----------|------|---------|---------|--------------|
-| LTMStore.search() | `memory/ltm_store.py` | ✅ | ✅ | ✅ |
-| STMContext overflow guard | `memory/stm_context.py` | - | - | ✅ |
-| ContextAwareRetriever | `memory/context_retrieval.py` | - | ✅ | ✅ |
-| QueryExpander | `tools/query_expansion.py` | - | ✅ | ✅ |
-| MemoryTriggerEngine | `triggers/memory_trigger_engine.py` | - | ✅ | ✅ |
-| LearningScorer | `agents/learning_scorer.py` | - | ✅ | ✅ |
-| Orchestrator.chat() | `agents/orchestrator.py` | - | - | ✅ |
-| Corpus fallback | `agents/orchestrator.py` | - | - | ✅ |
-| Skill injection | `agents/orchestrator.py` | - | - | ✅ |
-
----
-
-## Metrics Collected
-
-### Retrieval Metrics
-
-Defined in [`evaluation/pipeline/metrics_pipeline.py:32-54`](evaluation/pipeline/metrics_pipeline.py#L32-L54):
-
-```python
-@dataclass
-class RetrievalMetrics:
-    mrr_at_1: float      # Mean Reciprocal Rank @1
-    mrr_at_5: float      # Mean Reciprocal Rank @5
-    mrr_at_10: float     # Mean Reciprocal Rank @10
-    precision_at_1: float
-    precision_at_5: float
-    precision_at_10: float
-    recall_at_1: float
-    recall_at_5: float   # Target: >= 0.90
-    recall_at_10: float
-    ndcg_at_5: float
-    ndcg_at_10: float
-    avg_latency_ms: float
-```
-
-### Behavior-Segmented Metrics
-
-Defined in [`evaluation/pipeline/metrics_pipeline.py:148-169`](evaluation/pipeline/metrics_pipeline.py#L148-L169):
-
-```python
-@dataclass
-class BehaviorMetrics:
-    behavior_name: str      # IE, MR, KU, TR, ABS
-    query_count: int
-    mrr_at_10: float
-    recall_at_5: float
-    precision_at_5: float
-    ndcg_at_10: float
-    avg_latency_ms: float
-```
-
-### Phase 2 Lifecycle Metrics
-
-Defined in [`evaluation/pipeline/phase2_pipeline.py:47-150`](evaluation/pipeline/phase2_pipeline.py#L47-L150):
-
-| Metric Class | Key Fields |
-|--------------|------------|
-| `MemoryOperationMetrics` | add_operations_total, add_precision, add_recall, update_*, delete_* |
-| `LearningScoreMetrics` | scores_measured, avg_score, promotion_recall |
-| `ContextAwareRetrievalMetrics` | baseline_mrr, context_aware_mrr, mrr_improvement |
-| `QueryExpansionMetrics` | baseline_recall, expanded_recall, variant_hit_rate |
-
-### Orchestrator Test Metrics
-
-Defined in [`evaluation/pipeline/phase2_pipeline.py:782-834`](evaluation/pipeline/phase2_pipeline.py#L782-L834):
-
-```python
-@dataclass
-class OrchestratorTestMetrics:
-    # Retrieval through orchestrator
-    retrieval_via_orchestrator_count: int
-    stm_overflow_guard_triggered: int
-    ltm_retrieval_triggered: int
-    corpus_fallback_used: int
-
-    # Memory lifecycle
-    post_turn_triggers_fired: int
-    learning_feedback_collected: int
-
-    # Behavior-specific results
-    ie_correct: int  # Information Extraction
-    mr_correct: int  # Multi-Session Reasoning
-    ku_correct: int  # Knowledge Updates
-    tr_correct: int  # Temporal Reasoning
-    abs_correct: int # Abstention
-```
-
----
-
-## How to Run
-
-### Prerequisites
-
-1. Dataset: LongMemEval S format (`evaluation/data/longmemeval_s_cleaned.json`)
-2. Python 3.10+
-3. Dependencies: `pip install -r requirements.txt`
-
-### Quick Start
-
-Run a quick evaluation with 10 queries:
-
-```bash
-python evaluation/run.py \
-    --dataset evaluation/data/longmemeval_s_cleaned.json \
-    --mode full \
-    --queries 10
-```
-
-### Evaluation Modes
-
-| Mode | Description | Command |
-|------|-------------|---------|
-| `retrieval` | Phase 1: Retrieval quality only | `--mode retrieval` |
-| `lifecycle` | Phase 2: Memory lifecycle testing | `--mode lifecycle` |
-| `full` | Complete Phase 1 + Phase 2 | `--mode full` (default) |
-
-### Reproducible Evaluation
-
-For reproducible runs with full manifest logging:
-
-```bash
-python evaluation/reproducible_runner.py \
-    --dataset evaluation/data/longmemeval_s_cleaned.json \
-    --queries 50 \
-    --seed 42 \
-    --output-dir evaluation/results
-```
-
-Outputs:
-- `{run_id}_manifest.json` - Full reproducibility manifest
-- `{run_id}_metrics.json` - All metrics
-- `{run_id}_report.md` - Human-readable report
-
-**Implementation:** [`evaluation/reproducible_runner.py:141-313`](evaluation/reproducible_runner.py#L141-L313)
-
-### End-to-End Evaluation
-
-Run comprehensive Phase 1 + Phase 2 with orchestrator-based tests:
-
-```bash
-python -m evaluation.pipeline.end_to_end_runner \
-    --dataset evaluation/data/longmemeval_s_cleaned.json \
-    --queries 20 \
-    --output-dir evaluation/results \
-    --use-orchestrator
-```
-
-**Implementation:** [`evaluation/pipeline/end_to_end_runner.py:496-605`](evaluation/pipeline/end_to_end_runner.py#L496-L605)
-
-### Full Dataset Evaluation
-
-Evaluate against all queries:
-
-```bash
-python evaluation/run.py \
-    --dataset evaluation/data/longmemeval_s_cleaned.json \
-    --mode full \
-    --output-dir evaluation/results
-```
-
-### Command Reference
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--dataset` | Path to benchmark dataset | Required |
-| `--mode` | Evaluation mode (retrieval/lifecycle/full) | `full` |
-| `--queries` | Number of queries (0 = all) | `0` |
-| `--output-dir` | Output directory | `evaluation/results` |
-| `--seed` | Random seed for reproducibility | `42` |
-| `--persist-session` | Keep session data for debugging | `false` |
-| `--verbose` / `-v` | Enable debug logging | `false` |
-
-### Orchestrator-Specific Options
-
-| Flag | Description |
-|------|-------------|
-| `--use-orchestrator` | Enable orchestrator-based Phase 2 tests (default) |
-| `--no-orchestrator` | Use traditional component-level tests only |
-| `--disable-query-expansion` | Skip query expansion testing |
-| `--disable-context-aware` | Skip context-aware retrieval testing |
-
----
-
-## Output Files
-
-After running, the output directory contains:
-
-| File | Description |
-|------|-------------|
-| `eval_*_report.md` | Human-readable evaluation report |
-| `eval_*_metrics.json` | Machine-readable metrics |
-| `phase2_*.md` | Phase 2 lifecycle report (if applicable) |
-| `end_to_end_report.md` | Combined Phase 1 + Phase 2 report |
-| `traces.db` | SQLite database of retrieval traces |
-
----
+1. **Retrieval Quality** - How effectively the system retrieves relevant memories from LTM
+2. **Memory Lifecycle** - How the system handles session replay and memory operations through the orchestrator
 
 ## Architecture
 
 ```
 evaluation/
-├── run.py                          # Main CLI entry point
-├── reproducible_runner.py          # Reproducible evaluation with manifest
-├── question_evaluator.py           # Question evaluation through orchestrator
-├── session_replay.py               # Session replay through orchestrator
-├── orchestrator_test_harness.py    # Orchestrator-based test infrastructure
-├── mock_llm.py                     # Mock LLM for deterministic testing
-├── factory.py                      # Orchestrator factory for evaluation
-├── trace_capture.py                # Turn trace capture
-├── pipeline/
-│   ├── dataset_pipeline.py         # Dataset loading (LongMemEval format)
-│   ├── inference_pipeline.py       # Query execution
-│   ├── metrics_pipeline.py         # Metric calculation
-│   ├── phase2_pipeline.py          # Phase 2 lifecycle testing
-│   ├── end_to_end_runner.py        # Combined Phase 1 + Phase 2 runner
-│   └── report_generator.py         # Report generation
-└── docs/
-    ├── longmemeval_guide.md        # LongMemEval benchmark guide
-    └── eval_status.md              # Current evaluation status
+├── run.py                  # Main CLI entry point
+├── quick_test.py           # Minimal 3-query test for quick validation
+├── evaluators.py           # Core evaluation logic (Evaluator class)
+├── metrics.py              # Metrics calculation (MRR@K, Recall@K, etc.)
+├── factory.py              # Orchestrator factory for evaluation
+├── mock_llm.py             # Stateful mock LLM for deterministic testing
+├── __init__.py             # Package exports
+├── data/                   # Benchmark datasets
+│   ├── longmemeval_s_cleaned.json   # Small dataset (~1M entries)
+│   ├── longmemeval_m_cleaned.json   # Medium dataset (~10M entries)
+│   └── longmemeval_oracle.json      # Oracle answers
+├── results/                # Evaluation outputs
+├── logs/                   # Execution logs
+├── archive/                # Deprecated evaluation scripts
+│   ├── question_evaluator.py   # (replaced by evaluators.py)
+│   ├── session_replay.py       # (replaced by evaluators.py)
+│   ├── trace_capture.py        # (deprecated)
+│   ├── inference_pipeline.py   # (deprecated)
+│   ├── metrics_pipeline.py     # (deprecated)
+│   ├── dataset_pipeline.py     # (deprecated)
+│   ├── phase2_pipeline.py      # (deprecated)
+│   ├── end_to_end_runner.py    # (deprecated)
+│   ├── report_generator.py     # (deprecated)
+│   └── simulation.py           # (deprecated)
+└── docs/                   # Documentation
+    ├── eval_status.md              # Current coherence analysis
+    ├── evaluation_pipeline_audit_report.md
+    ├── agemem_technical_specification.md
+    ├── agemem_evaluation_suite_trs.md
+    ├── longmemeval_guide.md
+    └── eval_pipe_progress.md
 ```
 
----
+## Core Components
 
-## Reproducibility
+### 1. Evaluator (`evaluators.py`)
 
-The evaluation pipeline implements full reproducibility per the audit recommendations:
+The main evaluation class that combines session replay and question evaluation.
 
-1. **Seed Control**: All random seeds (Python, NumPy, PyTorch) are set
-2. **Dataset Hashing**: SHA256 hash of dataset recorded
-3. **Environment Capture**: Python version, platform, git commit logged
-4. **Package Versions**: Key dependency versions recorded
-5. **Deterministic LLM**: Mock LLM for reproducible responses
+```python
+from evaluation.evaluators import Evaluator
 
-**Implementation:** [`evaluation/reproducible_runner.py:37-81`](evaluation/reproducible_runner.py#L37-L81)
+# Create evaluator with orchestrator instance
+evaluator = Evaluator(orchestrator)
 
----
+# Replay sessions
+session_results = evaluator.replay_sessions(sessions, behavior_type="IE")
+
+# Evaluate questions
+question_results = evaluator.evaluate_questions(queries, raw_data)
+```
+
+**Key Classes:**
+- `Evaluator` - Main evaluation orchestrator
+- `SessionReplayResult` - Result of replaying a session
+- `QuestionResult` - Result of evaluating a single question
+- `EvaluationContext` - Context for question evaluation (behavior type, expected answer)
+
+### 2. Metrics (`metrics.py`)
+
+Calculates standard information retrieval metrics.
+
+```python
+from evaluation.metrics import calculate_metrics, EvaluationSummary
+
+# Calculate all metrics
+summary = calculate_metrics(queries, question_results, session_results)
+```
+
+**Key Classes:**
+- `RetrievalMetrics` - MRR@K, Recall@K, Precision@K, NDCG@K
+- `BehaviorMetrics` - Accuracy breakdown by behavior type (IE, MR, KU, TR, ABS)
+- `EvaluationSummary` - Complete evaluation results
+
+**Metrics Calculated:**
+- **MRR@K** (Mean Reciprocal Rank) - Rank of first relevant result
+- **Recall@K** - Fraction of relevant items found in top K
+- **Precision@K** - Fraction of top K results that are relevant
+- **NDCG@K** - Normalized Discounted Cumulative Gain
+
+### 3. Orchestrator Factory (`factory.py`)
+
+Creates isolated Orchestrator instances for evaluation.
+
+```python
+from evaluation.factory import OrchestratorFactory
+
+factory = OrchestratorFactory()
+orchestrator = factory.build_for_evaluation(
+    llm_client=mock_llm,  # Optional: for mock testing
+    persist_dir=Path("/tmp/eval"),
+    config_overrides={
+        "STM_TOKEN_LIMIT": 8000,
+        "LTM_PROMOTE_THRESHOLD": 0.5,
+    },
+)
+```
+
+### 4. Mock LLM (`mock_llm.py`)
+
+Stateful mock LLM for deterministic testing. Supports three strategies:
+
+- **template** (default) - Pattern-match queries to responses
+- **record_replay** - Replay pre-recorded responses
+- **state_machine** - Track conversation state for contextual responses
+
+```python
+from evaluation.mock_llm import StatefulMockLLM
+
+mock = StatefulMockLLM(strategy="template")
+mock.add_response_template("phone", "Your phone number is 555-1234")
+mock.add_response_template("email", "Your email is user@example.com")
+```
+
+## Usage
+
+### Quick Test
+
+Run a minimal 3-query test without full orchestrator initialization:
+
+```bash
+python evaluation/quick_test.py
+```
+
+### Full Evaluation
+
+Run a complete evaluation with the main CLI:
+
+```bash
+# Full evaluation (session replay + question evaluation)
+python evaluation/run.py \
+    --dataset evaluation/data/longmemeval_s_cleaned.json \
+    --mode full \
+    --queries 10
+
+# Session replay only (test memory lifecycle)
+python evaluation/run.py \
+    --dataset evaluation/data/longmemeval_s_cleaned.json \
+    --mode lifecycle \
+    --sessions 5
+
+# Question evaluation only (test retrieval quality)
+python evaluation/run.py \
+    --dataset evaluation/data/longmemeval_s_cleaned.json \
+    --mode retrieval \
+    --queries 20
+
+# Use mock LLM for deterministic testing
+python evaluation/run.py \
+    --dataset evaluation/data/longmemeval_s_cleaned.json \
+    --mode full \
+    --queries 5 \
+    --mock
+```
+
+### CLI Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--dataset` | Path to benchmark dataset (required) | - |
+| `--mode` | Evaluation mode: `full`, `lifecycle`, or `retrieval` | `full` |
+| `--queries` | Number of queries to evaluate (0 = all) | `0` |
+| `--sessions` | Max sessions to replay in lifecycle mode (0 = all) | `0` |
+| `--output-dir` | Output directory for results | `evaluation/results` |
+| `--persist-session` | Keep session data after evaluation | `false` |
+| `--mock` | Use mock LLM instead of real LLM | `false` |
+| `--verbose` / `-v` | Enable debug logging | `false` |
+
+## Behavior Types
+
+The evaluation tests five memory behavior categories from LongMemEval:
+
+| Behavior | Code | Description |
+|----------|------|-------------|
+| Information Extraction | IE | Single-session detail retrieval |
+| Multi-Session Reasoning | MR | Synthesis across multiple sessions |
+| Knowledge Updates | KU | Most recent value tracking |
+| Temporal Reasoning | TR | Time-aware queries |
+| Abstention | ABS | Correct "I don't know" when info missing |
+
+## Output
+
+Evaluation produces two output files:
+
+1. **`eval_YYYYMMDD_HHMMSS_report.md`** - Human-readable markdown report
+2. **`eval_YYYYMMDD_HHMMSS_metrics.json`** - Machine-readable JSON metrics
+
+### Report Structure
+
+```markdown
+# AgeMem Evaluation Report
+
+**Session ID:** eval_20260319_224249
+**Evaluated at:** 2026-03-19T22:43:49
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Total Queries | 10 |
+| Correct | 7 |
+| Accuracy | 70.00% |
+| Abstained | 1 |
+| Avg Latency | 1250.3ms |
+
+## Retrieval Metrics
+
+| Metric | Value |
+|--------|-------|
+| mrr_at_10 | 0.7500 |
+| recall_at_5 | 0.8500 |
+| ... | ... |
+
+## Behavior Breakdown
+
+| Behavior | Count | Accuracy |
+|----------|-------|----------|
+| IE | 5 | 80.00% |
+| MR | 3 | 66.67% |
+| KU | 2 | 100.00% |
+
+## Session Replay
+
+- Total Sessions: 5
+- Total Turns: 47
+- LTM Entries Added: 12
+- Avg STM Tokens: 3204
+```
+
+## Dataset Format
+
+The evaluation uses LongMemEval format JSON files:
+
+```json
+[
+  {
+    "question_id": "e47becba",
+    "question_type": "single-session-user",
+    "question": "What degree did I graduate with?",
+    "question_date": "2023/05/30 (Tue) 23:40",
+    "answer": "Business Administration",
+    "answer_session_ids": ["answer_280352e9"],
+    "haystack_dates": ["2023/05/20 (Sat) 02:21", ...],
+    "haystack_session_ids": ["session_1", ...],
+    "haystack_sessions": [
+      [{"role": "user", "content": "..."}, ...],
+      ...
+    ]
+  }
+]
+```
+
+## Implementation Notes
+
+### Current Architecture
+
+The simplified evaluation pipeline tests the **production orchestrator codepath**:
+
+```
+User Query
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  agents/orchestrator.py            │
+│  └── chat() method                  │
+│      ├── STM overflow guard         │
+│      ├── Context-aware retrieval    │
+│      ├── LTM semantic search        │
+│      └── Memory trigger processing  │
+└─────────────────────────────────────┘
+```
+
+### Previous Architecture (Deprecated)
+
+The `archive/` directory contains the previous complex pipeline that:
+- Bypassed the orchestrator for direct LTMStore testing
+- Used separate inference, metrics, and dataset pipelines
+- Did not validate end-to-end memory lifecycle
+
+This was replaced with the simplified `Evaluator` class that routes all testing through `orchestrator.chat()` for more realistic results.
 
 ## Target Metrics
 
@@ -316,8 +300,79 @@ Per the technical specification:
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| MRR@10 | >= 0.85 | Validated |
-| Recall@5 | >= 0.90 | Validated |
+| MRR@10 | >= 0.85 | In Progress |
+| Recall@5 | >= 0.90 | In Progress |
 | Avg Latency | < 500ms | Validated |
 
-Check current results in [`evaluation/docs/eval_status.md`](evaluation/docs/eval_status.md).
+## Development
+
+### Running Tests
+
+```bash
+# Quick sanity check
+python evaluation/quick_test.py
+
+# Small evaluation with mock LLM
+python evaluation/run.py \
+    --dataset evaluation/data/longmemeval_s_cleaned.json \
+    --queries 3 \
+    --mock \
+    --verbose
+```
+
+### Adding New Behavior Types
+
+To add support for new behavior types:
+
+1. Update `_map_behavior()` in `evaluators.py`:
+```python
+@staticmethod
+def _map_behavior(question_type: str) -> str:
+    mapping = {
+        # ... existing mappings ...
+        "new_behavior_type": "NB",
+    }
+```
+
+2. Add validation logic in `_validate()` if needed.
+
+### Using Custom Datasets
+
+The evaluation pipeline supports any JSON file following the LongMemEval format. Create your own dataset:
+
+```python
+import json
+
+dataset = [
+    {
+        "question_id": "custom_001",
+        "question_type": "single-session-user",
+        "question": "What is my favorite color?",
+        "answer": "Blue",
+        "haystack_sessions": [[
+            {"role": "user", "content": "My favorite color is blue"}
+        ]],
+    }
+]
+
+with open("my_dataset.json", "w") as f:
+    json.dump(dataset, f)
+```
+
+Then run:
+```bash
+python evaluation/run.py --dataset my_dataset.json --queries 1
+```
+
+## Documentation
+
+- `docs/eval_status.md` - Coherence analysis between evaluation and production
+- `docs/evaluation_pipeline_audit_report.md` - Detailed audit findings
+- `docs/agemem_technical_specification.md` - Technical requirements
+- `docs/longmemeval_guide.md` - LongMemEval benchmark guide
+
+## Version
+
+Current version: **2.0.0** (simplified architecture)
+
+Previous versions used the complex pipeline in `archive/` which has been deprecated in favor of the simplified `Evaluator` class that tests through the production orchestrator.
