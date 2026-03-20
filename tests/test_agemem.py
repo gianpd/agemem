@@ -827,22 +827,23 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_T22_readiness_check_uses_correct_parameters(self):
         """
-        REGRESSION TEST: _execute_readiness_check should use 'query' parameter
+        REGRESSION TEST: ToolExecutor._execute_readiness_check should use 'query' parameter
         (not 'current_query') when calling are_you_ready_to_get_in_context_ltm.
         """
         import json
         orch = self._make_orchestrator()
 
-        # Execute readiness check with current_query argument
-        result_json = orch._execute_readiness_check({
+        # Execute readiness check via ToolExecutor with current_query argument
+        result = orch._tool_executor.execute("are_you_ready_to_get_in_context_ltm", {
             "current_query": "What is Python?",
             "urgency": "helpful"
         })
 
-        # Should return valid JSON
-        result = json.loads(result_json)
-        self.assertIn("should_retrieve", result)
-        self.assertIn("retrieval_rationale", result)
+        # Should return valid JSON with expected fields
+        self.assertTrue(result.success)
+        result_data = json.loads(result.output)
+        self.assertIn("should_retrieve", result_data)
+        self.assertIn("retrieval_rationale", result_data)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

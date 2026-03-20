@@ -64,6 +64,7 @@ from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
 from agents.memory_agent import MemoryAgent
 from agents.learning_scorer import LearningScorer
 from agents.response_handler import ResponseHandler
+from agents.tool_executor import ToolExecutor, ToolResult, ToolCategory
 from skills.manager import SkillManager
 from tools.query_expansion import QueryExpander
 
@@ -251,6 +252,15 @@ class Orchestrator:
                 acronym_dict=getattr(self._config, 'QUERY_EXPANSION_ACRONYM_DICT', {}),
             )
 
+        # Tool executor - encapsulates all tool execution logic
+        self._tool_executor = ToolExecutor(
+            stm=self._stm,
+            ltm=self._ltm,
+            llm=self._llm,
+            config=self._config,
+            tracer=None,  # Uses get_tracer() lazily
+        )
+
     def _init_prompt_registry(self) -> None:
         """Initialize prompt registry and capture current prompt versions for audit."""
         try:
@@ -313,7 +323,7 @@ class Orchestrator:
 
     def _execute_tool(self, name: str, arguments: dict) -> str:
         """
-        Execute a tool by name.
+        Execute a tool by name - delegates to ToolExecutor.
 
         Currently supported:
         - web_search: Search the web for current information
@@ -328,485 +338,15 @@ class Orchestrator:
 
         Returns the tool result as a string.
         """
-        if name == "web_search":
-            # Import here to avoid circular dependencies
-            try:
-                from tools.web_tools import web_search
-                query = arguments.get("query", "")
-                num_results = arguments.get("num_results", 5)
-                # Run async function synchronously using asyncio.run()
-                import asyncio
-                try:
-                    result = asyncio.run(web_search(query, num_results))
-                except RuntimeError:
-                    # If already in an event loop, use nest_asyncio or get existing loop
-                    try:
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        result = asyncio.run(web_search(query, num_results))
-                    except ImportError:
-                        # Fallback: try to get the running loop
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # Create a new loop in a thread
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, web_search(query, num_results))
-                                result = future.result()
-                        else:
-                            result = loop.run_until_complete(web_search(query, num_results))
-                return result
-            except Exception as e:
-                return f"[TOOL ERROR] web_search failed: {e}"
+        result = self._tool_executor.execute(name, arguments)
 
-        if name == "write_file":
-            try:
-                from tools.web_tools import write_file
-                path = arguments.get("path", "")
-                content = arguments.get("content", "")
-                return write_file(path, content)
-            except Exception as e:
-                return f"[TOOL ERROR] write_file failed: {e}"
+        # Handle STM injection for retrieval tools
+        if result.should_inject_to_stm and result.stm_injection_data:
+            self._stm.retrieve(result.stm_injection_data, trigger=TriggerKind.MAIN_AGENT)
 
-        if name == "ingest_document":
-            try:
-                from tools.web_tools import ingest_document
-                path = arguments.get("path", "")
-                return ingest_document(path)
-            except Exception as e:
-                return f"[TOOL ERROR] ingest_document failed: {e}"
-
-        # Corpus tools
-        if name == "list_documents":
-            try:
-                from tools.corpus import list_documents
-                return list_documents()
-            except Exception as e:
-                return f"[TOOL ERROR] list_documents failed: {e}"
-
-        if name == "search_metadata":
-            try:
-                from tools.corpus import search_metadata
-                keyword = arguments.get("keyword", "")
-                return search_metadata(keyword)
-            except Exception as e:
-                return f"[TOOL ERROR] search_metadata failed: {e}"
-
-        if name == "grep_corpus":
-            try:
-                from tools.corpus import grep_corpus
-                pattern = arguments.get("pattern", "")
-                context_lines = arguments.get("context_lines", 3)
-                return grep_corpus(pattern, context_lines)
-            except Exception as e:
-                return f"[TOOL ERROR] grep_corpus failed: {e}"
-
-        if name == "read_document":
-            try:
-                from tools.corpus import read_document
-                doc_id = arguments.get("doc_id", "")
-                return read_document(doc_id)
-            except Exception as e:
-                return f"[TOOL ERROR] read_document failed: {e}"
-
-        if name == "read_lines":
-            try:
-                from tools.corpus import read_lines
-                doc_id = arguments.get("doc_id", "")
-                start_line = arguments.get("start_line", 1)
-                end_line = arguments.get("end_line", 75)
-                return read_lines(doc_id, start_line, end_line)
-            except Exception as e:
-                return f"[TOOL ERROR] read_lines failed: {e}"
-
-        if name == "fetch_url":
-            try:
-                from tools.web_tools import fetch_url_tool
-                url = arguments.get("url", "")
-                max_length = arguments.get("max_length", 10000)
-                save_path = arguments.get("save_path")
-                return fetch_url_tool(url, max_length, save_path)
-            except Exception as e:
-                return f"[TOOL ERROR] fetch_url failed: {e}"
-
-        # === Introspection Tools ===
-        if name == "assess_conversation_drift":
-            return self._execute_assess_drift(arguments)
-
-        if name == "are_you_ready_to_get_in_context_ltm":
-            return self._execute_readiness_check(arguments)
-
-        if name == "paraphrase_for_coverage":
-            return self._execute_paraphrase(arguments)
-
-        if name == "trigger_contextual_ltm_retrieval":
-            return self._execute_trigger_retrieval(arguments)
-
-        if name == "validate_ltm_relevance":
-            return self._execute_validate(arguments)
-
-        if name == "refine_retrieval_target":
-            return self._execute_refine(arguments)
-
-        if name == "log_retrieval_decision":
-            return self._execute_log_decision(arguments)
-
-        # Tier 5: Persistence Assurance Tools
-        if name == "assess_persistence_need":
-            return self._execute_assess_persistence_need(arguments)
-
-        if name == "force_memory_persistence":
-            return self._execute_force_memory_persistence(arguments)
-
-        if name == "validate_memory_commit":
-            return self._execute_validate_memory_commit(arguments)
-
-        if name == "log_persistence_failure":
-            return self._execute_log_persistence_failure(arguments)
-
-        return f"[TOOL ERROR] Unknown tool: {name}"
+        return result.output
 
     # === Introspection Tool Execution Handlers ===
-
-    def _execute_assess_drift(self, arguments: dict) -> str:
-        """Execute assess_conversation_drift with access to current state."""
-        from memory.ltm_introspection import assess_conversation_drift
-        from memory.ltm_introspection_types import Turn, ConfidenceLevel
-
-        current_query = arguments.get("current_query", "")
-        recent_context = arguments.get("recent_context", "")
-
-        # Get recent messages from STM if not provided
-        if not recent_context:
-            recent_msgs = self._stm.messages()[-4:]  # Last 4 messages
-            recent_context = "\n".join([
-                f"{m.role}: {m.content[:200]}"
-                for m in recent_msgs
-            ])
-
-        # Build turns from STM history
-        turns = [
-            Turn(
-                role=m.role,
-                content=m.content[:500],  # Truncate for efficiency
-                turn_index=getattr(m, 'turn_index', 0),
-                timestamp=getattr(m, 'timestamp', None)
-            )
-            for m in self._stm.messages()[-10:]
-        ]
-
-        result = assess_conversation_drift(
-            current_query=current_query,
-            recent_turns=turns,
-        )
-
-        # Map ConfidenceLevel to float for tracing
-        confidence_map = {
-            ConfidenceLevel.HIGH: 0.9,
-            ConfidenceLevel.MEDIUM: 0.6,
-            ConfidenceLevel.LOW: 0.3,
-        }
-        confidence_float = confidence_map.get(result.confidence, 0.5)
-
-        # Log to tracing
-        get_tracer().log_introspection_trigger(
-            trigger_type="drift_assessment",
-            confidence=confidence_float,
-            context_summary=f"drift_type={result.drift_type.value}, score={result.topic_drift_score:.2f}",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_readiness_check(self, arguments: dict) -> str:
-        """Execute are_you_ready_to_get_in_context_ltm."""
-        from memory.ltm_introspection import are_you_ready_to_get_in_context_ltm
-
-        query = arguments.get("current_query", "")
-        urgency = arguments.get("urgency", "helpful")
-
-        result = are_you_ready_to_get_in_context_ltm(
-            query=query,
-            urgency=urgency,
-            current_messages=self._stm.messages()[-5:] if self._stm else None,
-            current_turn=self._stm.current_turn() if self._stm else 0,
-            ltm_store=self._ltm,
-        )
-
-        # Log readiness assessment
-        confidence_score = result.confidence_report.overall_score if result.confidence_report else 0.5
-        get_tracer().log_introspection_trigger(
-            trigger_type="readiness_check",
-            confidence=confidence_score,
-            context_summary=f"should_retrieve={result.should_retrieve}, strategy={result.suggested_retrieval_strategy}",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_paraphrase(self, arguments: dict) -> str:
-        """Execute paraphrase_for_coverage."""
-        from memory.ltm_introspection import paraphrase_for_coverage
-
-        query = arguments.get("query", "")
-        n_variants = arguments.get("n_variants", 3)
-
-        result = paraphrase_for_coverage(
-            query=query,
-            llm_client=self._llm,
-            model=self._config.MEMORY_AGENT_MODEL,
-            n_variants=min(n_variants, 5),
-        )
-
-        return json.dumps(result.to_dict() if hasattr(result, 'to_dict') else result, indent=2)
-
-    def _execute_trigger_retrieval(self, arguments: dict) -> str:
-        """Execute trigger_contextual_ltm_retrieval."""
-        from memory.ltm_introspection import trigger_contextual_ltm_retrieval
-
-        query = arguments.get("query", "")
-        mode = arguments.get("mode", "single_query")
-        top_k = arguments.get("top_k", 5)
-
-        result = trigger_contextual_ltm_retrieval(
-            query_or_concept=query,
-            llm_client=self._llm,
-            model=self._config.MEMORY_AGENT_MODEL,
-            retrieval_mode=mode,
-            top_k=top_k,
-            ltm_store=self._ltm,
-        )
-
-        # If retrieval successful, inject into STM automatically
-        if result.memories:
-            entries = [
-                {
-                    "content": m.entry.content if hasattr(m.entry, 'content') else str(m.entry),
-                    "score": m.retrieval_score,
-                    "source": m.source_query,
-                }
-                for m in result.memories
-            ]
-            self._stm.retrieve(entries, trigger=TriggerKind.MAIN_AGENT)
-
-            # Log introspection result
-            get_tracer().log_introspection_result(
-                action="ltm_retrieval",
-                target_memory=f"{len(result.memories)} memories via {mode}",
-                success=True,
-                detail=f"Retrieved {len(result.memories)} memories, injected into STM",
-            )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_validate(self, arguments: dict) -> str:
-        """Execute validate_ltm_relevance."""
-        from memory.ltm_introspection import validate_ltm_relevance
-        from memory.ltm_introspection_types import RetrievedMemory, MemoryEntry
-
-        memories = arguments.get("retrieved_memories", [])
-        current_query = arguments.get("current_query", "")
-
-        # Convert strings to RetrievedMemory objects
-        retrieved = []
-        for i, mem in enumerate(memories):
-            if isinstance(mem, str):
-                entry = MemoryEntry(content=mem, entry_id=f"val_{i}")
-                retrieved.append(RetrievedMemory(
-                    entry=entry,
-                    retrieval_score=0.5,
-                    source_query=current_query,
-                    rank=i,
-                ))
-            else:
-                retrieved.append(mem)
-
-        result = validate_ltm_relevance(
-            retrieved_memories=retrieved,
-            current_turn_content=current_query,
-            llm_client=self._llm,
-            model=self._config.MEMORY_AGENT_MODEL,
-        )
-
-        # Log validation result
-        get_tracer().log_introspection_result(
-            action="validate_ltm",
-            target_memory=f"{result.total_count} memories",
-            success=result.coverage_sufficient,
-            detail=f"{result.relevant_count}/{result.total_count} relevant, coverage={result.coverage_score:.2f}",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_refine(self, arguments: dict) -> str:
-        """Execute refine_retrieval_target."""
-        from memory.ltm_introspection import refine_retrieval_target
-        from memory.ltm_introspection_types import FailureMode, RetrievalAttempt
-
-        original_query = arguments.get("original_query", "")
-        failure_mode_str = arguments.get("failure_mode", "TOO_NARROW")
-
-        # Map string to enum
-        try:
-            failure_mode = FailureMode(failure_mode_str)
-        except ValueError:
-            failure_mode = FailureMode.TOO_NARROW
-
-        attempt = RetrievalAttempt(
-            query=original_query,
-            retrieval_mode="single_query",
-            results_count=0,
-        )
-        attempt.failure_mode = failure_mode
-
-        result = refine_retrieval_target(
-            failed_attempt=attempt,
-            llm_client=self._llm,
-            model=self._config.MEMORY_AGENT_MODEL,
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_log_decision(self, arguments: dict) -> str:
-        """Execute log_retrieval_decision."""
-        from memory.ltm_introspection import log_retrieval_decision
-        from memory.ltm_introspection_types import RetrievalDecision
-
-        decision_chain = arguments.get("decision_chain", [])
-        utility_score = arguments.get("utility_score", 0.5)
-        was_skipped = arguments.get("was_retrieval_skipped", False)
-
-        decision = RetrievalDecision(
-            trigger="->".join(decision_chain),
-            utility_score=utility_score,
-            was_retrieved=not was_skipped,
-            strategy_used=decision_chain[-1] if decision_chain else "unknown",
-        )
-
-        result = log_retrieval_decision(decision)
-
-        # Also log to tracer for consistency
-        get_tracer().log_memory_op(
-            op_type="RETRIEVAL_DECISION_LOGGED",
-            detail=f"chain={'->'.join(decision_chain)}, utility={utility_score:.2f}",
-            success=True,
-        )
-
-        return json.dumps(result, indent=2)
-
-    # === Tier 5: Persistence Assurance Tool Handlers ===
-
-    def _execute_assess_persistence_need(self, arguments: dict) -> str:
-        """Execute assess_persistence_need with access to current state."""
-        from memory.ltm_introspection import assess_persistence_need
-
-        # Accept both 'user_input' and 'content' as parameter aliases
-        # This handles variations in how agents invoke the tool
-        user_input = arguments.get("user_input") or arguments.get("content", "")
-        check_patterns = arguments.get("check_patterns")
-
-        # Note: recent_context is not currently used by assess_persistence_need
-        # but available in the tool definition for future enrichment
-        result = assess_persistence_need(
-            user_input=user_input,
-            recent_context=None,
-            check_patterns=check_patterns,
-        )
-
-        # Log the assessment
-        get_tracer().log_memory_op(
-            op_type="PERSISTENCE_ASSESSMENT",
-            detail=f"should_persist={result.should_persist}, urgency={result.urgency.value}",
-            success=True,
-            trigger="MAIN_AGENT",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_force_memory_persistence(self, arguments: dict) -> str:
-        """Execute force_memory_persistence - CRITICAL for memory integrity."""
-        from memory.ltm_introspection import force_memory_persistence
-
-        content = arguments.get("content", "")
-        learning_score = arguments.get("learning_score", 0.9)
-        trigger = arguments.get("trigger", "user_command")
-        bypass_scoring = arguments.get("bypass_scoring", True)
-
-        if not content:
-            return json.dumps({
-                "success": False,
-                "error": "No content provided for persistence",
-            }, indent=2)
-
-        # Execute with LTM store access
-        result = force_memory_persistence(
-            content=content,
-            ltm_store=self._ltm,
-            learning_score=learning_score,
-            source_turn=self._stm.current_turn(),
-            trigger=trigger,
-            bypass_scoring=bypass_scoring,
-        )
-
-        # Log the persistence attempt
-        get_tracer().log_memory_op(
-            op_type="FORCE_PERSISTENCE",
-            detail=f"content_preview={content[:100]}..., success={result.success}",
-            success=result.success,
-            trigger="MAIN_AGENT",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_validate_memory_commit(self, arguments: dict) -> str:
-        """Execute validate_memory_commit to verify persistence."""
-        from memory.ltm_introspection import validate_memory_commit
-
-        memory_id = arguments.get("memory_id")
-        expected_content = arguments.get("expected_content", "")
-
-        result = validate_memory_commit(
-            memory_id=memory_id,
-            expected_content=expected_content,
-            ltm_store=self._ltm,
-        )
-
-        # Log validation result
-        get_tracer().log_memory_op(
-            op_type="PERSISTENCE_VALIDATION",
-            detail=f"memory_id={memory_id}, validated={result.is_validated}",
-            success=result.is_validated,
-            trigger="MAIN_AGENT",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
-
-    def _execute_log_persistence_failure(self, arguments: dict) -> str:
-        """Execute log_persistence_failure for debugging."""
-        from memory.ltm_introspection import log_persistence_failure
-
-        content = arguments.get("content", "")
-        error_message = arguments.get("error_message", "Unknown error")
-        retry_count = arguments.get("retry_count", 0)
-        context = arguments.get("context", {})
-
-        # Convert error_message string to Exception for the function signature
-        error = Exception(error_message)
-
-        result = log_persistence_failure(
-            content=content,
-            error=error,
-            retry_count=retry_count,
-            context=context,
-        )
-
-        # Log failure to tracer
-        get_tracer().log_memory_op(
-            op_type="PERSISTENCE_FAILURE_LOGGED",
-            detail=f"error={error_message}, retry_count={retry_count}",
-            success=False,
-            trigger="MAIN_AGENT",
-        )
-
-        return json.dumps(result.to_dict(), indent=2)
 
     # ── Main public API ───────────────────────────────────────────────────────
 
@@ -939,6 +479,7 @@ class Orchestrator:
                 if tool_iterations >= max_tool_iterations:
                     assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
                     break
+
                 # Parse tool call
                 tool_call = e.tool_call
                 tool_name = tool_call.function.name
@@ -963,29 +504,18 @@ class Orchestrator:
                     )
                     continue
 
-                # Execute the tool
-                tool_result = self._execute_tool(tool_name, tool_args)
+                # Execute via ToolExecutor
+                result = self._tool_executor.execute(tool_name, tool_args)
                 tool_duration = (time.time() - tool_call_start) * 1000
 
-                # Log tool call
-                tracer.log_tool_call(
-                    tool_name=tool_name,
-                    arguments=tool_args,
-                    duration_ms=tool_duration,
-                    result=tool_result[:500] if tool_result else None,
-                    success=not tool_result.startswith("[TOOL ERROR]"),
-                )
+                # Handle STM injection for retrieval
+                if result.should_inject_to_stm and result.stm_injection_data:
+                    self._stm.retrieve(result.stm_injection_data, trigger=TriggerKind.MAIN_AGENT)
 
-                # Record the tool call in ops_applied with TriggerKind.MAIN_AGENT
-                ops.append(MemoryOpResult(
-                    op=MemoryOp.RETRIEVE,  # Using RETRIEVE as the closest match for tool execution
-                    success=True,
-                    trigger=TriggerKind.MAIN_AGENT,
-                    detail=f"Tool '{tool_name}' executed with args: {tool_args}",
-                ))
+                # Collect side effects
+                ops.extend(result.side_effects)
 
                 # Add assistant message with proper tool call structure
-                # This is required for the LLM to understand its own tool call
                 tool_calls_data = [{
                     "id": tool_call_id,
                     "type": "function",
@@ -1003,7 +533,7 @@ class Orchestrator:
                 # Add the tool result with proper role and tool_call_id
                 self._stm.add_message(
                     role="tool",
-                    content=tool_result,
+                    content=result.output,
                     relevance_score=0.9,
                     tool_call_id=tool_call_id,
                 )
@@ -1012,10 +542,7 @@ class Orchestrator:
                 continue
 
             except TextToolCallResponse as e:
-                tool_call_start = time.time()
-
                 # Handle text-based tool calls (for models that don't use API tool calling)
-                # This is the same logic as ToolCallResponse but for text-parsed tool calls
                 if tool_iterations >= max_tool_iterations:
                     assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
                     break
@@ -1028,8 +555,6 @@ class Orchestrator:
                 # Validate tool call arguments
                 validation = self._response_handler.validate_tool_call(tool_call)
                 if not validation.is_valid:
-                    print(f"[DEBUG] Invalid text tool call: {'; '.join(validation.errors)}", flush=True)
-                    # Add error message and continue
                     self._stm.add_message(
                         role="user",
                         content=f"[SYSTEM] Tool call validation failed: {'; '.join(validation.errors)}. Please try again with valid arguments.",
@@ -1047,25 +572,15 @@ class Orchestrator:
                     )
                     continue
 
-                # Execute the tool
-                tool_result = self._execute_tool(tool_name, tool_args)
-                tool_duration = (time.time() - tool_call_start) * 1000
+                # Execute via ToolExecutor
+                result = self._tool_executor.execute(tool_name, tool_args)
 
-                # Log tool call
-                tracer.log_tool_call(
-                    tool_name=tool_name,
-                    arguments=tool_args,
-                    duration_ms=tool_duration,
-                    result=tool_result[:500] if tool_result else None,
-                    success=not tool_result.startswith("[TOOL ERROR]"),
-                )
+                # Handle STM injection for retrieval
+                if result.should_inject_to_stm and result.stm_injection_data:
+                    self._stm.retrieve(result.stm_injection_data, trigger=TriggerKind.MAIN_AGENT)
 
-                ops.append(MemoryOpResult(
-                    op=MemoryOp.RETRIEVE,
-                    success=True,
-                    trigger=TriggerKind.MAIN_AGENT,
-                    detail=f"Tool '{tool_name}' executed with args: {tool_args}",
-                ))
+                # Collect side effects
+                ops.extend(result.side_effects)
 
                 tool_calls_data = [{
                     "id": tool_call_id,
@@ -1083,7 +598,7 @@ class Orchestrator:
                 )
                 self._stm.add_message(
                     role="tool",
-                    content=tool_result,
+                    content=result.output,
                     relevance_score=0.9,
                     tool_call_id=tool_call_id,
                 )
