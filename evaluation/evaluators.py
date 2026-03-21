@@ -4,16 +4,21 @@ evaluation/evaluators.py
 Core evaluation logic for AgeMem.
 
 Simplified from: question_evaluator.py + session_replay.py
+
+Enhancement: Added LLM-as-Judge support alongside heuristic validation.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from typing import Optional, Callable, Literal
 
 from agents.orchestrator import Orchestrator
 from core.types import MemoryOp
+
+# Import LLM-as-Judge
+from evaluation.llm_judge import LLMJudge, JudgeResult
 
 
 @dataclass
@@ -31,6 +36,7 @@ class EvaluationContext:
     """Context for evaluating a single question."""
     behavior_type: str  # "IE", "MR", "KU", "TR", "ABS"
     expected_answer: str
+    question: str  # Added for LLM judge
     evidence_session_ids: list[int] = field(default_factory=list)
 
 
@@ -43,14 +49,16 @@ class QuestionResult:
     retrieval_trace: dict
     abstained: bool
     latency_ms: float
+    # New fields for LLM judge
+    judge_result: Optional[JudgeResult] = None
+    validation_method: Literal["heuristic", "llm_judge"] = "heuristic"
 
 
 class Evaluator:
     """
     Core evaluator for AgeMem benchmarking.
 
-    Combines session replay and question evaluation into a single,
-    simple interface.
+    Supports both heuristic validation and LLM-as-Judge.
     """
 
     ABSTENTION_PHRASES = [
@@ -60,8 +68,23 @@ class Evaluator:
         "i have no", "there is no information",
     ]
 
-    def __init__(self, orchestrator: Orchestrator) -> None:
+    def __init__(
+        self,
+        orchestrator: Orchestrator,
+        llm_judge: Optional[LLMJudge] = None,
+        use_llm_judge: bool = True,
+    ) -> None:
+        """
+        Initialize evaluator.
+
+        Args:
+            orchestrator: The AgeMem orchestrator being evaluated
+            llm_judge: Optional LLM-as-Judge instance
+            use_llm_judge: Whether to use LLM judge (vs heuristic only)
+        """
         self._orchestrator = orchestrator
+        self._llm_judge = llm_judge
+        self._use_llm_judge = use_llm_judge and llm_judge is not None
         self._query_counter = 0
 
     def replay_sessions(
@@ -147,8 +170,12 @@ class Evaluator:
                 query_text=query.get("query_text", ""),
                 query_id=query_id,
                 context=EvaluationContext(
-                    behavior_type=self._map_behavior(instance.get("question_type", "retrieval")),
+                    behavior_type=self._map_behavior(
+                        instance.get("question_type", "retrieval"),
+                        query_id,
+                    ),
                     expected_answer=instance.get("answer", ""),
+                    question=instance.get("question", ""),  # Added for judge
                     evidence_session_ids=instance.get("answer_session_ids", []),
                 ),
             )
@@ -162,15 +189,39 @@ class Evaluator:
         query_id: str,
         context: EvaluationContext,
     ) -> QuestionResult:
-        """Evaluate a single question."""
+        """Evaluate a single question with LLM-as-Judge."""
         t0 = time.time()
         response = self._orchestrator.chat(query_text)
-        latency_ms = (time.time() - t0) * 1000
+        generation_latency_ms = (time.time() - t0) * 1000
 
         last_trace = self._orchestrator.last_trace()
         retrieval_trace = self._build_trace(last_trace)
         abstained = self._detect_abstention(response)
-        is_correct = self._validate(response, context, abstained)
+
+        # Validate using LLM-as-Judge or heuristic
+        judge_result = None
+        validation_method = "heuristic"
+
+        if self._use_llm_judge and self._llm_judge is not None:
+            # Use LLM-as-Judge
+            try:
+                judge_result = self._llm_judge.evaluate(
+                    question=context.question,
+                    expected_answer=context.expected_answer,
+                    model_response=response,
+                    behavior_type=context.behavior_type,
+                )
+                is_correct = judge_result.is_correct
+                validation_method = "llm_judge"
+            except Exception as e:
+                # Fall back to heuristic on judge failure
+                print(f"[WARN] LLM judge failed for {query_id}: {e}")
+                is_correct = self._validate(response, context, abstained)
+        else:
+            # Use heuristic validation
+            is_correct = self._validate(response, context, abstained)
+
+        total_latency_ms = generation_latency_ms + (judge_result.latency_ms if judge_result else 0)
 
         return QuestionResult(
             query_id=query_id,
@@ -178,7 +229,9 @@ class Evaluator:
             behavior_type=context.behavior_type,
             retrieval_trace=retrieval_trace,
             abstained=abstained,
-            latency_ms=latency_ms,
+            latency_ms=total_latency_ms,
+            judge_result=judge_result,
+            validation_method=validation_method,
         )
 
     def _build_trace(self, last_trace) -> dict:
@@ -204,7 +257,7 @@ class Evaluator:
         return any(phrase in response_lower for phrase in self.ABSTENTION_PHRASES)
 
     def _validate(self, response: str, context: EvaluationContext, abstained: bool) -> bool:
-        """Validate response based on behavior type."""
+        """Validate response based on behavior type (heuristic)."""
         behavior = context.behavior_type.upper()
 
         if behavior == "ABS":
@@ -214,7 +267,7 @@ class Evaluator:
         return self._match_answer(response, context.expected_answer)
 
     def _match_answer(self, response: str, expected: str) -> bool:
-        """Match response against expected answer."""
+        """Match response against expected answer (heuristic)."""
         if not expected:
             return False
 
@@ -236,8 +289,17 @@ class Evaluator:
         return overlap / len(expected_tokens) >= 0.7
 
     @staticmethod
-    def _map_behavior(question_type: str) -> str:
-        """Map LongMemEval question type to behavior code."""
+    def _map_behavior(question_type: str, question_id: str = "") -> str:
+        """Map LongMemEval question type to behavior code.
+
+        Checks for abstention questions via:
+        1. Explicit "abstention" or "unknown" question_type
+        2. "_abs" suffix in question_id (e.g., "0862e8bf_abs")
+        """
+        # Check for abstention via question_id suffix first
+        if question_id and "_abs" in question_id:
+            return "ABS"
+
         mapping = {
             "single-session-user": "IE",
             "single-session-assistant": "IE",

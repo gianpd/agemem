@@ -27,6 +27,7 @@ from evaluation.factory import OrchestratorFactory
 from evaluation.mock_llm import StatefulMockLLM
 from evaluation.evaluators import Evaluator
 from evaluation.metrics import calculate_metrics, EvaluationSummary
+from evaluation.llm_judge import LLMJudge  # Import judge
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,16 @@ def setup_logging(verbose: bool = False) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="AgeMem Evaluation Pipeline",
+        description="AgeMem Evaluation Pipeline with LLM-as-Judge",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Modes:
   full       - Complete evaluation (session replay + questions)
   lifecycle  - Session replay only (test memory lifecycle)
   retrieval  - Question evaluation only (test retrieval quality)
+
+LLM-as-Judge:
+  Enable with --use-llm-judge. Requires llama.cpp server running.
 """,
     )
     parser.add_argument(
@@ -96,6 +100,23 @@ Modes:
         "--mock",
         action="store_true",
         help="Use mock LLM instead of real LLM",
+    )
+    parser.add_argument(
+        "--use-llm-judge",
+        action="store_true",
+        help="Use LLM-as-Judge for answer evaluation (requires judge server)",
+    )
+    parser.add_argument(
+        "--judge-api-base",
+        type=str,
+        default="http://localhost:8080/v1",
+        help="Judge server API endpoint (default: http://localhost:8080/v1)",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default="llama-3.1-70b-instruct",
+        help="Judge model name (default: llama-3.1-70b-instruct)",
     )
     return parser.parse_args()
 
@@ -200,6 +221,14 @@ def generate_report(
         f"| Abstained | {summary.abstained} |",
         f"| Avg Latency | {summary.avg_latency_ms:.1f}ms |",
         f"",
+        f"## LLM-as-Judge Statistics",
+        f"",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Queries by LLM Judge | {summary.llm_judge_queries} |",
+        f"| Queries by Heuristic | {summary.heuristic_queries} |",
+        f"| Judge Avg Latency | {summary.judge_avg_latency_ms:.1f}ms |",
+        f"",
         f"## Retrieval Metrics",
         f"",
         f"| Metric | Value |",
@@ -252,12 +281,27 @@ def generate_report(
 
 
 def main() -> int:
-    """Main entry point."""
+    """Main entry point with LLM-as-Judge support."""
     args = parse_args()
     setup_logging(args.verbose)
 
     session_id = datetime.now().strftime("eval_%Y%m%d_%H%M%S")
     logger.info(f"Starting evaluation session: {session_id}")
+
+    # Initialize LLM-as-Judge if requested
+    llm_judge = None
+    if args.use_llm_judge:
+        logger.info(f"Initializing LLM-as-Judge at {args.judge_api_base}")
+        llm_judge = LLMJudge(
+            api_base=args.judge_api_base,
+            model=args.judge_model,
+        )
+        if not llm_judge.health_check():
+            logger.error("LLM-as-Judge server is not accessible!")
+            logger.error(f"Please start llama.cpp server at {args.judge_api_base}")
+            logger.error("Example: llama-server --model llama-3.1-70b-instruct.Q4_K_M.gguf --port 8080")
+            return 1
+        logger.info("LLM-as-Judge initialized successfully")
 
     # Create temp directory for session data
     if args.persist_session:
@@ -308,8 +352,12 @@ def main() -> int:
                 },
             )
 
-        # Create evaluator
-        evaluator = Evaluator(orchestrator)
+        # Create evaluator with LLM-as-Judge support
+        evaluator = Evaluator(
+            orchestrator,
+            llm_judge=llm_judge,
+            use_llm_judge=args.use_llm_judge,
+        )
 
         # Run evaluation based on mode
         session_results = []
@@ -351,6 +399,9 @@ def main() -> int:
         print(f"Mode: {args.mode}")
         print(f"Queries evaluated: {summary.total_queries}")
         print(f"Accuracy: {summary.accuracy:.2%}")
+        if summary.llm_judge_queries > 0:
+            print(f"LLM-as-Judge: {summary.llm_judge_queries} queries (avg {summary.judge_avg_latency_ms:.0f}ms)")
+            print(f"Heuristic: {summary.heuristic_queries} queries")
         if summary.session_replay:
             print(f"Sessions replayed: {summary.session_replay.get('total_sessions', 0)}")
         print(f"Report: {report_path}")

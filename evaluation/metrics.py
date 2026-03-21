@@ -61,12 +61,16 @@ class BehaviorMetrics:
 
 @dataclass
 class EvaluationSummary:
-    """Complete evaluation summary."""
+    """Complete evaluation summary with LLM judge stats."""
     total_queries: int = 0
     correct: int = 0
     accuracy: float = 0.0
     abstained: int = 0
     avg_latency_ms: float = 0.0
+    # New judge metrics
+    llm_judge_queries: int = 0
+    heuristic_queries: int = 0
+    judge_avg_latency_ms: float = 0.0
     retrieval: RetrievalMetrics = field(default_factory=RetrievalMetrics)
     by_behavior: dict[str, BehaviorMetrics] = field(default_factory=dict)
     session_replay: dict = field(default_factory=dict)
@@ -78,6 +82,9 @@ class EvaluationSummary:
             "accuracy": self.accuracy,
             "abstained": self.abstained,
             "avg_latency_ms": self.avg_latency_ms,
+            "llm_judge_queries": self.llm_judge_queries,
+            "heuristic_queries": self.heuristic_queries,
+            "judge_avg_latency_ms": self.judge_avg_latency_ms,
             "retrieval": self.retrieval.to_dict(),
             "by_behavior": {k: {"behavior": v.behavior, "query_count": v.query_count, "accuracy": v.accuracy}
                           for k, v in self.by_behavior.items()},
@@ -109,6 +116,12 @@ def calculate_metrics(
     summary.accuracy = summary.correct / summary.total_queries if summary.total_queries else 0.0
     summary.abstained = sum(1 for r in question_results if r.abstained)
     summary.avg_latency_ms = mean([r.latency_ms for r in question_results]) if question_results else 0.0
+
+    # LLM-as-Judge metrics
+    summary.llm_judge_queries = sum(1 for r in question_results if r.validation_method == "llm_judge")
+    summary.heuristic_queries = sum(1 for r in question_results if r.validation_method == "heuristic")
+    judge_latencies = [r.judge_result.latency_ms for r in question_results if r.judge_result]
+    summary.judge_avg_latency_ms = mean(judge_latencies) if judge_latencies else 0.0
 
     # Retrieval metrics
     summary.retrieval = _calculate_retrieval_metrics(queries, question_results)
