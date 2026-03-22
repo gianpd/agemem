@@ -5,34 +5,54 @@
 # Launches AgeMem evaluation with LLM-as-Judge using nohup to survive system sleep.
 #
 # Usage:
-#   ./run_evaluation_nohup.sh [mode] [queries] [dataset]
+#   ./run_evaluation_nohup.sh [dataset] [max_batches] [batch_size]
 #
 # Arguments:
-#   mode         - Evaluation mode: full|lifecycle|retrieval (default: full)
-#   queries      - Number of queries to evaluate, 0 = all (default: 1)
-#   dataset      - Path to dataset (default: evaluation/data/longmemeval_s_cleaned.json)
+#   dataset      - Dataset: s (small), m (medium), oracle (default: s)
+#   max_batches  - Max batches to run (default: 10)
+#   batch_size   - Interactions per batch (default: 50)
 #
 # Environment Variables:
 #   JUDGE_API_BASE - URL for LLM-as-Judge API (default: http://localhost:8080/v1)
 #
 # Examples:
-#   ./run_evaluation_nohup.sh                    # LLM-as-Judge eval, 1 query (500 msgs)
-#   ./run_evaluation_nohup.sh full 1             # Same as above (explicit)
+#   ./run_evaluation_nohup.sh                    # Small dataset, 10 batches of 50
+#   ./run_evaluation_nohup.sh s 10 50            # Same as above (explicit)
+#   ./run_evaluation_nohup.sh m 20 100           # Medium dataset, 20 batches of 100
 #   JUDGE_API_BASE=http://192.168.1.100:8080/v1 ./run_evaluation_nohup.sh
-#   ./run_evaluation_nohup.sh lifecycle 0 evaluation/data/longmemeval_m_cleaned.json
 #
 
 set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODE="${1:-full}"
-QUERIES="${2:-1}"
-DATASET="${3:-evaluation/data/longmemeval_s_cleaned.json}"
+DATASET_KEY="${1:-s}"
+MAX_BATCHES="${2:-10}"
+BATCH_SIZE="${3:-50}"
 JUDGE_API_BASE="${JUDGE_API_BASE:-http://localhost:8080/v1}"
 LOG_DIR="${SCRIPT_DIR}/evaluation/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 SESSION_ID="eval_${TIMESTAMP}"
+
+# Map dataset key to path
+case "${DATASET_KEY}" in
+    s|small)
+        DATASET="evaluation/data/longmemeval_s_cleaned.json"
+        DATASET_NAME="small"
+        ;;
+    m|medium)
+        DATASET="evaluation/data/longmemeval_m_cleaned.json"
+        DATASET_NAME="medium"
+        ;;
+    oracle)
+        DATASET="evaluation/data/longmemeval_oracle.json"
+        DATASET_NAME="oracle"
+        ;;
+    *)
+        DATASET="${DATASET_KEY}"
+        DATASET_NAME="$(basename "${DATASET}" .json)"
+        ;;
+esac
 
 # Colors for output
 RED='\033[0;31m'
@@ -63,9 +83,10 @@ log_info "==============================================="
 log_info "  AgeMem Evaluation - LLM-as-Judge Mode"
 log_info "==============================================="
 log_info "Session ID: ${SESSION_ID}"
-log_info "Mode: ${MODE}"
-log_info "Queries: ${QUERIES}"
-log_info "Dataset: ${DATASET}"
+log_info "Mode: full"
+log_info "Dataset: ${DATASET_NAME} (${DATASET})"
+log_info "Batch size: ${BATCH_SIZE}"
+log_info "Max batches: ${MAX_BATCHES}"
 log_info "Judge API: ${JUDGE_API_BASE}"
 log_info "Log file: ${LOG_FILE}"
 log_info ""
@@ -97,7 +118,9 @@ log_info "Dataset found: ${DATASET} (${DATASET_SIZE} bytes)"
 
 # Validate Python imports
 log_info "Step 4: Validating Python imports..."
-if ! python3 -c "from evaluation.run import main; from evaluation.mock_llm import StatefulMockLLM; from evaluation.evaluators import Evaluator" 2>/dev/null; then
+if python3 -c "from evaluation.cli import main; from evaluation.llm_judge import LLMJudge" 2>/dev/null; then
+    log_info "Python imports validated"
+else
     log_warn "Some Python imports failed - this may be expected if dependencies aren't fully installed"
 fi
 
@@ -113,12 +136,12 @@ else
     exit 1
 fi
 
-# Validate evaluation/run.py can load without errors
-log_info "Step 6: Validating evaluation/run.py..."
-if python3 -c "from evaluation.run import main; print('run.py imports successfully')" 2>/dev/null; then
-    log_info "run.py validation PASSED"
+# Validate evaluation/cli.py can load without errors
+log_info "Step 6: Validating evaluation/cli.py..."
+if python3 -c "from evaluation.cli import main; print('cli.py imports successfully')" 2>/dev/null; then
+    log_info "cli.py validation PASSED"
 else
-    log_warn "run.py validation had warnings - proceeding anyway"
+    log_warn "cli.py validation had warnings - proceeding anyway"
 fi
 
 log_info ""
@@ -128,8 +151,8 @@ log_info "  Launching evaluation with nohup..."
 log_info "==============================================="
 log_info ""
 
-# Build the evaluation command (LLM-as-Judge full evaluation)
-EVAL_CMD="python3 -u evaluation/run.py --dataset ${DATASET} --mode ${MODE} --queries ${QUERIES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --output-dir evaluation/results --verbose"
+# Build the evaluation command (LLM-as-Judge full evaluation using new CLI)
+EVAL_CMD="python3 -u -m evaluation.cli --dataset ${DATASET} --mode full --batch-size ${BATCH_SIZE} --max-batches ${MAX_BATCHES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --output-dir evaluation/results --verbose"
 
 log_info "Command: ${EVAL_CMD}"
 log_info ""
@@ -140,9 +163,10 @@ AgeMem Evaluation Session (LLM-as-Judge)
 =========================================
 Session ID: ${SESSION_ID}
 Started: $(date)
-Mode: ${MODE}
-Queries: ${QUERIES} (1 query ≈ 500 messages in LongMemEval)
-Dataset: ${DATASET}
+Mode: full
+Dataset: ${DATASET_NAME} (${DATASET})
+Batch size: ${BATCH_SIZE}
+Max batches: ${MAX_BATCHES}
 Judge API: ${JUDGE_API_BASE}
 Log File: ${LOG_FILE}
 

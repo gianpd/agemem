@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from evaluation.runner import BatchConfig, BatchRunner
 from evaluation.checkpoint import CheckpointManager
 from evaluation.factory import OrchestratorFactory
+from evaluation.llm_judge import LLMJudge
+from evaluation.evaluator import Evaluator
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--no-resume", action="store_true", help="Start fresh, ignore checkpoint")
     p.add_argument("--mock", action="store_true", help="Use mock LLM for deterministic testing")
+    p.add_argument("--use-llm-judge", action="store_true", help="Use LLM-as-Judge for answer evaluation")
+    p.add_argument("--judge-api-base", type=str, default="http://localhost:8080/v1",
+                   help="Judge server API endpoint (default: http://localhost:8080/v1)")
+    p.add_argument("--judge-model", type=str, default="llama-3.1-70b-instruct",
+                   help="Judge model name (default: llama-3.1-70b-instruct)")
     return p.parse_args()
 
 
@@ -91,6 +98,16 @@ def run_evaluation(args: argparse.Namespace) -> int:
         print(f"Error: Dataset not found: {args.dataset}")
         return 1
 
+    # Initialize LLM-as-Judge if requested
+    llm_judge = None
+    if args.use_llm_judge:
+        print(f"Initializing LLM-as-Judge at {args.judge_api_base}")
+        llm_judge = LLMJudge(api_base=args.judge_api_base, model=args.judge_model)
+        if not llm_judge.health_check():
+            print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")
+            return 1
+        print("LLM-as-Judge initialized successfully")
+
     config = BatchConfig(
         batch_size=args.batch_size if args.batch_size > 0 else 10,
         checkpoint_interval=args.checkpoint_interval,
@@ -98,7 +115,12 @@ def run_evaluation(args: argparse.Namespace) -> int:
         resume_from_checkpoint=not args.no_resume,
         use_mock_llm=args.mock,
     )
-    runner = BatchRunner(config, OrchestratorFactory())
+
+    # Create evaluator factory with LLM judge support
+    def evaluator_factory(orch):
+        return Evaluator(orch, llm_judge=llm_judge, use_llm_judge=args.use_llm_judge)
+
+    runner = BatchRunner(config, OrchestratorFactory(), evaluator_factory=evaluator_factory)
 
     print(f"\nEvaluation: {args.dataset} | mode={args.mode} | batch_size={args.batch_size or 'none'}")
     try:
@@ -122,9 +144,23 @@ def resume_evaluation(session_id: str, args: argparse.Namespace) -> int:
         return 1
 
     print(f"\nResuming: {session_id} ({state.progress.completed_interactions}/{state.progress.total_interactions})")
+
+    # Initialize LLM-as-Judge if requested
+    llm_judge = None
+    if args.use_llm_judge:
+        print(f"Initializing LLM-as-Judge at {args.judge_api_base}")
+        llm_judge = LLMJudge(api_base=args.judge_api_base, model=args.judge_model)
+        if not llm_judge.health_check():
+            print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")
+            return 1
+
     config = BatchConfig(batch_size=state.config.get("batch_size", 10),
         checkpoint_interval=args.checkpoint_interval, output_dir=args.output_dir, resume_from_checkpoint=True)
-    runner = BatchRunner(config, OrchestratorFactory())
+
+    def evaluator_factory(orch):
+        return Evaluator(orch, llm_judge=llm_judge, use_llm_judge=args.use_llm_judge)
+
+    runner = BatchRunner(config, OrchestratorFactory(), evaluator_factory=evaluator_factory)
     dataset_path = Path(state.config.get("dataset", ""))
     if not dataset_path.exists():
         print(f"Error: Dataset not found: {dataset_path}")
