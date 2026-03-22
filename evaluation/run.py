@@ -131,8 +131,8 @@ LLM-as-Judge:
     parser.add_argument(
         "--judge-model",
         type=str,
-        default="llama-3.1-70b-instruct",
-        help="Judge model name (default: llama-3.1-70b-instruct)",
+        default="Qwen3.5-9B-UD-Q4_K_XL.gguf",
+        help="Judge model name (default: Qwen3.5-9B-UD-Q4_K_XL.gguf)",
     )
     return parser.parse_args()
 

@@ -152,7 +152,7 @@ log_info "==============================================="
 log_info ""
 
 # Build the evaluation command (LLM-as-Judge full evaluation using new CLI)
-EVAL_CMD="python3 -u -m evaluation.cli --dataset ${DATASET} --mode full --batch-size ${BATCH_SIZE} --max-batches ${MAX_BATCHES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --output-dir evaluation/results --verbose"
+EVAL_CMD="python3 -u -m evaluation.cli --dataset ${DATASET} --mode full --batch-size ${BATCH_SIZE} --max-batches ${MAX_BATCHES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --judge-timeout 120 --output-dir evaluation/results --verbose"
 
 log_info "Command: ${EVAL_CMD}"
 log_info ""

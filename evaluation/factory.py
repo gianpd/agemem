@@ -87,6 +87,7 @@ class OrchestratorFactory:
         tools: Optional[list[dict]] = None,
         use_real_llm: bool = True,
         use_default_tools: bool = True,
+        use_learning_scorer: bool = True,
     ) -> Orchestrator:
         """Build an isolated Orchestrator for evaluation.
 
@@ -100,6 +101,8 @@ class OrchestratorFactory:
                           Set to False to require explicit mock passing.
             use_default_tools: If True (default), includes web, corpus, and introspection
                                tools matching production behavior.
+            use_learning_scorer: If True (default), creates a separate LLM client for
+                                 learning scorer using OpenRouter (requires OPENROUTER_API_KEY).
 
         Returns:
             Orchestrator instance configured for isolated evaluation.
@@ -116,6 +119,16 @@ class OrchestratorFactory:
         # Get model from factory config for consistency with LLM client
         llm_factory = LLMClientFactory()
         model = llm_factory.config.model
+
+        # Create learning scorer LLM client (separate from main LLM)
+        learning_scorer_llm = None
+        if use_learning_scorer and use_real_llm:
+            try:
+                learning_factory = LLMClientFactory.for_learning_scorer()
+                learning_scorer_llm = learning_factory.create()
+            except ValueError as e:
+                # Learning scorer will fallback to main LLM if no API key
+                pass
 
         # Create persist dir if not provided
         if persist_dir is None:
@@ -143,8 +156,12 @@ class OrchestratorFactory:
         # Create the config
         cfg = AgememConfig(**config_values)
 
-        # Build orchestrator with injected LLM client
-        orch = Orchestrator(llm=llm_client, config=cfg)
+        # Build orchestrator with injected LLM client and learning scorer
+        orch = Orchestrator(
+            llm=llm_client,
+            config=cfg,
+            learning_scorer_llm=learning_scorer_llm,
+        )
 
         # Set tools: use provided tools, or default tools if enabled
         if tools is not None:

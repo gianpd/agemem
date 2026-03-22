@@ -89,7 +89,7 @@ def get_env_with_fallback(new_name: str, old_name: str, default: str) -> str:
 
 # New generic env vars with fallback to old LLAMA_* names
 BASE_URL = get_env_with_fallback("BASE_URL", "LLAMA_HOST", "http://localhost:8080")
-BASE_MODEL = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "qwen3-9b")
+BASE_MODEL = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "Qwen3.5-9B-UD-Q4_K_XL.gguf")
 BASE_MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "2048"))
 BASE_TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.2"))
 WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))

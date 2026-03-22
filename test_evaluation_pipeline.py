@@ -88,13 +88,10 @@ def test_evaluation_with_mock_llm():
     print("TEST: Full Evaluation Pipeline with Mock LLM")
     print("=" * 60)
 
-    from evaluation.run import (
-        load_dataset,
-        run_session_replay,
-        run_question_evaluation,
-        compute_and_export_metrics,
-        generate_report,
-    )
+    from evaluation.loader import load_dataset
+    from evaluation.evaluator import Evaluator
+    from evaluation.metrics import calculate_metrics
+    from evaluation.report import ReportGenerator
     from evaluation.factory import OrchestratorFactory
     from evaluation.mock_llm import StatefulMockLLM
 
@@ -138,14 +135,22 @@ def test_evaluation_with_mock_llm():
 
         # Run session replay (lifecycle test)
         print("\n3. Running session replay...")
-        session_results = run_session_replay(orchestrator, raw_data)
+        evaluator = Evaluator(orchestrator)
+
+        # Extract sessions from raw_data
+        all_sessions = []
+        for instance in raw_data:
+            sessions = instance.get("haystack_sessions", [])
+            all_sessions.extend(sessions)
+
+        session_results = evaluator.replay_sessions(all_sessions, behavior_type="IE")
         print(f"   Replayed {len(session_results)} sessions")
         for sr in session_results:
             print(f"   - Session {sr.session_id}: {sr.turns_processed} turns, {sr.ltm_entries_added} LTM adds")
 
         # Run question evaluation (retrieval test)
         print("\n4. Running question evaluation...")
-        question_results = run_question_evaluation(orchestrator, queries, raw_data)
+        question_results = evaluator.evaluate_questions(queries, raw_data)
         print(f"   Evaluated {len(question_results)} questions")
         for qr in question_results:
             print(f"   - {qr.query_id}: correct={qr.is_correct}, abstained={qr.abstained}")
@@ -153,40 +158,30 @@ def test_evaluation_with_mock_llm():
 
         # Compute metrics
         print("\n5. Computing metrics...")
-        results = compute_and_export_metrics(
-            queries=queries,
-            question_results=question_results,
-            session_results=session_results,
-            output_dir=tmpdir / "results",
-            session_id="test_run",
-            orchestrator=orchestrator,  # Pass orchestrator for content-based matching
-        )
+        summary = calculate_metrics(queries, question_results, session_results)
 
         print(f"\n   Question Metrics:")
-        print(f"   - Total: {results['question_metrics']['total_queries']}")
-        print(f"   - Correct: {results['question_metrics']['correct']}")
-        print(f"   - Accuracy: {results['question_metrics']['accuracy']:.2%}")
-        print(f"   - Abstained: {results['question_metrics']['abstained']}")
+        print(f"   - Total: {summary.total_queries}")
+        print(f"   - Correct: {summary.correct}")
+        print(f"   - Accuracy: {summary.accuracy:.2%}")
+        print(f"   - Abstained: {summary.abstained}")
 
         print(f"\n   Retrieval Metrics:")
-        for key, value in results['retrieval'].items():
+        for key, value in summary.retrieval.to_dict().items():
             if isinstance(value, float):
                 print(f"   - {key}: {value:.4f}")
 
         print(f"\n   Session Replay Metrics:")
-        print(f"   - Total sessions: {results['replay_metrics']['total_sessions']}")
-        print(f"   - Total turns: {results['replay_metrics']['total_turns']}")
-        print(f"   - LTM entries added: {results['replay_metrics']['total_ltm_adds']}")
+        if summary.session_replay:
+            print(f"   - Total sessions: {summary.session_replay.get('total_sessions', 0)}")
+            print(f"   - Total turns: {summary.session_replay.get('total_turns', 0)}")
+            print(f"   - LTM entries added: {summary.session_replay.get('total_ltm_adds', 0)}")
 
         # Generate report
         print("\n6. Generating report...")
-        report_path = generate_report(
-            results=results,
-            question_results=question_results,
-            session_results=session_results,
-            output_dir=tmpdir / "results",
-            session_id="test_run",
-        )
+        reporter = ReportGenerator(tmpdir / "results")
+        report_path = reporter.generate_markdown(summary, "test_run")
+        reporter.generate_json(summary, "test_run")
 
         # Read and display report
         with open(report_path) as f:
@@ -229,7 +224,7 @@ def test_limited_query_run():
     print("TEST: Limited Query Run (--queries 1)")
     print("=" * 60)
 
-    from evaluation.run import load_dataset
+    from evaluation.loader import load_dataset
     from evaluation.factory import OrchestratorFactory
     from evaluation.mock_llm import StatefulMockLLM
 
