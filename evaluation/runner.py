@@ -132,7 +132,7 @@ class BatchRunner:
         total_batches = (len(entries) + batch_size - 1) // batch_size
         if max_batches > 0: total_batches = min(total_batches, max_batches)
         logger.info(f"Processing {total_batches} batches (batch_size={batch_size})")
-        all_session_results, all_question_results = [], []
+        all_session_results, all_question_results, all_evaluated_queries = [], [], []
         for batch_idx in range(total_batches):
             batch_id = starting_batch_id + batch_idx
             start_idx, end_idx = batch_idx * batch_size, min((batch_idx+1)*batch_size, len(entries))
@@ -159,6 +159,7 @@ class BatchRunner:
             self._flush_batch_results(session_id, batch_result)
             all_session_results.extend(batch_result["session_results"])
             all_question_results.extend(batch_result["question_results"])
+            all_evaluated_queries.extend(batch_queries)
             if (batch_idx + 1) % self.config.checkpoint_interval == 0:
                 state.progress.completed_batches, state.progress.completed_interactions = batch_id + 1, len(all_question_results)
                 state.progress.last_batch_id, state.aggregated_metrics = batch_id, partial_metrics.to_dict()
@@ -168,7 +169,7 @@ class BatchRunner:
         state.status, state.progress.completed_batches = "completed", starting_batch_id + total_batches
         state.progress.completed_interactions, state.aggregated_metrics = len(all_question_results), partial_metrics.to_dict()
         self.checkpoint_manager.save_checkpoint(state)
-        summary = calculate_metrics(queries, all_question_results, all_session_results)
+        summary = calculate_metrics(all_evaluated_queries, all_question_results, all_session_results)
         self.reporter.generate_markdown(summary, session_id)
         self.reporter.generate_json(summary, session_id)
         logger.info(f"Evaluation complete: {session_id}")
