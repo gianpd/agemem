@@ -32,6 +32,17 @@ SHOW_THINKING = os.getenv("SHOW_THINKING", "false").lower() == "true"
 CORPUS = Path("corpus")
 
 # ─────────────────────────────────────────────────────────────
+# CONFIG — Learning Scorer (Always OpenRouter)
+# ─────────────────────────────────────────────────────────────
+# The learning scorer and memory management MUST use OpenRouter external API
+# to ensure consistent, high-quality structured JSON output for learning feedback.
+# This is separate from the main model which can be local llama.cpp.
+LEARNING_SCORER_BASE_URL = os.getenv("LEARNING_SCORER_BASE_URL", "https://openrouter.ai/api")
+LEARNING_SCORER_API_KEY = os.getenv("LEARNING_SCORER_API_KEY", os.getenv("OPENROUTER_API_KEY", ""))
+LEARNING_SCORER_MODEL = os.getenv("LEARNING_SCORER_MODEL", "google/gemini-3-flash-preview")
+LEARNING_SCORER_ENABLED = os.getenv("LEARNING_SCORER_ENABLED", "true").lower() == "true"
+
+# ─────────────────────────────────────────────────────────────
 # CONFIG — Agent 2 & 3 (Oracle + Archivist, External API)
 # ─────────────────────────────────────────────────────────────
 ORACLE_ENABLED = os.getenv("ORACLE_ENABLED", "true").lower() == "true"
@@ -157,13 +168,7 @@ class AgememConfig:
     TRIGGER_IDLE_SECONDS: float = 0.0
     """Unused in inference-only; kept for future async extension."""
 
-    # ── Learning-score collection ─────────────────────────────────────────────
-    LEARNING_SCORE_PROMPT_EVERY_N: int = 3
-    """Ask the agent for a LearningFeedback every N turns."""
-
-    LEARNING_SCORE_THRESHOLD_IMMEDIATE: float = 0.8
-    """If agent self-reports >= this score, skip the N-turn cadence and act now."""
-
+    # ── Learning Scorer (External API) ────────────────────────────────────────
     LEARNING_SCORER_MODEL: str = "google/gemini-3-flash-preview"
     """Model used for learning score calculation and context summarization.
 
@@ -173,6 +178,22 @@ class AgememConfig:
 
     LEARNING_SCORER_MAX_TOKENS: int = 1024
     """Max tokens for learning scorer model."""
+
+    LEARNING_SCORER_BASE_URL: str = "https://openrouter.ai/api"
+    """Base URL for learning scorer API - always external (OpenRouter)."""
+
+    LEARNING_SCORER_API_KEY: str = ""
+    """API key for learning scorer - OpenRouter API key."""
+
+    LEARNING_SCORER_ENABLED: bool = True
+    """Whether the learning scorer is enabled. Disable if no OpenRouter key available."""
+
+    # ── Learning-score collection ─────────────────────────────────────────────
+    LEARNING_SCORE_PROMPT_EVERY_N: int = 3
+    """Ask the agent for a LearningFeedback every N turns."""
+
+    LEARNING_SCORE_THRESHOLD_IMMEDIATE: float = 0.8
+    """If agent self-reports >= this score, skip the N-turn cadence and act now."""
 
     # ── Memory agent ──────────────────────────────────────────────────────────
     MEMORY_AGENT_MODEL: str = "kimi-k2.5"
@@ -239,7 +260,7 @@ class AgememConfig:
     QUERY_EXPANSION_USE_NER_HINTS: bool = True
     """Inject GLiNER entities into expansion prompt for better grounding."""
 
-    QUERY_EXPANSION_TIMEOUT_MS: int = 2000
+    QUERY_EXPANSION_TIMEOUT_MS: int = 15000
     """LLM timeout in milliseconds before falling back to regex expansion."""
 
     QUERY_EXPANSION_FALLBACK_TRANSFORMS: list[str] = field(

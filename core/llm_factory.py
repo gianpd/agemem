@@ -266,7 +266,55 @@ class LLMClientFactory:
         return cls(config)
 
 
-# Module-level convenience function for backward compatibility
+    @classmethod
+    def for_learning_scorer(
+        cls,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.1,
+    ) -> "LLMClientFactory":
+        """Create factory configured for the learning scorer (always external API).
+
+        The learning scorer uses an external API (OpenRouter by default) to ensure
+        consistent, high-quality structured JSON output for learning feedback,
+        regardless of whether the main model is local or external.
+
+        Args:
+            base_url: Override base URL (default: OpenRouter API)
+            model: Override model name (default: google/gemini-3-flash-preview)
+            api_key: API key for the external service (required)
+            max_tokens: Max tokens for responses
+            temperature: Sampling temperature (default: 0.1 for deterministic output)
+
+        Returns:
+            LLMClientFactory configured for learning scorer
+
+        Raises:
+            ValueError: If no API key is provided and OPENROUTER_API_KEY env var is not set
+        """
+        import os
+
+        # Get values with environment fallbacks
+        final_base_url = base_url or os.getenv("LEARNING_SCORER_BASE_URL", "https://openrouter.ai/api")
+        final_model = model or os.getenv("LEARNING_SCORER_MODEL", "google/gemini-3-flash-preview")
+        final_api_key = api_key or os.getenv("LEARNING_SCORER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+
+        if not final_api_key:
+            raise ValueError(
+                "Learning scorer requires an API key. Set LEARNING_SCORER_API_KEY "
+                "or OPENROUTER_API_KEY environment variable."
+            )
+
+        config = LLMConfig(
+            base_url=final_base_url,
+            model=final_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            api_key=final_api_key,
+        )
+        return cls(config)
 def get_llm_client(config: Optional[LLMConfig] = None) -> LLMClient:
     """Create an LLMClient instance using default configuration.
 

@@ -20,6 +20,9 @@ Environment variables (all optional, with defaults):
     API_KEY             API key for non-local endpoints
     OPENAI_API_KEY      Fallback API key for OpenAI-compatible endpoints
 
+    OPENROUTER_API_KEY      API key for learning scorer (required for learning feedback)
+    LEARNING_SCORER_MODEL   Model for learning feedback (default: google/gemini-3-flash-preview)
+
 Deprecated (still supported for backward compatibility):
     LLAMA_HOST          Use BASE_URL instead
     LLAMA_MODEL         Use BASE_MODEL instead
@@ -157,9 +160,25 @@ def build_orchestrator() -> Orchestrator:
     """
     Wire up AgeMem-hybrid with the configured LLM provider.
     Uses LLMClientFactory for consistent client creation.
+
+    Creates TWO LLM clients:
+    1. Main LLM: for user interaction (can be local llama.cpp or external)
+    2. Learning Scorer LLM: always uses OpenRouter for high-quality structured output
     """
+    # Main LLM - from environment (can be local or external)
     factory = LLMClientFactory()
     llm = factory.create()
+
+    # Learning Scorer LLM - always OpenRouter (if enabled and API key available)
+    learning_scorer_llm: Optional[LLMClient] = None
+    try:
+        learning_factory = LLMClientFactory.for_learning_scorer()
+        learning_scorer_llm = learning_factory.create()
+        print(f"[DEBUG] Learning scorer using OpenRouter with model: {learning_factory.config.model}")
+    except ValueError as e:
+        print(f"[WARNING] Learning scorer disabled: {e}")
+        print("[WARNING] Set OPENROUTER_API_KEY environment variable to enable learning feedback.")
+        # Learning scorer will fallback to main LLM
 
     cfg = AgememConfig(
         DEFAULT_MODEL=factory.config.model,
@@ -177,7 +196,11 @@ def build_orchestrator() -> Orchestrator:
 
     # Orchestrator handles both LTM and STM persistence via config.PERSIST_DIR
     # This ensures both memories use the SAME directory (coherence)
-    orch = Orchestrator(llm=llm, config=cfg)
+    orch = Orchestrator(
+        llm=llm,
+        config=cfg,
+        learning_scorer_llm=learning_scorer_llm,
+    )
 
     # Set up tools - combine all tool definitions
     all_tools = (

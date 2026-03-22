@@ -2,19 +2,23 @@
 #
 # run_evaluation_nohup.sh
 # -----------------------
-# Launches AgeMem evaluation with nohup to survive system sleep.
+# Launches AgeMem evaluation with LLM-as-Judge using nohup to survive system sleep.
 #
 # Usage:
 #   ./run_evaluation_nohup.sh [mode] [queries] [dataset]
 #
 # Arguments:
-#   mode     - Evaluation mode: full|lifecycle|retrieval (default: full)
-#   queries  - Number of queries to evaluate, 0 = all (default: 5)
-#   dataset  - Path to dataset (default: evaluation/data/longmemeval_s_cleaned.json)
+#   mode         - Evaluation mode: full|lifecycle|retrieval (default: full)
+#   queries      - Number of queries to evaluate, 0 = all (default: 1)
+#   dataset      - Path to dataset (default: evaluation/data/longmemeval_s_cleaned.json)
+#
+# Environment Variables:
+#   JUDGE_API_BASE - URL for LLM-as-Judge API (default: http://localhost:8080/v1)
 #
 # Examples:
-#   ./run_evaluation_nohup.sh
-#   ./run_evaluation_nohup.sh full 10
+#   ./run_evaluation_nohup.sh                    # LLM-as-Judge eval, 1 query (500 msgs)
+#   ./run_evaluation_nohup.sh full 1             # Same as above (explicit)
+#   JUDGE_API_BASE=http://192.168.1.100:8080/v1 ./run_evaluation_nohup.sh
 #   ./run_evaluation_nohup.sh lifecycle 0 evaluation/data/longmemeval_m_cleaned.json
 #
 
@@ -23,8 +27,9 @@ set -euo pipefail
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-full}"
-QUERIES="${2:-5}"
+QUERIES="${2:-1}"
 DATASET="${3:-evaluation/data/longmemeval_s_cleaned.json}"
+JUDGE_API_BASE="${JUDGE_API_BASE:-http://localhost:8080/v1}"
 LOG_DIR="${SCRIPT_DIR}/evaluation/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 SESSION_ID="eval_${TIMESTAMP}"
@@ -55,12 +60,13 @@ PID_FILE="${LOG_DIR}/${SESSION_ID}.pid"
 SUMMARY_FILE="${LOG_DIR}/${SESSION_ID}_summary.txt"
 
 log_info "==============================================="
-log_info "  AgeMem Evaluation - NoHup Launcher"
+log_info "  AgeMem Evaluation - LLM-as-Judge Mode"
 log_info "==============================================="
 log_info "Session ID: ${SESSION_ID}"
 log_info "Mode: ${MODE}"
 log_info "Queries: ${QUERIES}"
 log_info "Dataset: ${DATASET}"
+log_info "Judge API: ${JUDGE_API_BASE}"
 log_info "Log file: ${LOG_FILE}"
 log_info ""
 
@@ -122,21 +128,22 @@ log_info "  Launching evaluation with nohup..."
 log_info "==============================================="
 log_info ""
 
-# Build the evaluation command
-EVAL_CMD="python3 -u evaluation/run.py --dataset ${DATASET} --mode ${MODE} --queries ${QUERIES} --output-dir evaluation/results --verbose"
+# Build the evaluation command (LLM-as-Judge full evaluation)
+EVAL_CMD="python3 -u evaluation/run.py --dataset ${DATASET} --mode ${MODE} --queries ${QUERIES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --output-dir evaluation/results --verbose"
 
 log_info "Command: ${EVAL_CMD}"
 log_info ""
 
 # Write summary file
 cat > "${SUMMARY_FILE}" << EOF
-AgeMem Evaluation Session
-=========================
+AgeMem Evaluation Session (LLM-as-Judge)
+=========================================
 Session ID: ${SESSION_ID}
 Started: $(date)
 Mode: ${MODE}
-Queries: ${QUERIES}
+Queries: ${QUERIES} (1 query ≈ 500 messages in LongMemEval)
 Dataset: ${DATASET}
+Judge API: ${JUDGE_API_BASE}
 Log File: ${LOG_FILE}
 
 Command:
