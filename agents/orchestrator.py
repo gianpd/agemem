@@ -243,11 +243,13 @@ class Orchestrator:
         self._skill_manager.load_skills()
 
         # Query expander for corpus search - use learning scorer LLM
+        # Note: Use the learning scorer's model name, not MEMORY_AGENT_MODEL,
+        # because the learning scorer LLM uses OpenRouter with a different model
         self._query_expander: Optional[QueryExpander] = None
         if getattr(self._config, 'ENABLE_QUERY_EXPANSION', False):
             self._query_expander = QueryExpander(
                 llm_client=self._learning_scorer_llm,
-                model=self._config.MEMORY_AGENT_MODEL,
+                model=self._learning_scorer_llm._model,  # Use the client's model, not config
                 n_variants=getattr(self._config, 'QUERY_EXPANSION_N_VARIANTS', 3),
                 use_ner_hints=getattr(self._config, 'QUERY_EXPANSION_USE_NER_HINTS', False),
                 timeout_ms=getattr(self._config, 'QUERY_EXPANSION_TIMEOUT_MS', 1500),

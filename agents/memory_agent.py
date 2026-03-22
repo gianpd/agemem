@@ -137,12 +137,13 @@ class MemoryAgent:
         """
         prompt = self._build_prompt(recent_messages, ltm_entries, feedback)
         try:
+            # Use LLM client's default model (don't override with config)
+            # The orchestrator passes the appropriate LLM client with its model already set
             raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=[
                     {"role": "system", "content": _get_memory_agent_system_prompt()},
                     {"role": "user",   "content": prompt},
                 ],
-                model=self._config.MEMORY_AGENT_MODEL,
                 max_tokens=self._config.MEMORY_AGENT_MAX_TOKENS,
             )
             # Log response quality

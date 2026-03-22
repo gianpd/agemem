@@ -101,9 +101,10 @@ class LearningScorer:
         ]
         print(f"[DEBUG] LearningScorer: Collecting feedback at turn {turn_index}...", flush=True)
         try:
+            # Use LLM client's default model (don't override with config)
+            # The orchestrator passes the appropriate LLM client with its model already set
             raw, metrics = self._response_handler.chat_json_with_recovery(
                 messages=probe_messages,
-                model=self._config.LEARNING_SCORER_MODEL,
                 max_tokens=self._config.LEARNING_SCORER_MAX_TOKENS,
             )
             # Handle case where LLM returns just a float instead of a dict
