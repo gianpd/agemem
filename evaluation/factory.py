@@ -30,7 +30,7 @@ def _get_default_tool_definitions() -> list[dict]:
     """
     from tools.web_tools import tool_definitions as web_tool_definitions
     return (
-        web_tool_definitions +
+        # web_tool_definitions +
         corpus_tool_definitions +
         introspection_tool_definitions
     )

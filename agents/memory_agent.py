@@ -269,7 +269,13 @@ class MemoryAgentDecision:
                 rationale=f"MemoryAgent returned {type(data).__name__}, expected dict",
             )
         ops: list[LTMOperation] = []
-        for item in data.get("ltm_operations", []):
+        ltm_ops_data = data.get("ltm_operations", [])
+        # Guard against ltm_operations being a dict instead of list
+        if isinstance(ltm_ops_data, dict):
+            ltm_ops_data = [ltm_ops_data]  # Wrap single dict in a list
+        for item in ltm_ops_data:
+            if not isinstance(item, dict):
+                continue  # skip non-dict items
             try:
                 ops.append(LTMOperation(
                     op=item["op"],
@@ -278,7 +284,7 @@ class MemoryAgentDecision:
                     tags=item.get("tags", []),
                     confidence=float(item.get("confidence", 0.8)),
                 ))
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, TypeError):
                 continue  # skip malformed op
 
         relevance: dict[int, float] = {}

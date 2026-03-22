@@ -271,6 +271,15 @@ class MemoryTriggerEngine:
 
             # Apply LTM operations
             for ltm_op in decision_obj.ltm_operations:
+                # Defensive: skip if somehow a dict made it through
+                if isinstance(ltm_op, dict):
+                    tracer.log_memory_op(
+                        op_type="LTM_SKIP",
+                        detail="Skipping malformed operation (dict instead of LTMOperation)",
+                        success=False,
+                        trigger="MEMORY_AGENT",
+                    )
+                    continue
                 if ltm_op.confidence < 0.6:
                     continue  # Skip low-confidence ops
 
