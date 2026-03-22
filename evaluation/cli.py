@@ -49,8 +49,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-llm-judge", action="store_true", help="Use LLM-as-Judge for answer evaluation")
     p.add_argument("--judge-api-base", type=str, default="http://localhost:8080/v1",
                    help="Judge server API endpoint (default: http://localhost:8080/v1)")
-    p.add_argument("--judge-model", type=str, default="llama-3.1-70b-instruct",
-                   help="Judge model name (default: llama-3.1-70b-instruct)")
+    p.add_argument("--judge-model", type=str, default="Qwen3.5-9B-UD-Q4_K_XL.gguf",
+                   help="Judge model name (default: Qwen3.5-9B-UD-Q4_K_XL.gguf)")
+    p.add_argument("--judge-timeout", type=float, default=120.0,
+                   help="Judge request timeout in seconds (default: 120.0)")
     return p.parse_args()
 
 
@@ -102,7 +104,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
     llm_judge = None
     if args.use_llm_judge:
         print(f"Initializing LLM-as-Judge at {args.judge_api_base}")
-        llm_judge = LLMJudge(api_base=args.judge_api_base, model=args.judge_model)
+        llm_judge = LLMJudge(
+            api_base=args.judge_api_base,
+            model=args.judge_model,
+            timeout=args.judge_timeout,
+        )
         if not llm_judge.health_check():
             print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")
             return 1
@@ -149,7 +155,11 @@ def resume_evaluation(session_id: str, args: argparse.Namespace) -> int:
     llm_judge = None
     if args.use_llm_judge:
         print(f"Initializing LLM-as-Judge at {args.judge_api_base}")
-        llm_judge = LLMJudge(api_base=args.judge_api_base, model=args.judge_model)
+        llm_judge = LLMJudge(
+            api_base=args.judge_api_base,
+            model=args.judge_model,
+            timeout=args.judge_timeout,
+        )
         if not llm_judge.health_check():
             print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")
             return 1

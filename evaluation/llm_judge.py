@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import httpx
+
 try:
     import backoff
     HAVE_BACKOFF = True
@@ -103,9 +105,10 @@ Does the model correctly identify the question as unanswerable? Answer with ONLY
         self,
         api_base: str = "http://localhost:8080/v1",
         api_key: str = "EMPTY",
-        model: str = "qwen3.5-9b",
+        model: str = "Qwen3.5-9B-UD-Q4_K_XL.gguf",
         temperature: float = 0.0,
         max_tokens: int = 10,
+        timeout: float = 120.0,
     ) -> None:
         """
         Initialize LLM-as-Judge.
@@ -116,6 +119,7 @@ Does the model correctly identify the question as unanswerable? Answer with ONLY
             model: Model name for the judge
             temperature: Sampling temperature (0.0 for deterministic)
             max_tokens: Maximum tokens to generate
+            timeout: Request timeout in seconds (default: 120.0)
         """
         if not HAVE_OPENAI:
             raise ImportError("openai package is required for LLMJudge. Install with: pip install openai")
@@ -123,10 +127,12 @@ Does the model correctly identify the question as unanswerable? Answer with ONLY
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = timeout
 
         self.client = OpenAI(
             api_key=api_key,
             base_url=api_base,
+            timeout=httpx.Timeout(timeout, connect=30.0),
         )
 
     def _call_judge(self, prompt: str) -> tuple[str, float]:
@@ -248,12 +254,13 @@ Does the model correctly identify the question as unanswerable? Answer with ONLY
     def health_check(self) -> bool:
         """Check if judge server is accessible."""
         try:
-            # Simple health check
+            # Simple health check with explicit timeout
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": "Say yes"}],
                 max_tokens=5,
                 temperature=0,
+                timeout=30.0,
             )
             return True
         except Exception:

@@ -141,7 +141,11 @@ class BatchRunner:
             logger.info(f"Processing batch {batch_id} (interactions {start_idx}-{end_idx})")
             batch_persist_dir = Path(tempfile.mkdtemp(prefix=f"agemem_eval_batch_{batch_id}_"))
             try:
-                build_kwargs = {"persist_dir": batch_persist_dir, "config_overrides": {"STM_TOKEN_LIMIT": 8000}}
+                build_kwargs = {
+                    "persist_dir": batch_persist_dir,
+                    "config_overrides": {"STM_TOKEN_LIMIT": 8000},
+                    "use_default_tools": False,  # No tools for evaluation to avoid timeout
+                }
                 if self.config.use_mock_llm:
                     from evaluation.mock_llm import StatefulMockLLM
                     build_kwargs["llm_client"] = StatefulMockLLM(strategy="template")

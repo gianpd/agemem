@@ -44,6 +44,7 @@ class LLMConfig:
         max_tokens: Maximum tokens for responses
         temperature: Sampling temperature
         api_key: API key (optional for local endpoints)
+        timeout: Request timeout in seconds
     """
 
     base_url: str = field(
@@ -53,7 +54,7 @@ class LLMConfig:
     )
     model: str = field(
         default_factory=lambda: _get_env_with_fallback(
-            "BASE_MODEL", "LLAMA_MODEL", "qwen3-9b"
+            "BASE_MODEL", "LLAMA_MODEL", "Qwen3.5-9B-UD-Q4_K_XL.gguf"
         )
     )
     max_tokens: int = field(
@@ -68,6 +69,11 @@ class LLMConfig:
     )
     api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
+    )
+    timeout: float = field(
+        default_factory=lambda: float(
+            os.getenv("LLM_TIMEOUT", "300.0")
+        )
     )
 
 
@@ -170,6 +176,8 @@ class LLMClientFactory:
         Use this when you need direct access to the OpenAI client
         for advanced operations not supported by LLMClient wrapper.
         """
+        import httpx
+
         api_key = self._get_api_key()
         base_url = self._normalize_base_url(self._config.base_url)
 
@@ -177,6 +185,7 @@ class LLMClientFactory:
         openai_kwargs = {
             "api_key": api_key,
             "base_url": base_url,
+            "timeout": httpx.Timeout(self._config.timeout, connect=30.0),
         }
         if "openrouter.ai" in base_url:
             openai_kwargs["default_headers"] = {
@@ -235,6 +244,7 @@ class LLMClientFactory:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         api_key: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> "LLMClientFactory":
         """Create factory configured for evaluation runs.
 
@@ -248,6 +258,7 @@ class LLMClientFactory:
             max_tokens: Override max tokens
             temperature: Override temperature
             api_key: Override API key
+            timeout: Override request timeout in seconds
 
         Returns:
             LLMClientFactory configured for evaluation
@@ -262,6 +273,7 @@ class LLMClientFactory:
             max_tokens=max_tokens if max_tokens is not None else env_config.max_tokens,
             temperature=temperature if temperature is not None else env_config.temperature,
             api_key=api_key if api_key is not None else env_config.api_key,
+            timeout=timeout if timeout is not None else env_config.timeout,
         )
         return cls(config)
 
@@ -274,6 +286,7 @@ class LLMClientFactory:
         api_key: Optional[str] = None,
         max_tokens: int = 1024,
         temperature: float = 0.1,
+        timeout: float = 60.0,
     ) -> "LLMClientFactory":
         """Create factory configured for the learning scorer (always external API).
 
@@ -287,6 +300,7 @@ class LLMClientFactory:
             api_key: API key for the external service (required)
             max_tokens: Max tokens for responses
             temperature: Sampling temperature (default: 0.1 for deterministic output)
+            timeout: Request timeout in seconds (default: 60.0)
 
         Returns:
             LLMClientFactory configured for learning scorer
@@ -313,6 +327,7 @@ class LLMClientFactory:
             max_tokens=max_tokens,
             temperature=temperature,
             api_key=final_api_key,
+            timeout=timeout,
         )
         return cls(config)
 def get_llm_client(config: Optional[LLMConfig] = None) -> LLMClient:
