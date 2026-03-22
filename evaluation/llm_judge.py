@@ -56,7 +56,7 @@ Correct Answer: {answer}
 
 Model Response: {response}
 
-Is the model response correct? Answer yes or no only.""",
+Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
 
         "MR": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.
 
@@ -66,7 +66,7 @@ Correct Answer: {answer}
 
 Model Response: {response}
 
-Is the model response correct? Answer yes or no only.""",
+Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
 
         "TR": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct.
 
@@ -76,7 +76,7 @@ Correct Answer: {answer}
 
 Model Response: {response}
 
-Is the model response correct? Answer yes or no only.""",
+Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
 
         "KU": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.
 
@@ -86,7 +86,7 @@ Correct Answer: {answer}
 
 Model Response: {response}
 
-Is the model response correct? Answer yes or no only.""",
+Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
 
         "ABS": """I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.
 
@@ -96,7 +96,7 @@ Explanation: {answer}
 
 Model Response: {response}
 
-Does the model correctly identify the question as unanswerable? Answer yes or no only.""",
+Does the model correctly identify the question as unanswerable? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
     }
 
     def __init__(
@@ -167,6 +167,42 @@ Does the model correctly identify the question as unanswerable? Answer yes or no
         response = completion.choices[0].message.content.strip()
         return response, latency_ms
 
+    def _parse_judge_response(self, raw_response: str) -> bool:
+        """
+        Parse judge response to extract yes/no answer.
+        Handles chain-of-thought models that output reasoning before answer.
+
+        Args:
+            raw_response: Raw text from judge model
+
+        Returns:
+            True if answer is yes, False otherwise
+        """
+        response_lower = raw_response.lower()
+
+        # First check: look for explicit "yes" or "no" as standalone word
+        import re
+
+        # Look for "yes" or "no" at start/end of response or after common delimiters
+        patterns = [
+            r'^\s*(yes|no)[\s\.,;!?]*$',  # standalone yes/no
+            r'[\n\r]\s*(yes|no)\s*$',  # yes/no at end of line
+            r'answer[\s]*[:\-]?\s*(yes|no)',  # "answer: yes/no"
+            r'^(yes|no)\s*[\.,;]',  # yes/no at start
+            r'[\.,;]\s*(yes|no)\s*$',  # yes/no at end after punctuation
+            r'(?:thinking|thought).*?(yes|no)',  # after thinking section
+            r'(?:conclusion|conclude).*?(yes|no)',  # after conclusion
+            r'(?:therefore|thus|so).*?(yes|no)',  # after reasoning words
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, response_lower, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1) == "yes"
+
+        # Fallback: simple substring search (original behavior)
+        return "yes" in response_lower
+
     def evaluate(
         self,
         question: str,
@@ -199,8 +235,8 @@ Does the model correctly identify the question as unanswerable? Answer yes or no
         # Call judge
         raw_response, latency_ms = self._call_judge(prompt)
 
-        # Parse yes/no response
-        is_correct = "yes" in raw_response.lower()
+        # Parse yes/no response (handle chain-of-thought models)
+        is_correct = self._parse_judge_response(raw_response)
 
         return JudgeResult(
             is_correct=is_correct,

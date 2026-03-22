@@ -3,12 +3,28 @@ evaluation/evaluators.py
 ------------------------
 Core evaluation logic for AgeMem.
 
+DEPRECATED: This module is deprecated. Use evaluation.evaluator instead.
+  - SessionReplayResult -> evaluation.evaluator.SessionReplayResult
+  - EvaluationContext -> evaluation.evaluator.EvaluationContext
+  - QuestionResult -> evaluation.evaluator.QuestionResult
+  - Evaluator -> evaluation.evaluator.Evaluator
+
 Simplified from: question_evaluator.py + session_replay.py
 
 Enhancement: Added LLM-as-Judge support alongside heuristic validation.
 """
 
 from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "evaluation.evaluators is deprecated. Use evaluation.evaluator instead.\n"
+    "  - SessionReplayResult, EvaluationContext, QuestionResult, Evaluator\n"
+    "    are all available in evaluation.evaluator",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import time
 from dataclasses import dataclass, field
@@ -325,3 +341,20 @@ class Evaluator:
             "unknown": "ABS",
         }
         return mapping.get(question_type.lower().replace("_", "-"), "IE")
+
+
+# Re-exports from new module for backward compatibility
+# The classes above are retained for compatibility; new code should use:
+from evaluation.evaluator import (
+    SessionReplayResult as _SessionReplayResult,
+    EvaluationContext as _EvaluationContext,
+    QuestionResult as _QuestionResult,
+    Evaluator as _Evaluator,
+)
+
+__all__ = [
+    "SessionReplayResult",
+    "EvaluationContext",
+    "QuestionResult",
+    "Evaluator",
+]

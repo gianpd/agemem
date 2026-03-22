@@ -134,9 +134,11 @@ class Orchestrator:
         config: AgememConfig = DEFAULT_CONFIG,
         ltm_store: Optional[LTMStore] = None,
         stm_context: Optional[STMContext] = None,
+        learning_scorer_llm: Optional[LLMClient] = None,
     ) -> None:
         self._config = config
         self._llm = llm
+        self._learning_scorer_llm = learning_scorer_llm or llm  # Fallback to main LLM if not provided
 
         # Initialize prompt registry
         self._prompt_versions: dict[str, str] = {}
@@ -179,9 +181,9 @@ class Orchestrator:
             ctx_config = ContextRetrievalConfig.from_agemem_config(config)
             self._context_retriever = ContextAwareRetriever(self._ltm, ctx_config)
 
-        # Memory agent and scorer
-        self._memory_agent = MemoryAgent(llm, config)
-        self._scorer = LearningScorer(llm, config)
+        # Memory agent and scorer - use dedicated learning scorer LLM if available
+        self._memory_agent = MemoryAgent(self._learning_scorer_llm, config)
+        self._scorer = LearningScorer(self._learning_scorer_llm, config)
         self._rules = SystemRules(config)
 
         # Response handler for enhanced error recovery
@@ -203,9 +205,10 @@ class Orchestrator:
 
         # MemoryTriggerEngine — unified entry point for memory triggers
         # Created after stm and ltm are initialized
+        # Use learning scorer LLM for memory operations
         self._trigger_engine = MemoryTriggerEngine(
             config=config,
-            llm=llm,
+            llm=self._learning_scorer_llm,
             stm=self._stm,
             ltm=self._ltm,
         )
@@ -239,11 +242,11 @@ class Orchestrator:
         self._skill_manager = SkillManager(config)
         self._skill_manager.load_skills()
 
-        # Query expander for corpus search
+        # Query expander for corpus search - use learning scorer LLM
         self._query_expander: Optional[QueryExpander] = None
         if getattr(self._config, 'ENABLE_QUERY_EXPANSION', False):
             self._query_expander = QueryExpander(
-                llm_client=self._llm,
+                llm_client=self._learning_scorer_llm,
                 model=self._config.MEMORY_AGENT_MODEL,
                 n_variants=getattr(self._config, 'QUERY_EXPANSION_N_VARIANTS', 3),
                 use_ner_hints=getattr(self._config, 'QUERY_EXPANSION_USE_NER_HINTS', False),

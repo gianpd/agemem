@@ -3,12 +3,28 @@ evaluation/run.py
 -----------------
 Simplified CLI entry point for AgeMem evaluation.
 
+DEPRECATED: This module is deprecated.
+  - load_dataset -> evaluation.loader.load_dataset
+  - generate_report -> evaluation.report.generate_report
+  - For batch evaluation, use evaluation.runner.BatchRunner
+
 Usage:
     python evaluation/run.py --dataset evaluation/data/longmemeval_s_cleaned.json --queries 5
     python evaluation/run.py --dataset evaluation/data/longmemeval_s_cleaned.json --mode lifecycle --queries 10
 """
 
 from __future__ import annotations
+
+import warnings
+
+warnings.warn(
+    "evaluation.run is deprecated. Use the new modular components instead:\n"
+    "  - load_dataset -> evaluation.loader.load_dataset\n"
+    "  - generate_report -> evaluation.report.generate_report\n"
+    "  - For batch evaluation, use evaluation.runner.BatchRunner",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import argparse
 import json
@@ -421,3 +437,16 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# Re-exports from new modules for backward compatibility
+# These functions are defined locally above; new code should import from:
+#   - evaluation.loader.load_dataset
+#   - evaluation.report.generate_report
+__all__ = [
+    "setup_logging",
+    "parse_args",
+    "load_dataset",
+    "generate_report",
+    "main",
+]
