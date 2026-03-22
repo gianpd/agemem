@@ -145,6 +145,7 @@ class BatchRunner:
                     "persist_dir": batch_persist_dir,
                     "config_overrides": {"STM_TOKEN_LIMIT": 8000},
                     "use_default_tools": False,  # No tools for evaluation to avoid timeout
+                    "use_learning_scorer": False,  # Disable learning scorer to avoid OpenRouter timeouts
                 }
                 if self.config.use_mock_llm:
                     from evaluation.mock_llm import StatefulMockLLM
