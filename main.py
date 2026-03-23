@@ -51,7 +51,6 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -67,7 +66,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.formatted_text import HTML
 
 from core.tracing import init_tracing, get_tracer, shutdown_tracing
-from core.llm_factory import LLMClientFactory
+from core.factory import OrchestratorFactory
 
 # ── Text Cleaning Utilities ─────────────────────────────────────────────────
 from cli_text_utils import clean_pasted_text, is_likely_paste
@@ -122,8 +121,6 @@ TRACE_RETENTION_DAYS = int(os.getenv("TRACE_RETENTION_DAYS", "30"))
 
 # ── Imports from AgeMem package ──────────────────────────────────────────────
 
-from core.config import AgememConfig
-from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
 
 
@@ -157,60 +154,8 @@ from memory import introspection_tool_definitions
 # ── Build Orchestrator ───────────────────────────────────────────────────────
 
 def build_orchestrator() -> Orchestrator:
-    """
-    Wire up AgeMem-hybrid with the configured LLM provider.
-    Uses LLMClientFactory for consistent client creation.
-
-    Creates TWO LLM clients:
-    1. Main LLM: for user interaction (can be local llama.cpp or external)
-    2. Learning Scorer LLM: always uses OpenRouter for high-quality structured output
-    """
-    # Main LLM - from environment (can be local or external)
-    factory = LLMClientFactory()
-    llm = factory.create()
-
-    # Learning Scorer LLM - always OpenRouter (if enabled and API key available)
-    learning_scorer_llm: Optional[LLMClient] = None
-    try:
-        learning_factory = LLMClientFactory.for_learning_scorer()
-        learning_scorer_llm = learning_factory.create()
-        print(f"[DEBUG] Learning scorer using OpenRouter with model: {learning_factory.config.model}")
-    except ValueError as e:
-        print(f"[WARNING] Learning scorer disabled: {e}")
-        print("[WARNING] Set OPENROUTER_API_KEY environment variable to enable learning feedback.")
-        # Learning scorer will fallback to main LLM
-
-    cfg = AgememConfig(
-        DEFAULT_MODEL=factory.config.model,
-        MEMORY_AGENT_MODEL=factory.config.model,
-        STM_TOKEN_LIMIT=STM_TOKEN_LIMIT,
-        STM_WARNING_THRESHOLD=0.75,
-        STM_CRITICAL_THRESHOLD=0.90,
-        LTM_PROMOTE_THRESHOLD=0.65,
-        LEARNING_SCORE_PROMPT_EVERY_N=5,
-        TRIGGER_EVERY_N_TURNS=10,
-        DEFAULT_MAX_TOKENS=factory.config.max_tokens,
-        DEFAULT_TEMPERATURE=factory.config.temperature,
-        PERSIST_DIR=PERSIST_DIR,
-    )
-
-    # Orchestrator handles both LTM and STM persistence via config.PERSIST_DIR
-    # This ensures both memories use the SAME directory (coherence)
-    orch = Orchestrator(
-        llm=llm,
-        config=cfg,
-        learning_scorer_llm=learning_scorer_llm,
-    )
-
-    # Set up tools - combine all tool definitions
-    all_tools = (
-        WEB_TOOL_DEFINITIONS +
-        CORPUS_TOOL_DEFINITIONS +
-        introspection_tool_definitions
-    )
-    orch.set_tools(all_tools)
-
-    return orch
+    """Wire up AgeMem-hybrid with production defaults."""
+    return OrchestratorFactory.build()
 
 
 # ── Rich Console Setup ───────────────────────────────────────────────────────

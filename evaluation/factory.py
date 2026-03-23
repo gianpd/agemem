@@ -1,83 +1,40 @@
 """
 evaluation/factory.py
 ─────────────────────
-Factory for building Orchestrator instances with dependency injection.
+DEPRECATED: Use core.factory.OrchestratorFactory instead.
 
-Enables isolated orchestrator creation for evaluation scenarios with
-mock LLM clients and isolated storage paths.
+This module is kept for backward compatibility only.
+All functionality has been moved to core/factory.py.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import warnings
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 
-from core.config import AgememConfig, DEFAULT_CONFIG
-from core.llm_factory import LLMClientFactory
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
-from tools.corpus import tool_definitions as corpus_tool_definitions
-from memory import introspection_tool_definitions
-from dotenv import load_dotenv
-load_dotenv()
 
 
-def _get_default_tool_definitions() -> list[dict]:
-    """Get the standard tool definitions matching production (main.py).
-
-    This function handles lazy imports for web_tools to avoid dependency issues.
-    """
-    from tools.web_tools import tool_definitions as web_tool_definitions
-    return (
-        # web_tool_definitions +
-        corpus_tool_definitions +
-        introspection_tool_definitions
-    )
-
-
-@dataclass
-class OrchestratorBuildConfig:
-    """Configuration for building an Orchestrator instance.
-
-    Attributes:
-        llm_client: Optional pre-built LLMClient (for mocking in tests).
-        persist_dir: Optional path for isolated storage (evaluation runs).
-        config_overrides: Optional dict of config values to override.
-        tools: Optional list of tool definitions to inject.
-    """
-    llm_client: Optional[LLMClient] = None
-    persist_dir: Optional[Path] = None
-    config_overrides: Optional[dict[str, Any]] = None
-    tools: Optional[list[dict]] = None
+# Re-export for backward compatibility
+from core.factory import OrchestratorBuildConfig
 
 
 class OrchestratorFactory:
-    """Factory for creating Orchestrator instances with dependency injection.
+    """DEPRECATED: Use core.factory.OrchestratorFactory instead.
 
-    Primary use case: evaluation pipelines that need isolated orchestrators
-    with mock LLMs and separate storage directories.
-
-    Example:
-        factory = OrchestratorFactory()
-        orch = factory.build_for_evaluation(
-            llm_client=mock_llm,
-            persist_dir=Path("/tmp/eval_run_1"),
-            config_overrides={"STM_TOKEN_LIMIT": 5000}
-        )
+    This class is kept for backward compatibility.
+    All functionality has been consolidated in core.factory.OrchestratorFactory.
     """
 
-    def _create_real_llm_client(self) -> LLMClient:
-        """Create a real LLM client using configured endpoint.
-
-        Uses LLMClientFactory for consistent client creation across
-        main application and evaluation pipeline.
-
-        Returns:
-            Configured LLMClient instance.
-        """
-        factory = LLMClientFactory()
-        return factory.create()
+    def __init__(self):
+        warnings.warn(
+            "evaluation.factory.OrchestratorFactory is deprecated. "
+            "Use core.factory.OrchestratorFactory instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def build_for_evaluation(
         self,
@@ -89,110 +46,46 @@ class OrchestratorFactory:
         use_default_tools: bool = True,
         use_learning_scorer: bool = True,
     ) -> Orchestrator:
-        """Build an isolated Orchestrator for evaluation.
+        """DEPRECATED: Use core.factory.OrchestratorFactory.build() instead.
 
         Args:
-            llm_client: Pre-built LLMClient. If None and use_real_llm=True, creates real client.
-            persist_dir: Directory for isolated LTM/STM storage. If None, uses temp dir.
+            llm_client: Pre-built LLMClient. If None, creates from environment.
+            persist_dir: Directory for isolated storage.
             config_overrides: Optional dict of AgememConfig field values to override.
-            tools: Optional list of tool definitions. If None and use_default_tools=True,
-                   uses the standard production tool set.
-            use_real_llm: If True and llm_client is None, creates real LLM client.
-                          Set to False to require explicit mock passing.
-            use_default_tools: If True (default), includes web, corpus, and introspection
-                               tools matching production behavior.
-            use_learning_scorer: If True (default), creates a separate LLM client for
-                                 learning scorer using OpenRouter (requires OPENROUTER_API_KEY).
+            tools: Optional list of tool definitions.
+            use_real_llm: Ignored (kept for backward compatibility).
+            use_default_tools: If True, includes standard tool set.
+            use_learning_scorer: Whether to enable learning scorer.
 
         Returns:
-            Orchestrator instance configured for isolated evaluation.
+            Orchestrator instance configured for evaluation.
         """
-        import tempfile
-
-        # Create LLM client if not provided
-        if llm_client is None:
-            if use_real_llm:
-                llm_client = self._create_real_llm_client()
-            else:
-                raise ValueError("llm_client is required when use_real_llm=False")
-
-        # Get model from factory config for consistency with LLM client
-        llm_factory = LLMClientFactory()
-        model = llm_factory.config.model
-
-        # Create learning scorer LLM client (separate from main LLM)
-        learning_scorer_llm = None
-        if use_learning_scorer and use_real_llm:
-            try:
-                learning_factory = LLMClientFactory.for_learning_scorer()
-                learning_scorer_llm = learning_factory.create()
-            except ValueError as e:
-                # Learning scorer will fallback to main LLM if no API key
-                pass
-
-        # Create persist dir if not provided
-        if persist_dir is None:
-            persist_dir = Path(tempfile.mkdtemp(prefix="agemem_eval_"))
-        config_values: dict[str, Any] = {
-            "DEFAULT_MODEL": model,  # Use same model as LLM client
-            "MEMORY_AGENT_MODEL": model,  # Consistency with main app
-            "STM_TOKEN_LIMIT": DEFAULT_CONFIG.STM_TOKEN_LIMIT,
-            "STM_WARNING_THRESHOLD": DEFAULT_CONFIG.STM_WARNING_THRESHOLD,
-            "STM_CRITICAL_THRESHOLD": DEFAULT_CONFIG.STM_CRITICAL_THRESHOLD,
-            "LTM_PROMOTE_THRESHOLD": DEFAULT_CONFIG.LTM_PROMOTE_THRESHOLD,
-            "LEARNING_SCORE_PROMPT_EVERY_N": DEFAULT_CONFIG.LEARNING_SCORE_PROMPT_EVERY_N,
-            "TRIGGER_EVERY_N_TURNS": DEFAULT_CONFIG.TRIGGER_EVERY_N_TURNS,
-            "DEFAULT_MAX_TOKENS": llm_factory.config.max_tokens,  # Use factory config
-            "DEFAULT_TEMPERATURE": llm_factory.config.temperature,  # Use factory config
-        }
-
-        # Override persist_dir for isolation
-        config_values["PERSIST_DIR"] = str(persist_dir)
-
-        # Apply any user-provided overrides
-        if config_overrides:
-            config_values.update(config_overrides)
-
-        # Create the config
-        cfg = AgememConfig(**config_values)
-
-        # Build orchestrator with injected LLM client and learning scorer
-        orch = Orchestrator(
-            llm=llm_client,
-            config=cfg,
-            learning_scorer_llm=learning_scorer_llm,
+        warnings.warn(
+            "build_for_evaluation() is deprecated. Use core.factory.OrchestratorFactory.build() "
+            "with include_web_tools=False instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
 
-        # Set tools: use provided tools, or default tools if enabled
-        if tools is not None:
-            orch.set_tools(tools)
-        elif use_default_tools:
-            orch.set_tools(_get_default_tool_definitions())
+        from core.factory import OrchestratorFactory as CoreFactory
 
-        return orch
+        return CoreFactory.build(
+            llm_client=llm_client,
+            persist_dir=persist_dir,
+            config_overrides=config_overrides,
+            tools=tools,
+            include_web_tools=False,  # Evaluation typically doesn't need web tools
+            use_learning_scorer=use_learning_scorer,
+        )
 
     def build_from_config(self, build_config: OrchestratorBuildConfig) -> Orchestrator:
-        """Build an Orchestrator from an OrchestratorBuildConfig.
-
-        Alternative entry point when you have a pre-built config object.
-
-        Args:
-            build_config: Configuration specifying how to build the orchestrator.
-
-        Returns:
-            Orchestrator instance.
-
-        Raises:
-            ValueError: If llm_client or persist_dir is not provided.
-        """
-        if build_config.llm_client is None:
-            raise ValueError("llm_client is required for OrchestratorFactory.build_from_config()")
-        if build_config.persist_dir is None:
-            raise ValueError("persist_dir is required for OrchestratorFactory.build_from_config()")
-
-        return self.build_for_evaluation(
-            llm_client=build_config.llm_client,
-            persist_dir=build_config.persist_dir,
-            config_overrides=build_config.config_overrides,
-            tools=build_config.tools,
+        """DEPRECATED: Use core.factory.OrchestratorFactory.from_config() instead."""
+        warnings.warn(
+            "build_from_config() is deprecated. Use core.factory.OrchestratorFactory.from_config() instead.",
+            DeprecationWarning,
+            stacklevel=2,
         )
+
+        from core.factory import OrchestratorFactory as CoreFactory
+
+        return CoreFactory.from_config(build_config)

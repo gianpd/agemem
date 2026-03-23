@@ -39,15 +39,8 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from core.tracing import init_tracing, get_tracer, shutdown_tracing
-from core.llm_factory import LLMClientFactory
-from core.config import AgememConfig
-from agents.llm_client import LLMClient
+from core.factory import OrchestratorFactory
 from agents.orchestrator import Orchestrator
-
-# Import tools from main.py configuration
-from tools.corpus import tool_definitions as CORPUS_TOOL_DEFINITIONS
-from tools.web_tools import tool_definitions as WEB_TOOL_DEFINITIONS
-from memory import introspection_tool_definitions
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +63,9 @@ def get_env_with_fallback(new_name: str, old_name: str, default: str) -> str:
         )
     return value
 
-# Environment configuration (same as main.py)
+# Environment configuration (for logging/metadata)
 BASE_URL = get_env_with_fallback("BASE_URL", "LLAMA_HOST", "http://localhost:8080")
 BASE_MODEL = get_env_with_fallback("BASE_MODEL", "LLAMA_MODEL", "Qwen3.5-9B-UD-Q4_K_XL.gguf")
-BASE_MAX_TOKENS = int(get_env_with_fallback("BASE_MAX_TOKENS", "LLAMA_MAX_TOKENS", "2048"))
-BASE_TEMPERATURE = float(get_env_with_fallback("BASE_TEMPERATURE", "LLAMA_TEMPERATURE", "0.2"))
-WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
-TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "4000"))
-PERSIST_DIR = os.getenv("PERSIST_DIR", "agent_memory")
 STM_TOKEN_LIMIT = int(os.getenv("STM_TOKEN_LIMIT", "6000"))
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 TRACE_LOG_DIR = os.getenv("TRACE_LOG_DIR", "logs")
@@ -260,65 +248,23 @@ class IncrementalSessionLogger:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Orchestrator Builder (Exact copy of main.py)
+# Orchestrator Builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_orchestrator(persist_dir: Optional[Path] = None) -> Orchestrator:
-    """
-    Build Orchestrator with EXACT configuration from main.py.
+    """Build Orchestrator for E2E evaluation with isolated storage.
 
-    This ensures the evaluation runs with the same memory stack,
-    learning scorer, and tool configuration as production.
+    Uses the same factory as production (main.py) but disables web tools
+    to avoid network calls during evaluation.
 
     Args:
         persist_dir: Optional override for persistence directory.
                     If None, uses PERSIST_DIR from environment.
     """
-    # Main LLM - from environment (can be local or external)
-    factory = LLMClientFactory()
-    llm = factory.create()
-
-    # Learning Scorer LLM - always OpenRouter (if enabled and API key available)
-    learning_scorer_llm: Optional[LLMClient] = None
-    try:
-        learning_factory = LLMClientFactory.for_learning_scorer()
-        learning_scorer_llm = learning_factory.create()
-        print(f"[INFO] Learning scorer using OpenRouter with model: {learning_factory.config.model}")
-    except ValueError as e:
-        print(f"[WARNING] Learning scorer disabled: {e}")
-        print("[WARNING] Set OPENROUTER_API_KEY environment variable to enable learning feedback.")
-
-    # Build config (same as main.py)
-    config = AgememConfig(
-        DEFAULT_MODEL=factory.config.model,
-        MEMORY_AGENT_MODEL=factory.config.model,
-        STM_TOKEN_LIMIT=STM_TOKEN_LIMIT,
-        STM_WARNING_THRESHOLD=0.75,
-        STM_CRITICAL_THRESHOLD=0.90,
-        LTM_PROMOTE_THRESHOLD=0.65,
-        LEARNING_SCORE_PROMPT_EVERY_N=5,
-        TRIGGER_EVERY_N_TURNS=10,
-        DEFAULT_MAX_TOKENS=factory.config.max_tokens,
-        DEFAULT_TEMPERATURE=factory.config.temperature,
-        PERSIST_DIR=str(persist_dir) if persist_dir else PERSIST_DIR,
+    return OrchestratorFactory.build(
+        persist_dir=persist_dir,
+        include_web_tools=False,  # No web tools in evaluation
     )
-
-    # Build orchestrator (same as main.py)
-    orch = Orchestrator(
-        llm=llm,
-        config=config,
-        learning_scorer_llm=learning_scorer_llm,
-    )
-
-    # Set up tools - combine all tool definitions (same as main.py)
-    all_tools = (
-        # WEB_TOOL_DEFINITIONS +
-        CORPUS_TOOL_DEFINITIONS +
-        introspection_tool_definitions
-    )
-    orch.set_tools(all_tools)
-
-    return orch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
