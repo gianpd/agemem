@@ -25,6 +25,10 @@ AgeMem is built on a different thesis:
 
 We prove this not with benchmarks on a leased datacenter cluster, but on an **8GB RTX 4060 at 36 tokens/second**.
 
+
+## The core mission
+*The core mission of Agemem is to enable all individuals to deploy and execute autonomous AI agents on standard consumer-grade hardware, providing a reliable augmentation of their personal capabilities. We adhere to a local-first architectural philosophy. Consequently, we must utilize innovative engineering and rigorous optimization to ensure these agents perform effectively within the inherent resource limitations of non-specialized hardware.*
+
 ---
 
 ## What AgeMem Is
