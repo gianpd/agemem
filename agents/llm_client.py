@@ -369,7 +369,20 @@ class LLMClient:
                     self._total_tokens_in  += getattr(usage, "prompt_tokens",     0)
                     self._total_tokens_out += getattr(usage, "completion_tokens",  0)
 
-                message = response.choices[0].message
+                # Guard against None choices (OpenRouter returns 200 with choices=None on some errors)
+                choices = getattr(response, "choices", None)
+                if not choices or len(choices) == 0:
+                    # Check for error in response
+                    error_info = getattr(response, "error", None)
+                    if error_info:
+                        raise RuntimeError(f"API returned error: {error_info}")
+                    # Log details for debugging
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"[LLM_RESPONSE] Empty choices from API. Response: {response!r}")
+                    raise RuntimeError("API returned empty choices - model may have failed to generate")
+
+                message = choices[0].message
 
                 # Check for tool calls
                 tool_calls = getattr(message, "tool_calls", None)
@@ -422,7 +435,7 @@ class LLMClient:
                         raise TextToolCallResponse(text_tool_calls[0])
 
                 # DIAGNOSTIC: Log response details for empty response debugging
-                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                finish_reason = getattr(choices[0], "finish_reason", None)
                 if not content or not content.strip():
                     # Log empty response details for debugging
                     print(f"[DEBUG] EMPTY_RESPONSE: model={model} finish_reason={finish_reason} "
@@ -510,8 +523,21 @@ class LLMClient:
                     self._total_tokens_in += prompt_tokens
                     self._total_tokens_out += completion_tokens
 
-                message = response.choices[0].message
-                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                # Guard against None choices (OpenRouter returns 200 with choices=None on some errors)
+                choices = getattr(response, "choices", None)
+                if not choices or len(choices) == 0:
+                    # Check for error in response
+                    error_info = getattr(response, "error", None)
+                    if error_info:
+                        raise RuntimeError(f"API returned error: {error_info}")
+                    # Log details for debugging
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"[LLM_RESPONSE] Empty choices from API. Response: {response!r}")
+                    raise RuntimeError("API returned empty choices - model may have failed to generate")
+
+                message = choices[0].message
+                finish_reason = getattr(choices[0], "finish_reason", None)
 
                 # Check for tool calls
                 tool_calls = getattr(message, "tool_calls", None)

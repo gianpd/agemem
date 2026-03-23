@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging(verbose: bool) -> None:
-    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 
@@ -53,6 +54,8 @@ def parse_args() -> argparse.Namespace:
                    help="Judge model name (default: Qwen3.5-9B-UD-Q4_K_XL.gguf)")
     p.add_argument("--judge-timeout", type=float, default=120.0,
                    help="Judge request timeout in seconds (default: 120.0)")
+    p.add_argument("--judge-use-json", action="store_true",
+                   help="Use JSON response format for structured judge output")
     return p.parse_args()
 
 
@@ -108,6 +111,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
             api_base=args.judge_api_base,
             model=args.judge_model,
             timeout=args.judge_timeout,
+            use_json=args.judge_use_json,
         )
         if not llm_judge.health_check():
             print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")
@@ -159,6 +163,7 @@ def resume_evaluation(session_id: str, args: argparse.Namespace) -> int:
             api_base=args.judge_api_base,
             model=args.judge_model,
             timeout=args.judge_timeout,
+            use_json=args.judge_use_json,
         )
         if not llm_judge.health_check():
             print(f"Error: LLM-as-Judge server not accessible at {args.judge_api_base}")

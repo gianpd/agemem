@@ -215,12 +215,21 @@ class IncrementalSessionLogger:
             with open(self.metadata_path, "w", encoding="utf-8") as f:
                 json.dump(self.metadata.to_dict(), f, indent=2, ensure_ascii=False)
 
-    def load_existing(self) -> int:
-        """Load existing interactions from JSONL file. Returns count."""
+    def load_existing(self) -> tuple[int, set[str]]:
+        """
+        Load existing interactions from JSONL file.
+
+        Returns:
+            Tuple of (total_interactions, completed_question_ids)
+            - total_interactions: count of all logged interactions
+            - completed_question_ids: set of question_ids that have their evaluation complete
+        """
         if not self.output_path.exists():
-            return 0
+            return 0, set()
 
         count = 0
+        completed_question_ids: set[str] = set()
+
         with open(self.output_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -229,6 +238,14 @@ class IncrementalSessionLogger:
                         data = json.loads(line)
                         self.interactions.append(InteractionRecord(**data))
                         count += 1
+
+                        # Track completed evaluation questions (not session turns)
+                        q_type = data.get("question_type", "")
+                        q_id = data.get("question_id", "")
+                        # Session turns have question_type like "session_turn_0_1"
+                        # Evaluation questions have the actual type like "single_session_user_assistant_message"
+                        if q_id and not q_type.startswith("session_turn_"):
+                            completed_question_ids.add(q_id)
                     except json.JSONDecodeError:
                         logger.warning(f"Skipping malformed line: {line[:100]}")
 
@@ -239,7 +256,7 @@ class IncrementalSessionLogger:
                 self.metadata = SessionMetadata(**meta_data)
                 self.metadata.status = "resuming"
 
-        return count
+        return count, completed_question_ids
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -406,12 +423,14 @@ class E2ERunner:
         )
 
         # Check for resume
-        start_idx = 0
+        completed_question_ids: set[str] = set()
         if self.config.resume_from:
-            existing_count = self.logger.load_existing()
+            existing_count, completed_question_ids = self.logger.load_existing()
             if existing_count > 0:
-                start_idx = existing_count
-                print(f"[INFO] Resuming from interaction {start_idx}")
+                print(f"[INFO] Found {existing_count} logged interactions")
+                print(f"[INFO] Found {len(completed_question_ids)} completed instances")
+                if completed_question_ids:
+                    print(f"[INFO] Resuming, will skip completed question_ids: {sorted(completed_question_ids)[:5]}{'...' if len(completed_question_ids) > 5 else ''}")
             else:
                 print(f"[WARNING] Resume file not found or empty: {self.config.resume_from}")
 
@@ -436,8 +455,10 @@ class E2ERunner:
                     print(f"\n[INFO] Shutdown requested, stopping at instance {idx}")
                     break
 
-                if idx < start_idx:
-                    continue  # Skip already processed
+                question_id = instance["question_id"]
+                if question_id in completed_question_ids:
+                    print(f"[INFO] Skipping already completed instance {idx}: {question_id}")
+                    continue
 
                 self._process_instance(idx, instance)
 

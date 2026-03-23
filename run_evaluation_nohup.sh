@@ -2,24 +2,31 @@
 #
 # run_evaluation_nohup.sh
 # -----------------------
-# Launches AgeMem evaluation with LLM-as-Judge using nohup to survive system sleep.
+# Launches AgeMem E2E LongMemEval evaluation using nohup to survive system sleep.
+#
+# This script runs the full end-to-end evaluation that replays complete conversation
+# sessions and logs every interaction to session.jsonl for later LLM-as-Judge evaluation.
 #
 # Usage:
-#   ./run_evaluation_nohup.sh [dataset] [max_batches] [batch_size]
+#   ./run_evaluation_nohup.sh [dataset] [limit] [target_messages] [resume_session]
 #
 # Arguments:
-#   dataset      - Dataset: s (small), m (medium), oracle (default: s)
-#   max_batches  - Max batches to run (default: 10)
-#   batch_size   - Interactions per batch (default: 50)
-#
-# Environment Variables:
-#   JUDGE_API_BASE - URL for LLM-as-Judge API (default: http://localhost:8080/v1)
+#   dataset          - Dataset: s (small), m (medium) (default: s)
+#   limit            - Number of instances to process (default: 1, ~550 messages each)
+#   target_messages  - Target total message count (0 = all, default: 0)
+#   resume_session   - Path to existing session.jsonl to resume from (optional)
 #
 # Examples:
-#   ./run_evaluation_nohup.sh                    # Small dataset, 10 batches of 50
-#   ./run_evaluation_nohup.sh s 10 50            # Same as above (explicit)
-#   ./run_evaluation_nohup.sh m 20 100           # Medium dataset, 20 batches of 100
-#   JUDGE_API_BASE=http://192.168.1.100:8080/v1 ./run_evaluation_nohup.sh
+#   ./run_evaluation_nohup.sh                    # Small dataset, 1 instance (~550 messages)
+#   ./run_evaluation_nohup.sh s 1                # Same as above (explicit)
+#   ./run_evaluation_nohup.sh s 5                # Small dataset, 5 instances (~2750 messages)
+#   ./run_evaluation_nohup.sh m 1                # Medium dataset, 1 instance
+#   ./run_evaluation_nohup.sh s 5 0              # Small dataset, 5 instances, all messages
+#   ./run_evaluation_nohup.sh s 5 0 evaluation/logs/e2e_20260323_120000/session.jsonl  # Resume
+#
+# Post-Evaluation:
+#   After completion, use the evaluation script to score responses:
+#     python3 -m evaluation.evaluate_session --session <session_dir>/session.jsonl
 #
 
 set -euo pipefail
@@ -27,12 +34,12 @@ set -euo pipefail
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET_KEY="${1:-s}"
-MAX_BATCHES="${2:-10}"
-BATCH_SIZE="${3:-50}"
-JUDGE_API_BASE="${JUDGE_API_BASE:-http://localhost:8080/v1}"
+LIMIT="${2:-1}"
+TARGET_MESSAGES="${3:-0}"
+RESUME_SESSION="${4:-}"
 LOG_DIR="${SCRIPT_DIR}/evaluation/logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-SESSION_ID="eval_${TIMESTAMP}"
+SESSION_ID="e2e_${TIMESTAMP}"
 
 # Map dataset key to path
 case "${DATASET_KEY}" in
@@ -44,10 +51,6 @@ case "${DATASET_KEY}" in
         DATASET="evaluation/data/longmemeval_m_cleaned.json"
         DATASET_NAME="medium"
         ;;
-    oracle)
-        DATASET="evaluation/data/longmemeval_oracle.json"
-        DATASET_NAME="oracle"
-        ;;
     *)
         DATASET="${DATASET_KEY}"
         DATASET_NAME="$(basename "${DATASET}" .json)"
@@ -58,6 +61,7 @@ esac
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 log_info() {
@@ -72,23 +76,30 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Create logs directory
-mkdir -p "${LOG_DIR}"
+log_highlight() {
+    echo -e "${BLUE}[NOTE]${NC} $1"
+}
 
-LOG_FILE="${LOG_DIR}/${SESSION_ID}.log"
-PID_FILE="${LOG_DIR}/${SESSION_ID}.pid"
-SUMMARY_FILE="${LOG_DIR}/${SESSION_ID}_summary.txt"
+# Create logs directory and session output directory
+mkdir -p "${LOG_DIR}"
+SESSION_OUTPUT_DIR="${LOG_DIR}/${SESSION_ID}"
+mkdir -p "${SESSION_OUTPUT_DIR}"
+
+LOG_FILE="${SESSION_OUTPUT_DIR}/run.log"
+PID_FILE="${SESSION_OUTPUT_DIR}/run.pid"
+SUMMARY_FILE="${SESSION_OUTPUT_DIR}/summary.txt"
 
 log_info "==============================================="
-log_info "  AgeMem Evaluation - LLM-as-Judge Mode"
+log_info "  AgeMem E2E LongMemEval Evaluation"
 log_info "==============================================="
 log_info "Session ID: ${SESSION_ID}"
-log_info "Mode: full"
 log_info "Dataset: ${DATASET_NAME} (${DATASET})"
-log_info "Batch size: ${BATCH_SIZE}"
-log_info "Max batches: ${MAX_BATCHES}"
-log_info "Judge API: ${JUDGE_API_BASE}"
-log_info "Log file: ${LOG_FILE}"
+log_info "Instances: ${LIMIT}"
+log_info "Target messages: ${TARGET_MESSAGES} (0=all)"
+if [[ -n "${RESUME_SESSION}" ]]; then
+    log_info "Resume from: ${RESUME_SESSION}"
+fi
+log_info "Session output: ${SESSION_OUTPUT_DIR}"
 log_info ""
 
 # Validate Python environment
@@ -114,64 +125,84 @@ if [[ ! -f "${DATASET}" ]]; then
 fi
 
 DATASET_SIZE=$(wc -c < "${DATASET}" | tr -d ' ')
-log_info "Dataset found: ${DATASET} (${DATASET_SIZE} bytes)"
+INSTANCE_COUNT=$(python3 -c "import json; print(len(json.load(open('${DATASET}'))))" 2>/dev/null || echo "?")
+log_info "Dataset found: ${DATASET}"
+log_info "  Size: ${DATASET_SIZE} bytes"
+log_info "  Total instances: ${INSTANCE_COUNT}"
 
-# Validate Python imports
+# Validate e2e module imports
 log_info "Step 4: Validating Python imports..."
-if python3 -c "from evaluation.cli import main; from evaluation.llm_judge import LLMJudge" 2>/dev/null; then
-    log_info "Python imports validated"
+if python3 -c "from evaluation.run_e2e_longmemeval import main; print('e2e module imports successfully')" 2>/dev/null; then
+    log_info "E2E module validated"
 else
-    log_warn "Some Python imports failed - this may be expected if dependencies aren't fully installed"
-fi
-
-# Quick validation test
-log_info "Step 5: Running quick validation test..."
-VALIDATION_LOG="${LOG_DIR}/${SESSION_ID}_validation.log"
-
-if python3 evaluation/quick_test.py > "${VALIDATION_LOG}" 2>&1; then
-    log_info "Validation PASSED - quick_test.py executed successfully"
-    log_info "Validation log: ${VALIDATION_LOG}"
-else
-    log_error "Validation FAILED - check ${VALIDATION_LOG} for details"
-    exit 1
-fi
-
-# Validate evaluation/cli.py can load without errors
-log_info "Step 6: Validating evaluation/cli.py..."
-if python3 -c "from evaluation.cli import main; print('cli.py imports successfully')" 2>/dev/null; then
-    log_info "cli.py validation PASSED"
-else
-    log_warn "cli.py validation had warnings - proceeding anyway"
+    log_warn "E2E module import had warnings - proceeding anyway"
 fi
 
 log_info ""
 log_info "==============================================="
 log_info "  All validations passed!"
-log_info "  Launching evaluation with nohup..."
+log_info "  Launching E2E evaluation with nohup..."
 log_info "==============================================="
 log_info ""
 
-# Build the evaluation command (LLM-as-Judge full evaluation using new CLI)
-EVAL_CMD="python3 -u -m evaluation.cli --dataset ${DATASET} --mode full --batch-size ${BATCH_SIZE} --max-batches ${MAX_BATCHES} --use-llm-judge --judge-api-base ${JUDGE_API_BASE} --judge-timeout 120 --output-dir evaluation/results --verbose"
+# Build the evaluation command
+# --output-dir is set to the session directory so session.jsonl is saved there
+EVAL_CMD="python3 -u -m evaluation.run_e2e_longmemeval --dataset ${DATASET} --limit ${LIMIT} --target-messages ${TARGET_MESSAGES} --output-dir ${SESSION_OUTPUT_DIR} --verbose"
+
+# Add resume flag if specified
+RESUME_FLAG=""
+if [[ -n "${RESUME_SESSION}" ]]; then
+    if [[ ! -f "${RESUME_SESSION}" ]]; then
+        log_error "Resume session file not found: ${RESUME_SESSION}"
+        exit 1
+    fi
+    RESUME_FLAG="--resume ${RESUME_SESSION}"
+    EVAL_CMD="${EVAL_CMD} ${RESUME_FLAG}"
+fi
 
 log_info "Command: ${EVAL_CMD}"
 log_info ""
+log_highlight "Output files that will be created:"
+log_highlight "  Session log:    ${SESSION_OUTPUT_DIR}/session.jsonl"
+log_highlight "  Metadata:       ${SESSION_OUTPUT_DIR}/session.metadata.json"
+log_highlight "  Run log:        ${LOG_FILE}"
+log_highlight ""
+log_highlight "After completion, evaluate with:"
+log_highlight "  python3 -m evaluation.evaluate_session --session ${SESSION_OUTPUT_DIR}/session.jsonl"
+log_info ""
 
 # Write summary file
+RESUME_LINE=""
+if [[ -n "${RESUME_SESSION}" ]]; then
+    RESUME_LINE="Resume from: ${RESUME_SESSION}"
+fi
+
 cat > "${SUMMARY_FILE}" << EOF
-AgeMem Evaluation Session (LLM-as-Judge)
-=========================================
+AgeMem E2E LongMemEval Session
+==============================
 Session ID: ${SESSION_ID}
 Started: $(date)
-Mode: full
 Dataset: ${DATASET_NAME} (${DATASET})
-Batch size: ${BATCH_SIZE}
-Max batches: ${MAX_BATCHES}
-Judge API: ${JUDGE_API_BASE}
-Log File: ${LOG_FILE}
+Instances: ${LIMIT}
+Target messages: ${TARGET_MESSAGES}
+${RESUME_LINE}
+Output directory: ${SESSION_OUTPUT_DIR}
 
 Command:
 ${EVAL_CMD}
+
+Output Files:
+  session.jsonl       - Complete interaction log (one JSON per line)
+  session.metadata.json - Session metadata (status, counts, config)
+  run.log             - Console output from the run
+  summary.txt         - This file
+
+Post-Evaluation Commands:
+  # View session stats
+  python3 -c "import json; d=json.load(open('${SESSION_OUTPUT_DIR}/session.metadata.json')); print(json.dumps(d, indent=2))"
+
+  # Run LLM-as-Judge evaluation (when implemented)
+  python3 -m evaluation.evaluate_session --session ${SESSION_OUTPUT_DIR}/session.jsonl --output ${SESSION_OUTPUT_DIR}/evaluation_results.json
 
 Status: RUNNING
 EOF
@@ -192,6 +223,7 @@ echo $PID > "${PID_FILE}"
 
 log_info "Process launched!"
 log_info "  PID: ${PID}"
+log_info "  Session directory: ${SESSION_OUTPUT_DIR}"
 log_info "  Log file: ${LOG_FILE}"
 log_info "  PID file: ${PID_FILE}"
 log_info "  Summary file: ${SUMMARY_FILE}"
@@ -202,6 +234,12 @@ log_info "==============================================="
 log_info ""
 log_info "View logs in real-time:"
 log_info "  tail -f ${LOG_FILE}"
+log_info ""
+log_info "Check session progress:"
+log_info "  python3 -c \"import json; d=json.load(open('${SESSION_OUTPUT_DIR}/session.metadata.json')); print(f\"Status: {d['status']}, Completed: {d['completed_interactions']}/{d['total_interactions']}\")\""
+log_info ""
+log_info "Count completed interactions:"
+log_info "  wc -l ${SESSION_OUTPUT_DIR}/session.jsonl"
 log_info ""
 log_info "Check process status:"
 log_info "  ps -p ${PID} -o pid,ppid,cmd,%cpu,%mem,etime"
@@ -221,8 +259,11 @@ log_info ""
 log_info "Check if process survived sleep:"
 log_info "  ps aux | grep ${PID} | grep -v grep"
 log_info ""
-log_info "List all evaluation sessions:"
-log_info "  ls -la ${LOG_DIR}/"
+log_info "List all E2E sessions:"
+log_info "  ls -la ${LOG_DIR}/ | grep e2e_"
+log_info ""
+log_info "Evaluate completed session:"
+log_info "  python3 -m evaluation.evaluate_session --session ${SESSION_OUTPUT_DIR}/session.jsonl"
 log_info ""
 log_info "==============================================="
 log_info ""
