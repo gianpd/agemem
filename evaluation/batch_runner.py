@@ -382,7 +382,6 @@ to disk after each batch. Supports resuming from checkpoints after
             logger.info(f"Processing batch {batch_id} (interactions {start_idx}-{end_idx})")
 
             # Create FRESH orchestrator for this batch (prevents STM accumulation)
-            logger.debug(f"Creating fresh orchestrator for batch {batch_id}")
             import tempfile
             batch_persist_dir = Path(tempfile.mkdtemp(prefix=f"agemem_eval_batch_{batch_id}_"))
             orchestrator = self.factory.build_for_evaluation(
