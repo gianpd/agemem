@@ -273,6 +273,16 @@ def format_progress_bar(ratio: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def format_duration(ms: float) -> str:
+    """Format duration in human-readable form."""
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    elif ms < 60000:
+        return f"{ms/1000:.1f}s"
+    else:
+        return f"{ms/60000:.1f}m"
+
+
 def print_diagnostics(orch: Orchestrator):
     """Print per-turn diagnostics after assistant response."""
     trace = orch.last_trace()
@@ -283,40 +293,120 @@ def print_diagnostics(orch: Orchestrator):
     ltm_count = len(orch.ltm_snapshot())
     turn = trace.turn_index
 
-    # Progress bar for STM
+    # Status bar - compact single line
     bar = format_progress_bar(stats.utilisation_ratio)
-
-    # Use dimmed color for diagnostics
     console.print()
-    diag_text = Text()
-    diag_text.append("  [")
-    diag_text.append(f"STM {bar} {stats.utilisation_ratio:.0%} ~{stats.total_tokens}tok", style="dim")
-    diag_text.append(" | ")
-    diag_text.append(f"LTM {ltm_count} entries", style="dim")
-    diag_text.append(" | ")
-    diag_text.append(f"turn {turn}", style="dim")
-    diag_text.append("]")
-    console.print(diag_text)
 
-    # Memory ops
-    for op in trace.ops_applied:
-        if op.success:
-            trigger_name = op.trigger.value if hasattr(op.trigger, 'value') else str(op.trigger)
-            console.print(f"  [dim][MEM] {op.op.value.upper()} triggered by {trigger_name} — {op.detail}[/dim]")
+    # Build status bar with color-coded STM usage
+    stm_style = "dim"
+    if stats.utilisation_ratio > 0.9:
+        stm_style = "red dim"
+    elif stats.utilisation_ratio > 0.75:
+        stm_style = "yellow dim"
 
-    # Tool calls
-    for tc in trace.tool_calls:
-        status = "OK" if tc.success else "FAIL"
-        result_preview = tc.result[:100] + "..." if len(tc.result) > 100 else tc.result
-        console.print(f"  [dim][TOOL] {tc.name} ({tc.duration_ms:.0f}ms) {status} — {result_preview}[/dim]")
+    status = Text()
+    status.append("│ ", style="dim")
+    status.append("Turn ", style="dim")
+    status.append(f"{turn}", style="cyan dim")
+    status.append(" │ ", style="dim")
+    status.append("Context ", style="dim")
+    status.append(f"{bar} ", style=stm_style)
+    status.append(f"~{stats.total_tokens}tok", style=stm_style)
+    status.append(" │ ", style="dim")
+    status.append("Memory ", style="dim")
+    status.append(f"{ltm_count}", style="green dim")
+    status.append(" entries", style="dim")
 
-    # Learning feedback
+    # Add tool count if any
+    if trace.tool_calls:
+        status.append(" │ ", style="dim")
+        tool_count = len(trace.tool_calls)
+        status.append(f"{tool_count} tool", style="blue dim")
+        if tool_count > 1:
+            status.append("s", style="blue dim")
+
+    status.append(" │", style="dim")
+    console.print(status)
+
+    # Tool calls - show in a clean, structured way
+    if trace.tool_calls:
+        console.print(Text("├─ Tools", style="dim blue"))
+        for tc in trace.tool_calls:
+            # Success/failure indicator
+            if tc.success:
+                indicator = Text("✓", style="green")
+            else:
+                indicator = Text("✗", style="red")
+
+            # Tool name with styling
+            tool_line = Text()
+            tool_line.append("│  ", style="dim")
+            tool_line.append(indicator)
+            tool_line.append(" ")
+            tool_line.append(tc.name, style="cyan")
+
+            # Arguments summary (compact)
+            if tc.arguments:
+                args_str = " ".join(f"{k}={repr(v)[:20]}" for k, v in list(tc.arguments.items())[:2])
+                if args_str:
+                    tool_line.append(f"({args_str}", style="dim")
+                    if len(tc.arguments) > 2:
+                        tool_line.append(", ...", style="dim")
+                    tool_line.append(")", style="dim")
+
+            # Duration
+            tool_line.append(" ", style="dim")
+            tool_line.append(format_duration(tc.duration_ms), style="yellow dim")
+
+            console.print(tool_line)
+
+            # Result preview (indented, on new line if long)
+            if tc.result:
+                result_text = tc.result.replace("\n", " ").strip()
+                if len(result_text) > 120:
+                    result_text = result_text[:117] + "..."
+                elif len(result_text) > 60:
+                    result_text = result_text[:57] + "..."
+
+                result_line = Text()
+                result_line.append("│    ", style="dim")
+                result_line.append("→ ", style="dim")
+                if tc.success:
+                    result_line.append(result_text, style="dim")
+                else:
+                    result_line.append(result_text, style="red dim")
+                console.print(result_line)
+
+    # Memory operations - show summary only unless notable
+    if trace.ops_applied:
+        # Group by operation type
+        op_counts = {}
+        for op in trace.ops_applied:
+            if op.success:
+                key = op.op.value.upper()
+                op_counts[key] = op_counts.get(key, 0) + 1
+
+        if op_counts:
+            mem_line = Text()
+            mem_line.append("├─ Memory: ", style="dim blue")
+            parts = []
+            for op_type, count in op_counts.items():
+                parts.append(f"{op_type}({count})")
+            mem_line.append(" ".join(parts), style="dim")
+            console.print(mem_line)
+
+    # Learning feedback - compact
     if trace.feedback:
-        console.print(f"  [dim][LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:150]}...[/dim]")
+        score = trace.feedback.score
+        score_style = "green" if score >= 0.7 else ("yellow" if score >= 0.5 else "red")
 
-    # Memory Agent rationale
-    if trace.memory_agent_rationale:
-        console.print(f"  [dim][AGENT] {trace.memory_agent_rationale[:100]}...[/dim]")
+        learn_line = Text()
+        learn_line.append("├─ Learning: ", style="dim blue")
+        learn_line.append(f"{score:.1f}", style=score_style)
+        console.print(learn_line)
+
+    # Close the diagnostics block
+    console.print(Text("└─", style="dim"))
 
 
 # ── REPL Commands ────────────────────────────────────────────────────────────
