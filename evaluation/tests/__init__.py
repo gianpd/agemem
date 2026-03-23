@@ -1,3 +1,0 @@
-"""
-Evaluation test suite package.
-"""

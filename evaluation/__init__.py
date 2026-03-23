@@ -30,17 +30,6 @@ from evaluation.metrics import (
     BehaviorMetrics,
 )
 from evaluation.factory import OrchestratorFactory
-from evaluation.batch_checkpoint import (
-    CheckpointManager,
-    CheckpointState,
-    BatchProgress,
-)
-from evaluation.batch_runner import (
-    BatchEvaluationRunner,
-    BatchConfig,
-    BatchResult,
-    PartialMetrics,
-)
 
 __version__ = "2.0.0"
 __all__ = [
@@ -53,12 +42,4 @@ __all__ = [
     "BehaviorMetrics",
     # Factory
     "OrchestratorFactory",
-    # Batch evaluation with checkpointing
-    "BatchEvaluationRunner",
-    "BatchConfig",
-    "BatchResult",
-    "PartialMetrics",
-    "CheckpointManager",
-    "CheckpointState",
-    "BatchProgress",
 ]
