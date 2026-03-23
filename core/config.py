@@ -101,7 +101,7 @@ class AgememConfig:
     """Minimum messages to keep even under critical pressure (last N turns)."""
 
     # ── LTM store ─────────────────────────────────────────────────────────────
-    LTM_MAX_ENTRIES: int = 5000
+    LTM_MAX_ENTRIES: int = 500000
     """Maximum entries in the LTM store before least-scored entries are pruned."""
 
     LTM_ENTRY_MAX_CHARS: int = 5000
@@ -196,13 +196,13 @@ class AgememConfig:
     """If agent self-reports >= this score, skip the N-turn cadence and act now."""
 
     # ── Memory agent ──────────────────────────────────────────────────────────
-    MEMORY_AGENT_MODEL: str = "kimi-k2.5"
+    MEMORY_AGENT_MODEL: str = "google/gemini-3-flash-preview"
     """Model used by the dedicated MemoryAgent.  Can differ from main model."""
 
     MEMORY_AGENT_MAX_TOKENS: int = 1024
 
     # ── LLM client defaults ───────────────────────────────────────────────────
-    DEFAULT_MODEL: str = "kimi-k2.5"
+    DEFAULT_MODEL: str = "google/gemini-3-flash-preview"
     DEFAULT_MAX_TOKENS: int = 12479
     DEFAULT_TEMPERATURE: float = 0.2
 

@@ -281,7 +281,7 @@ class SessionEvaluator:
     def _compute_metrics(self) -> SessionMetrics:
         """Compute aggregated metrics from results."""
         if not self.results:
-            return SessionMetrics(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0)
+            return SessionMetrics(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0, 0)
 
         answered = [r for r in self.results if r.judgment != "error"]
         correct = sum(1 for r in self.results if r.judgment == "correct")

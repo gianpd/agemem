@@ -58,6 +58,8 @@ from memory.context_retrieval import (
     ContextAwareRetriever,
     ContextRetrievalConfig,
 )
+from memory.ltm_introspection import assess_persistence_need, PersistenceUrgency
+
 from triggers.system_rules import SystemRules, RuleID
 from triggers.memory_trigger_engine import MemoryTriggerEngine
 from agents.llm_client import LLMClient, ToolCallResponse, TextToolCallResponse
@@ -397,6 +399,44 @@ class Orchestrator:
             )
 
         # ── 1b. Retrieve relevant LTM entries into STM ───────────────────────
+         # ── 1b. Check for explicit memory commands and persist immediately ────
+        persistence_need = assess_persistence_need(user_input)
+        if persistence_need.urgency == PersistenceUrgency.IMMEDIATE:
+            from memory.ltm_introspection import force_memory_persistence, validate_memory_commit
+            persist_result = force_memory_persistence(
+                content=persistence_need.suggested_content or user_input,
+                ltm_store=self._ltm,
+                learning_score=0.9,
+                source_turn=self._stm.current_turn(),
+                trigger="explicit_command",
+            )
+            if persist_result.success:
+                # Validate the commit
+                validation = validate_memory_commit(
+                    memory_id=persist_result.memory_id,
+                    expected_content=persistence_need.suggested_content,
+                    ltm_store=self._ltm,
+                )
+                # Notify agent via system message
+                self._stm.add_message(
+                    role="system",
+                    content=f"[MEMORY STORED] {persistence_need.suggested_content[:200]}",
+                    relevance_score=1.0,
+                    is_pinned=False,
+                )
+                tracer.log_memory_op(
+                    op_type="EXPLICIT_PERSISTENCE",
+                    detail=f"User command persisted: {persistence_need.suggested_content[:100]}...",
+                    success=True,
+                    trigger="USER_COMMAND",
+                )
+            else:
+                tracer.log_memory_op(
+                    op_type="EXPLICIT_PERSISTENCE",
+                    detail=f"Failed to persist: {persistence_need.suggested_content[:100]}...",
+                    success=False,
+                    trigger="USER_COMMAND",
+                )
         # CONTEXT_AWARE_RETRIEVAL: Use context-aware retrieval if enabled
         if self._context_retriever is not None:
             relevant = self._context_retriever.retrieve(

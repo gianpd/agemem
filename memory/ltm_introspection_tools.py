@@ -227,43 +227,43 @@ LOG_RETRIEVAL_DECISION_TOOL = {
 # Tier 5: Persistence Assurance (Memory Integrity)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ASSESS_PERSISTENCE_NEED_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "assess_persistence_need",
-        "description": (
-            "Analyze user input for explicit memory commands like 'remember that...', "
-            "'store this in your memory...', or 'save this...'. "
-            "Returns PersistenceNeed with detected patterns, urgency level, and "
-            "extracted content to persist. "
-            "CRITICAL: Call this BEFORE responding to any user message to detect "
-            "memory commands that require immediate persistence."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "user_input": {
-                    "type": "string",
-                    "description": "The user's message to analyze for memory commands."
-                },
-                "recent_context": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional recent conversation context for enrichment."
-                },
-                "check_patterns": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["explicit_remember", "explicit_forget", "implied_store", "persistence_confirm"]
-                    },
-                    "description": "Specific pattern categories to check (default: all)."
-                }
-            },
-            "required": ["user_input"]
-        }
-    }
-}
+# ASSESS_PERSISTENCE_NEED_TOOL = {
+#     "type": "function",
+#     "function": {
+#         "name": "assess_persistence_need",
+#         "description": (
+#             "Analyze user input for explicit memory commands like 'remember that...', "
+#             "'store this in your memory...', or 'save this...'. "
+#             "Returns PersistenceNeed with detected patterns, urgency level, and "
+#             "extracted content to persist. "
+#             "CRITICAL: Call this BEFORE responding to any user message to detect "
+#             "memory commands that require immediate persistence."
+#         ),
+#         "parameters": {
+#             "type": "object",
+#             "properties": {
+#                 "user_input": {
+#                     "type": "string",
+#                     "description": "The user's message to analyze for memory commands."
+#                 },
+#                 "recent_context": {
+#                     "type": "array",
+#                     "items": {"type": "string"},
+#                     "description": "Optional recent conversation context for enrichment."
+#                 },
+#                 "check_patterns": {
+#                     "type": "array",
+#                     "items": {
+#                         "type": "string",
+#                         "enum": ["explicit_remember", "explicit_forget", "implied_store", "persistence_confirm"]
+#                     },
+#                     "description": "Specific pattern categories to check (default: all)."
+#                 }
+#             },
+#             "required": ["user_input"]
+#         }
+#     }
+# }
 
 FORCE_MEMORY_PERSISTENCE_TOOL = {
     "type": "function",
@@ -384,7 +384,7 @@ introspection_tool_definitions = [
     REFINE_RETRIEVAL_TARGET_TOOL,
     LOG_RETRIEVAL_DECISION_TOOL,
     # Tier 5: Persistence Assurance
-    ASSESS_PERSISTENCE_NEED_TOOL,
+    # ASSESS_PERSISTENCE_NEED_TOOL,
     FORCE_MEMORY_PERSISTENCE_TOOL,
     VALIDATE_MEMORY_COMMIT_TOOL,
     LOG_PERSISTENCE_FAILURE_TOOL,
@@ -404,7 +404,7 @@ __all__ = [
     # Tier 4
     "LOG_RETRIEVAL_DECISION_TOOL",
     # Tier 5
-    "ASSESS_PERSISTENCE_NEED_TOOL",
+    # "ASSESS_PERSISTENCE_NEED_TOOL",
     "FORCE_MEMORY_PERSISTENCE_TOOL",
     "VALIDATE_MEMORY_COMMIT_TOOL",
     "LOG_PERSISTENCE_FAILURE_TOOL",
