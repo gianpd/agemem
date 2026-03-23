@@ -304,6 +304,12 @@ def print_diagnostics(orch: Orchestrator):
             trigger_name = op.trigger.value if hasattr(op.trigger, 'value') else str(op.trigger)
             console.print(f"  [dim][MEM] {op.op.value.upper()} triggered by {trigger_name} — {op.detail}[/dim]")
 
+    # Tool calls
+    for tc in trace.tool_calls:
+        status = "OK" if tc.success else "FAIL"
+        result_preview = tc.result[:100] + "..." if len(tc.result) > 100 else tc.result
+        console.print(f"  [dim][TOOL] {tc.name} ({tc.duration_ms:.0f}ms) {status} — {result_preview}[/dim]")
+
     # Learning feedback
     if trace.feedback:
         console.print(f"  [dim][LEARN] score={trace.feedback.score:.2f} — {trace.feedback.rationale[:150]}...[/dim]")

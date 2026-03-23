@@ -109,6 +109,16 @@ class ToolCallTracker:
 
 
 @dataclass
+class ToolCallTrace:
+    """Trace of a single tool call."""
+    name: str
+    arguments: dict
+    result: str
+    duration_ms: float
+    success: bool
+
+
+@dataclass
 class TurnTrace:
     """
     Full audit record for one conversation turn.
@@ -120,6 +130,7 @@ class TurnTrace:
     stm_stats_before: ContextStats
     stm_stats_after: ContextStats
     ops_applied: list[MemoryOpResult] = field(default_factory=list)
+    tool_calls: list[ToolCallTrace] = field(default_factory=list)
     feedback: Optional[LearningFeedback] = None
     memory_agent_rationale: str = ""
     latency_ms: float = 0.0
@@ -438,6 +449,7 @@ class Orchestrator:
         assistant_text = ""
         max_tool_iterations = 30  # Prevent infinite tool call loops
         tool_iterations = 0
+        turn_tool_calls: list[ToolCallTrace] = []  # Track tool calls for this turn
 
         while tool_iterations < max_tool_iterations:
             messages = self._stm.openai_messages()
@@ -513,6 +525,15 @@ class Orchestrator:
                 result = self._tool_executor.execute(tool_name, tool_args)
                 tool_duration = (time.time() - tool_call_start) * 1000
 
+                # Track tool call for TurnTrace
+                turn_tool_calls.append(ToolCallTrace(
+                    name=tool_name,
+                    arguments=tool_args,
+                    result=result.output[:500] if result.output else "",
+                    duration_ms=result.duration_ms,
+                    success=result.success,
+                ))
+
                 # Handle STM injection for retrieval
                 if result.should_inject_to_stm and result.stm_injection_data:
                     self._stm.retrieve(result.stm_injection_data, trigger=TriggerKind.MAIN_AGENT)
@@ -579,6 +600,15 @@ class Orchestrator:
 
                 # Execute via ToolExecutor
                 result = self._tool_executor.execute(tool_name, tool_args)
+
+                # Track tool call for TurnTrace
+                turn_tool_calls.append(ToolCallTrace(
+                    name=tool_name,
+                    arguments=tool_args,
+                    result=result.output[:500] if result.output else "",
+                    duration_ms=result.duration_ms,
+                    success=result.success,
+                ))
 
                 # Handle STM injection for retrieval
                 if result.should_inject_to_stm and result.stm_injection_data:
@@ -660,6 +690,7 @@ class Orchestrator:
             stm_stats_before=stats_before,
             stm_stats_after=stats_after,
             ops_applied=ops,
+            tool_calls=turn_tool_calls,
             feedback=feedback,
             memory_agent_rationale=ma_rationale,
             latency_ms=(time.time() - t0) * 1000,
