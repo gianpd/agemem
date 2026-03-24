@@ -61,6 +61,10 @@ UWOT_API_KEY = os.getenv("UWOT_API_KEY", "")
 FETCH_ONLY_MENTIONED_URLS = os.getenv("FETCH_ONLY_MENTIONED_URLS", "true").lower() == "true"
 UWOT_API_KEY = os.getenv("UWOT_API_KEY")
 
+# Browser automation config
+BROWSER_CDP_ENDPOINT = os.getenv("BROWSER_CDP_ENDPOINT", "")  # e.g., "http://localhost:9222"
+BROWSER_CONNECT_OVER_CDP = os.getenv("BROWSER_CONNECT_OVER_CDP", "false").lower() == "true"
+
 
 SLIDING_WINDOW_TURNS = 4
 SUMMARY_MAX_TOKENS = 2400

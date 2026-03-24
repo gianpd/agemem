@@ -301,6 +301,9 @@ LEGAL_BUCKETS: Dict[str, List[str]] = {
     "people":        [],
     "orgs":          [],
     "dates":         [],
+    "people":        [],
+    "orgs":          [],
+    "dates":         [],
     "values":        [],
     "locations":     [],
     "parties":       [],
@@ -319,6 +322,99 @@ LEGAL_BUCKETS: Dict[str, List[str]] = {
     "liabilities":   [],
     "remedies":      [],
     "obligations":   [],
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Domain: Generic / Universal (Unknown Document Types)
+# ═══════════════════════════════════════════════════════════════
+GENERIC_LABELS: List[str] = [
+    # ── Core Entities (Universal) ───────────────────────────────
+    "person",                   # People names
+    "organization",             # Companies, institutions
+    "location",               # Places, addresses
+    "date",                 # Dates, times
+    "email",                # Email addresses
+    "phone number",         # Phone numbers
+    "url",                  # Web addresses
+    "address",              # Physical addresses
+
+    # ── Numeric/Financial ────────────────────────────────────────
+    "number",               # Generic numbers
+    "monetary value",         # Money amounts
+    "percentage",           # Percentages
+    "quantity",             # Measurements
+    "unit",               # Units (kg, miles, etc.)
+
+    # ── Document Structure ────────────────────────────────────
+    "section",              # Document sections
+    "heading",            # Headers, titles
+    "reference number",   # ID codes, references
+    "version",            # Version numbers
+
+    # ── Content Types ────────────────────────────────────
+    "product",            # Products, items
+    "service",            # Services offered
+    "event",              # Events, meetings
+    "technology",         # Tech terms
+    "file format",        # PDF, DOC, etc.
+]
+
+GENERIC_LABEL_MAP: Dict[str, str] = {
+    # Core
+    "person":               "people",
+    "organization":         "organizations",
+    "location":           "locations",
+    "date":               "dates",
+    "email":              "emails",
+    "phone number":       "phones",
+    "url":                "urls",
+    "address":            "addresses",
+
+    # Numeric
+    "number":             "numbers",
+    "monetary value":     "values",
+    "percentage":         "percentages",
+    "quantity":           "quantities",
+    "unit":               "units",
+
+    # Document
+    "section":            "sections",
+    "heading":            "headings",
+    "reference number":   "references",
+    "version":            "versions",
+
+    # Content
+    "product":            "products",
+    "service":            "services",
+    "event":              "events",
+    "technology":         "technologies",
+    "file format":        "formats",
+}
+
+GENERIC_BUCKETS: Dict[str, List[str]] = {
+    "people":         [],
+    "organizations":    [],
+    "locations":      [],
+    "dates":          [],
+    "emails":         [],
+    "phones":         [],
+    "urls":           [],
+    "addresses":      [],
+    "numbers":        [],
+    "values":         [],
+    "percentages":    [],
+    "quantities":     [],
+    "units":          [],
+    "sections":       [],
+    "headings":       [],
+    "references":     [],
+    "versions":       [],
+    "products":       [],
+    "services":       [],
+    "events":         [],
+    "technologies":   [],
+    "formats":        [],
 }
 
 
@@ -343,6 +439,12 @@ BUILTIN_LABEL_SETS: Dict[str, Dict[str, Any]] = {
         "label_map": LEGAL_LABEL_MAP,
         "buckets": LEGAL_BUCKETS,
         "description": "Legal documents and contracts",
+    },
+    "generic": {
+        "labels": GENERIC_LABELS,
+        "label_map": GENERIC_LABEL_MAP,
+        "buckets": GENERIC_BUCKETS,
+        "description": "Generic documents - unknown or mixed content types",
     },
 }
 

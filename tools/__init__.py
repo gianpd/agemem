@@ -32,13 +32,25 @@ def __getattr__(name):
         'fetch_url_tool',
         'write_file',
         'ingest_document',
+        'browser_navigate',
+        'browser_navigate_tool',
         'register_conversation_urls',
         'validate_url_for_fetch',
         'web_tool_definitions',
     }
+    config_exports = {
+        'BROWSER_CDP_ENDPOINT',
+        'BROWSER_CONNECT_OVER_CDP',
+    }
     if name in web_exports:
         from . import web_tools
         return getattr(web_tools, name)
+    if name in config_exports:
+        from core.config import BROWSER_CDP_ENDPOINT, BROWSER_CONNECT_OVER_CDP
+        if name == 'BROWSER_CDP_ENDPOINT':
+            return BROWSER_CDP_ENDPOINT
+        if name == 'BROWSER_CONNECT_OVER_CDP':
+            return BROWSER_CONNECT_OVER_CDP
     raise AttributeError(f"module 'tools' has no attribute '{name}'")
 
 
@@ -49,9 +61,14 @@ __all__ = [
     "fetch_url_tool",
     "write_file",
     "ingest_document",
+    "browser_navigate",
+    "browser_navigate_tool",
     "register_conversation_urls",
     "validate_url_for_fetch",
     "web_tool_definitions",
+    # Browser CDP config
+    "BROWSER_CDP_ENDPOINT",
+    "BROWSER_CONNECT_OVER_CDP",
     # Corpus tools
     "list_documents",
     "search_metadata",

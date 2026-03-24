@@ -42,6 +42,26 @@ except ImportError:
     # When running as script directly
     from gliner_labels import get_builtin_labels, list_builtin_labels, BUILTIN_LABEL_SETS
 
+# Import post-processing pipeline
+try:
+    from .entity_post_processor import (
+        EntityPostProcessor,
+        PostProcessorConfig,
+        DEFAULT_CONFIG,
+        CONSERVATIVE_CONFIG,
+        AGGRESSIVE_CONFIG,
+        create_processor,
+    )
+except ImportError:
+    from entity_post_processor import (
+        EntityPostProcessor,
+        PostProcessorConfig,
+        DEFAULT_CONFIG,
+        CONSERVATIVE_CONFIG,
+        AGGRESSIVE_CONFIG,
+        create_processor,
+    )
+
 # Try to import torch for GPU memory management
 try:
     import torch
@@ -477,9 +497,12 @@ def _find_segment_offset(text: str, segment: str, start_search: int = 0) -> int:
 
 
 def extract_entities(
-    text: str, 
+    text: str,
     label_config: Optional[Dict[str, Any]] = None,
-    return_positions: bool = False
+    return_positions: bool = False,
+    post_processor: Optional[Any] = None,
+    enable_multiscale: bool = False,
+    secondary_threshold: float = 0.25,
 ) -> Dict[str, List[str]] | Dict[str, List[Dict[str, Any]]]:
     """
     Extract named entities from text using GLiNER with the configured labels.
@@ -487,10 +510,16 @@ def extract_entities(
     Uses sentence-aware splitting to avoid truncation at GLiNER's 384 token limit.
     Entity spans are re-mapped to original text offsets when return_positions=True.
 
+    Supports multi-scale extraction (primary + secondary pass) for better recall
+    on generic documents, and configurable post-processing filters.
+
     Args:
         text: The text to analyze
         label_config: Optional label configuration (uses current if not provided)
         return_positions: If True, return entities with their positions in original text
+        post_processor: Optional EntityPostProcessor for filtering/validation
+        enable_multiscale: If True, perform secondary extraction at lower threshold
+        secondary_threshold: Threshold for secondary extraction pass
 
     Returns:
         Dictionary of entity buckets with extracted values (or entities with positions)
@@ -499,13 +528,16 @@ def extract_entities(
     labels = config["labels"]
     label_map = config["label_map"]
     buckets = {k: set() for k in config["buckets"].keys()}
-    
+
     # For position tracking
     entities_with_positions: Dict[str, List[Dict[str, Any]]] = {k: [] for k in config["buckets"].keys()}
 
+    # Primary extraction
+    primary_entities: Dict[str, List[Dict[str, Any]]] = {k: [] for k in config["buckets"].keys()}
+
     if NER_BACKEND == "gliner" and _ner is not None:
         segments = _split_text_for_gliner(text)
-        
+
         # Track position in original text for re-mapping
         current_offset = 0
 
@@ -517,28 +549,79 @@ def extract_entities(
             segment_offset = _find_segment_offset(text, segment, current_offset)
             current_offset = segment_offset + len(segment)
 
+            # Primary extraction at standard threshold
             hits = _ner.predict_entities(segment, labels, threshold=0.4)
             for h in hits:
                 bucket = label_map.get(h["label"])
                 if bucket and len(h["text"].strip()) > 2:
                     entity_text = h["text"].strip()
                     buckets[bucket].add(entity_text)
-                    
+
+                    entity_data = {
+                        "text": entity_text,
+                        "label": h["label"],
+                        "start": segment_offset + h.get("start", 0),
+                        "end": segment_offset + h.get("end", len(entity_text)),
+                        "score": h.get("score", 0.0)
+                    }
+
                     # Re-map entity position to original text
                     if return_positions:
-                        # Adjust start/end positions to original text offset
-                        original_start = segment_offset + h.get("start", 0)
-                        original_end = segment_offset + h.get("end", len(entity_text))
-                        
-                        entities_with_positions[bucket].append({
-                            "text": entity_text,
-                            "label": h["label"],
-                            "start": original_start,
-                            "end": original_end,
-                            "score": h.get("score", 0.0)
-                        })
+                        entities_with_positions[bucket].append(entity_data)
 
-    # Convert sets to sorted lists and cap each bucket
+                    primary_entities[bucket].append(entity_data)
+
+        # Multi-scale: Secondary extraction for generic documents
+        secondary_entities: Dict[str, List[Dict[str, Any]]] = {k: [] for k in config["buckets"].keys()}
+        if enable_multiscale:
+            print(f"      [multi-scale] Running secondary extraction at threshold {secondary_threshold}...")
+            current_offset = 0
+
+            for i, segment in enumerate(segments):
+                segment_offset = _find_segment_offset(text, segment, current_offset)
+                current_offset = segment_offset + len(segment)
+
+                hits = _ner.predict_entities(segment, labels, threshold=secondary_threshold)
+                for h in hits:
+                    bucket = label_map.get(h["label"])
+                    if bucket and len(h["text"].strip()) > 2:
+                        entity_text = h["text"].strip()
+                        # Only add if not already in primary (avoid duplicates early)
+                        if entity_text.lower() not in {e["text"].lower() for e in primary_entities[bucket]}:
+                            entity_data = {
+                                "text": entity_text,
+                                "label": h["label"],
+                                "start": segment_offset + h.get("start", 0),
+                                "end": segment_offset + h.get("end", len(entity_text)),
+                                "score": h.get("score", 0.0)
+                            }
+                            secondary_entities[bucket].append(entity_data)
+
+        # Apply post-processing if configured
+        if post_processor is not None:
+            if enable_multiscale:
+                # Multi-scale processing merges primary and secondary
+                processed = post_processor.process_multiscale(
+                    primary_entities,
+                    secondary_entities,
+                    label_map
+                )
+            else:
+                # Single-pass processing
+                processed = post_processor.process(primary_entities, label_map)
+
+            # Convert back to expected format
+            if return_positions:
+                return processed
+            else:
+                # Simple text lists for backwards compatibility
+                return {
+                    bucket: sorted(set(e["text"] for e in bucket_entities))
+                    for bucket, bucket_entities in processed.items()
+                    if bucket_entities
+                }
+
+    # Convert sets to sorted lists and cap each bucket (no post-processing path)
     if return_positions:
         # Return entities with positions, deduplicated by text
         result = {}
@@ -547,7 +630,7 @@ def extract_entities(
                 # Deduplicate by text, keeping highest score
                 seen = {}
                 for entity in entities:
-                    text_key = entity["text"]
+                    text_key = entity["text"].lower()
                     if text_key not in seen or entity["score"] > seen[text_key]["score"]:
                         seen[text_key] = entity
                 result[bucket] = sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:15]
@@ -564,6 +647,69 @@ def detect_doc_date(text: str, entities: Dict[str, List[str]]) -> Optional[str]:
     if entities.get("dates"):
         return entities["dates"][0]
     return None
+
+
+def detect_document_type(text: str, sample_size: int = 5000) -> str:
+    """
+    Auto-detect document type from content signals.
+
+    Analyzes a sample of the text to determine the most likely
+    document domain, suggesting the appropriate label set.
+
+    Args:
+        text: Document text to analyze
+        sample_size: Number of characters to sample (default: 5000)
+
+    Returns:
+        Suggested label set name (edilizia, research, legal, generic, etc.)
+    """
+    sample = text[:sample_size].lower()
+
+    # Signal patterns for each domain
+    signals = {
+        'edilizia': [
+            'cig', 'cup', 'appalto', 'gara', 'committente', 'affidamento',
+            'procedura negoziata', 'scadente', 'importo a base d\'asta',
+            'direttore lavori', 'ingegnere', 'geometra', 'architetto',
+            'imprese concorrenti', 'offerta', 'aggiudicazione',
+            'dlgs 81/2008', 'sicurezza cantieri', 'psc', 'pos',
+        ],
+        'research': [
+            'abstract', 'introduction', 'methodology', 'results',
+            'conclusion', 'references', 'et al', 'doi:', 'arxiv',
+            'experiment', 'dataset', 'neural', 'model', 'training',
+            'accuracy', 'f1-score', 'benchmark', 'state-of-the-art',
+        ],
+        'legal': [
+            'contract', 'agreement', 'clause', 'jurisdiction',
+            'plaintiff', 'defendant', 'court', 'case no',
+            'pursuant to', 'hereby', 'witnesseth', 'notwithstanding',
+            'liable', 'indemnify', 'warrant', 'covenant',
+        ],
+        'finance': [
+            'revenue', 'earnings', 'fiscal year', 'quarterly',
+            'balance sheet', 'cash flow', 'ebitda', 'eps',
+            'stock', 'ticker', 'dividend', 'sec filing',
+            '10-k', '10-q', 'annual report', 'investor',
+        ],
+        'medical': [
+            'diagnosis', 'patient', 'symptom', 'prescription',
+            'medication', 'dosage', 'treatment', 'prognosis',
+            'clinical', 'pathology', 'laboratory', 'vital signs',
+            'allergy', 'contraindication', 'mg', 'ml', 'mcg',
+        ],
+    }
+
+    scores = {}
+    for doc_type, patterns in signals.items():
+        score = sum(1 for pattern in patterns if pattern in sample)
+        scores[doc_type] = score
+
+    # Return the highest scoring type, or generic if no strong signals
+    best_type = max(scores, key=scores.get)
+    if scores[best_type] >= 3:  # Require at least 3 matches
+        return best_type
+    return 'generic'
 
 
 def _guess_title(markdown: str, fallback: str) -> str:
@@ -772,6 +918,9 @@ def ingest(
     force_ocr: bool = False,
     fast_mode: bool = True,
     disable_tables: bool = False,
+    post_process: bool = True,
+    post_process_config: str = "default",
+    enable_multiscale: Optional[bool] = None,
 ) -> str:
     """
     Ingest a PDF document into the corpus.
@@ -779,11 +928,16 @@ def ingest(
     Args:
         pdf_path: Path to the PDF file
         doc_type: Document type/category
-        labels_arg: Label configuration (built-in name or path:key)
+        labels_arg: Label configuration (built-in name or path:key).
+                  Use 'generic' for unknown document types.
         auto_detect_ocr: Automatically detect if PDF needs OCR
         force_ocr: Force OCR on (for known scanned PDFs)
         fast_mode: Use fast table mode (default: True)
         disable_tables: Disable table structure recognition (fastest)
+        post_process: Apply entity post-processing pipeline
+        post_process_config: Post-processor config ("default", "conservative", "aggressive")
+        enable_multiscale: Enable multi-scale extraction for better recall.
+                          Auto-enabled for 'generic' labels if not specified.
 
     Returns:
         Document ID string
@@ -801,6 +955,13 @@ def ingest(
     print(f"      Using: {_current_label_config['description']}")
     print(f"      Labels: {len(_current_label_config['labels'])} entity types")
 
+    # Auto-enable multi-scale for generic documents
+    is_generic = labels_arg == "generic" or _current_label_config.get("description", "").lower().startswith("generic")
+    if enable_multiscale is None:
+        enable_multiscale = is_generic
+        if enable_multiscale:
+            print(f"      [info] Auto-enabling multi-scale extraction for generic document")
+
     print(f"[1/4] Parsing    {pdf.name}  (docling) ...")
     markdown, sections = parse_pdf(
         pdf,
@@ -811,7 +972,22 @@ def ingest(
     )
 
     print(f"[2/4] Extracting entities  ({NER_BACKEND}) ...")
-    entities = extract_entities(markdown)
+
+    # Setup post-processor
+    processor = None
+    if post_process:
+        try:
+            processor = create_processor(post_process_config)
+            print(f"      [post-process] Using {post_process_config} config")
+        except Exception as e:
+            print(f"      [warn] Failed to create post-processor: {e}")
+
+    entities = extract_entities(
+        markdown,
+        post_processor=processor,
+        enable_multiscale=enable_multiscale,
+        secondary_threshold=0.25 if is_generic else 0.3,
+    )
 
     print(f"[3/4] Writing markdown ...")
     out_path = write_document(pdf, markdown, sections, entities, doc_type, _current_label_config)
@@ -940,14 +1116,17 @@ Examples:
   %(prog)s contracts/acme.pdf contract --labels legal
   %(prog)s papers/ml_paper.pdf research --labels research
   %(prog)s bandi/gara.pdf bando --labels edilizia
+  %(prog)s unknown.pdf document --labels generic     # unknown document type
   %(prog)s doc.pdf custom --labels /path/to/my_labels.yaml:medical
   %(prog)s scanned.pdf document --ocr          # force OCR for scanned PDFs
   %(prog)s documents/                          # ingest all PDFs and .md files in directory
+  %(prog)s mixed_docs/ --labels generic --multiscale  # use multi-scale extraction
 
 Built-in label sets:
   edilizia  - Italian construction and public tenders
   research  - Scientific papers and academic publications
   legal     - Legal documents and contracts
+  generic   - Unknown/mixed document types (universal entities)
 
 For custom labels, create a YAML file with the same structure as
 ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
@@ -966,9 +1145,37 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         default=None,
         help=(
             "Label configuration to use. Can be: "
-            "(1) a built-in name (edilizia, research, legal), "
+            "(1) a built-in name (edilizia, research, legal, generic), "
             "(2) 'path/to/config.yaml:key' for custom labels"
         )
+    )
+    parser.add_argument(
+        "--no-post-process",
+        dest="post_process",
+        action="store_false",
+        default=True,
+        help="Disable entity post-processing pipeline"
+    )
+    parser.add_argument(
+        "--post-process-config",
+        dest="post_process_config",
+        default="default",
+        choices=["default", "conservative", "aggressive"],
+        help="Post-processing configuration (default: default)"
+    )
+    parser.add_argument(
+        "--multiscale",
+        dest="enable_multiscale",
+        action="store_true",
+        default=None,
+        help="Enable multi-scale extraction (auto-enabled for generic labels)"
+    )
+    parser.add_argument(
+        "--no-multiscale",
+        dest="enable_multiscale",
+        action="store_false",
+        default=None,
+        help="Disable multi-scale extraction"
     )
     parser.add_argument(
         "--ocr",
@@ -1056,6 +1263,9 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
             force_ocr=args.force_ocr,
             fast_mode=not args.accurate_tables,
             disable_tables=args.disable_tables,
+            post_process=args.post_process,
+            post_process_config=args.post_process_config,
+            enable_multiscale=args.enable_multiscale,
         )
 
 

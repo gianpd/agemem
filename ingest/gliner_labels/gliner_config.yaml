@@ -454,6 +454,89 @@ finance:
     - account_types
 
 # ═══════════════════════════════════════════════════════════════
+# Built-in: Generic (Unknown/Mixed Document Types)
+# ═══════════════════════════════════════════════════════════════
+generic:
+  description: "Generic documents - unknown or mixed content types"
+  labels:
+    # Core Entities
+    - person
+    - organization
+    - location
+    - date
+    - email
+    - phone number
+    - url
+    - address
+    # Numeric/Financial
+    - number
+    - monetary value
+    - percentage
+    - quantity
+    - unit
+    # Document Structure
+    - section
+    - heading
+    - reference number
+    - version
+    # Content Types
+    - product
+    - service
+    - event
+    - technology
+    - file format
+  label_map:
+    # Core
+    person: people
+    organization: organizations
+    location: locations
+    date: dates
+    email: emails
+    phone number: phones
+    url: urls
+    address: addresses
+    # Numeric
+    number: numbers
+    monetary value: values
+    percentage: percentages
+    quantity: quantities
+    unit: units
+    # Document
+    section: sections
+    heading: headings
+    reference number: references
+    version: versions
+    # Content
+    product: products
+    service: services
+    event: events
+    technology: technologies
+    file format: formats
+  buckets:
+    - people
+    - organizations
+    - locations
+    - dates
+    - emails
+    - phones
+    - urls
+    - addresses
+    - numbers
+    - values
+    - percentages
+    - quantities
+    - units
+    - sections
+    - headings
+    - references
+    - versions
+    - products
+    - services
+    - events
+    - technologies
+    - formats
+
+# ═══════════════════════════════════════════════════════════════
 # Custom: Example - Medical Documents
 # ═══════════════════════════════════════════════════════════════
 medical:
