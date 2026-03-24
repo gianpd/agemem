@@ -11,6 +11,8 @@ import re
 import unicodedata
 import socket
 import ipaddress
+import asyncio
+import time
 from pathlib import Path
 from typing import Optional, Set, List
 from urllib.parse import urlparse, urlunparse
@@ -21,10 +23,19 @@ from core.config import (
     UWOT_SEARCH_ENABLED,
     UWOT_SEARCH_SERVICE_URL,
     FETCH_ONLY_MENTIONED_URLS,
+    BROWSER_CDP_ENDPOINT,
+    BROWSER_CONNECT_OVER_CDP,
 )
 
+# Optional Playwright import - graceful degradation if not installed
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 # Security configuration for fetch_url
-FETCH_URL_MAX_CONTENT_LENGTH = 1_500_000  # 1.5MB max
+FETCH_URL_MAX_CONTENT_LENGTH = 5_500_000  # 5.5MB max
 FETCH_URL_TIMEOUT_SECONDS = 30
 FETCH_URL_MAX_REDIRECTS = 3
 
@@ -184,6 +195,67 @@ tool_definitions = [
                     }
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": (
+                "Navigate to a URL using Playwright browser automation and capture a screenshot. "
+                "Useful for: verifying page content visually, checking UI state, capturing proof of actions, "
+                "debugging web issues, or archiving page state. "
+                "Supports connecting to an existing browser via CDP (Chrome DevTools Protocol) - "
+                "set BROWSER_CDP_ENDPOINT=http://localhost:9222 to use your logged-in browser session. "
+                "Returns the path to the saved screenshot. "
+                "Requires playwright to be installed: pip install playwright && playwright install chromium"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to navigate to. Must be HTTPS. Should be from conversation context or web_search results."
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Short description of what you're doing (used in filename). Example: 'check pricing page'",
+                        "default": "navigate"
+                    },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "Capture full page screenshot (default: true). If false, captures viewport only.",
+                        "default": True
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Additional wait time in milliseconds after page load for JS-heavy pages (default: 1000)",
+                        "default": 1000
+                    },
+                    "wait_until": {
+                        "type": "string",
+                        "description": "When to consider navigation complete: 'networkidle' (default), 'domcontentloaded', 'load', or 'commit'. Use 'domcontentloaded' for JS-heavy sites that timeout.",
+                        "default": "networkidle",
+                        "enum": ["networkidle", "domcontentloaded", "load", "commit"]
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Directory to save screenshots (default: 'screenshots').",
+                        "default": "screenshots"
+                    },
+                    "headless": {
+                        "type": "boolean",
+                        "description": "Run browser in headless mode (default: true). Set false to see browser window. Ignored when using CDP.",
+                        "default": True
+                    },
+                    "use_cdp": {
+                        "type": "boolean",
+                        "description": "Connect to existing browser via CDP instead of launching new. Auto-enabled if BROWSER_CDP_ENDPOINT is set.",
+                        "default": False
+                    }
+                },
+                "required": ["url"]
             }
         }
     }
@@ -1165,4 +1237,251 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
 
     else:
         return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+
+
+# =============================================================================
+# BROWSER AUTOMATION TOOLS
+# =============================================================================
+
+async def browser_navigate(
+    url: str,
+    action: str = "navigate",
+    full_page: bool = True,
+    wait_ms: int = 1000,
+    headless: bool = True,
+    output_dir: str = "screenshots",
+    use_cdp: bool = False,
+    cdp_endpoint: Optional[str] = None,
+    wait_until: str = "networkidle",
+) -> str:
+    """
+    Navigate to a URL using Playwright and capture a screenshot.
+
+    SECURITY FEATURES:
+    - HTTPS only (same validation as fetch_url)
+    - URL context validation (configurable via FETCH_ONLY_MENTIONED_URLS)
+    - Internal IP blocking
+    - Homograph attack detection
+    - Cloud metadata endpoint blocking
+
+    CDP MODE (connect to existing browser):
+    - Set use_cdp=True or BROWSER_CONNECT_OVER_CDP=true
+    - Set cdp_endpoint or BROWSER_CDP_ENDPOINT (default: http://localhost:9222)
+    - Preserves your logged-in sessions, cookies, and saved passwords
+    - Does NOT close the browser when done (your browser stays open)
+
+    Args:
+        url: URL to navigate to. Must be HTTPS and from conversation context.
+        action: Short description for filename (default: "navigate")
+        full_page: Capture full page vs viewport only (default: True)
+        wait_ms: Additional wait time after load for JS-heavy pages (default: 1000)
+        headless: Run browser in headless mode (default: True). Ignored when using CDP.
+        output_dir: Directory to save screenshots (default: "screenshots")
+        use_cdp: Connect to existing browser via CDP instead of launching new
+        cdp_endpoint: CDP endpoint URL (default: http://localhost:9222)
+        wait_until: When to consider navigation complete: 'networkidle' (default),
+                   'domcontentloaded' (faster, for JS-heavy sites), or 'load'
+
+    Returns:
+        Path to saved screenshot or error message.
+    """
+    # Validate wait_until parameter
+    VALID_WAIT_STRATEGIES = {"networkidle", "domcontentloaded", "load", "commit"}
+    if wait_until not in VALID_WAIT_STRATEGIES:
+        return f"[BROWSER ERROR] Invalid wait_until value: '{wait_until}'. Must be one of {VALID_WAIT_STRATEGIES}"
+
+    if not PLAYWRIGHT_AVAILABLE:
+        return (
+            "[BROWSER ERROR] Playwright not installed. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    # Validate URL (same security as fetch_url)
+    is_valid, error_msg, clean_url = validate_url_for_fetch(
+        url, require_context=FETCH_ONLY_MENTIONED_URLS
+    )
+    if not is_valid:
+        logger.warning(f"[browser_navigate] Validation failed for '{url}': {error_msg}")
+        return f"[BROWSER ERROR] {error_msg}"
+
+    # Clamp wait time
+    wait_ms = max(0, min(wait_ms, 30000))  # 0-30 seconds
+
+    # Prepare output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Build filename from action
+    safe_action = re.sub(r"[^a-zA-Z0-9_-]", "_", action)[:50]
+    timestamp = int(time.time())
+    filename = f"browser_{safe_action}_{timestamp}.png"
+    screenshot_path = output_path / filename
+
+    logger.info(f"[browser_navigate] Launching browser for: {clean_url}")
+
+    # Determine if we should use CDP mode
+    cdp_url = cdp_endpoint or BROWSER_CDP_ENDPOINT or "http://localhost:9222"
+    should_use_cdp = use_cdp or BROWSER_CONNECT_OVER_CDP
+
+    try:
+        async with async_playwright() as pw:
+            if should_use_cdp:
+                # CDP MODE: Connect to existing browser
+                logger.info(f"[browser_navigate] Connecting via CDP to {cdp_url}")
+                try:
+                    browser = await pw.chromium.connect_over_cdp(cdp_url)
+                except Exception as e:
+                    logger.error(f"[browser_navigate] Failed to connect via CDP: {e}")
+                    return (
+                        f"[BROWSER ERROR] Could not connect to browser at {cdp_url}. "
+                        f"Make sure Chrome/Chromium is running with --remote-debugging-port=9222. "
+                        f"Error: {str(e)[:100]}"
+                    )
+
+                # Reuse existing context (your logged-in session) or create new if none exists
+                contexts = browser.contexts
+                if contexts:
+                    context = contexts[0]
+                    logger.info("[browser_navigate] Reusing existing browser context (with your sessions/cookies)")
+                else:
+                    context = await browser.new_context(
+                        viewport={"width": 1280, "height": 800},
+                    )
+                    logger.info("[browser_navigate] Created new context in connected browser")
+
+                page = await context.new_page()
+
+                try:
+                    # Navigate and wait for network idle
+                    await page.goto(
+                        clean_url,
+                        wait_until=wait_until,
+                        timeout=30000,
+                    )
+
+                    # Additional wait for JS-heavy pages
+                    if wait_ms > 0:
+                        await page.wait_for_timeout(wait_ms)
+
+                    # Capture screenshot
+                    await page.screenshot(
+                        path=str(screenshot_path),
+                        full_page=full_page,
+                    )
+
+                    logger.info(f"[browser_navigate] Screenshot saved: {screenshot_path}")
+
+                finally:
+                    await page.close()
+                    # NOTE: Do NOT close browser in CDP mode - it would kill your browser!
+                    logger.info("[browser_navigate] Page closed (browser left running)")
+
+            else:
+                # STANDARD MODE: Launch fresh browser
+                logger.info("[browser_navigate] Launching fresh browser instance")
+                browser = await pw.chromium.launch(
+                    headless=headless,
+                    args=["--no-sandbox", "--disable-setuid-sandbox"],
+                )
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = await context.new_page()
+
+                try:
+                    # Navigate and wait for network idle
+                    await page.goto(
+                        clean_url,
+                        wait_until=wait_until,
+                        timeout=30000,
+                    )
+
+                    # Additional wait for JS-heavy pages
+                    if wait_ms > 0:
+                        await page.wait_for_timeout(wait_ms)
+
+                    # Capture screenshot
+                    await page.screenshot(
+                        path=str(screenshot_path),
+                        full_page=full_page,
+                    )
+
+                    logger.info(f"[browser_navigate] Screenshot saved: {screenshot_path}")
+
+                finally:
+                    await context.close()
+                    await browser.close()
+
+        mode_info = " (CDP mode - used your logged-in browser)" if should_use_cdp else ""
+        return f"Successfully captured screenshot of {clean_url}{mode_info}\nSaved to: {screenshot_path}"
+
+    except Exception as e:
+        logger.error(f"[browser_navigate] Error: {e}")
+        return f"[BROWSER ERROR] {type(e).__name__}: {str(e)[:200]}"
+
+
+def browser_navigate_tool(
+    url: str,
+    action: str = "navigate",
+    full_page: bool = True,
+    wait_ms: int = 1000,
+    headless: bool = True,
+    use_cdp: bool = False,
+    cdp_endpoint: Optional[str] = None,
+    wait_until: str = "networkidle",
+    output_dir: str = "screenshots",
+) -> str:
+    """
+    Synchronous wrapper for browser_navigate tool interface.
+
+    CDP MODE:
+    - Set use_cdp=True to connect to an existing browser via CDP
+    - Or set BROWSER_CDP_ENDPOINT environment variable
+    - Preserves your logged-in sessions, cookies, and saved passwords
+
+    Args:
+        url: URL to navigate to. Must be HTTPS and from conversation context.
+        action: Short description for filename (default: "navigate")
+        full_page: Capture full page vs viewport only (default: True)
+        wait_ms: Additional wait time after load for JS-heavy pages (default: 1000)
+        headless: Run browser in headless mode (default: True). Ignored when using CDP.
+        use_cdp: Connect to existing browser via CDP instead of launching new
+        cdp_endpoint: Custom CDP endpoint URL (default: http://localhost:9222)
+        wait_until: When to consider navigation complete: 'networkidle' (default),
+                   'domcontentloaded' (faster, for JS-heavy sites), or 'load'
+        output_dir: Directory to save screenshots (default: "screenshots")
+
+    Returns:
+        Path to saved screenshot or error message.
+    """
+    # Run async function (handle both sync and async contexts)
+    try:
+        loop = asyncio.get_running_loop()
+        try:
+            import nest_asyncio
+            nest_asyncio.apply(loop)
+            return loop.run_until_complete(
+                browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+            )
+        except ImportError:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    lambda: asyncio.run(
+                        browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+                    )
+                )
+                return future.result()
+    except RuntimeError:
+        return asyncio.run(
+            browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+        )
+    except Exception as e:
+        logger.error(f"[browser_navigate_tool] Error: {e}")
+        return f"[BROWSER ERROR] {type(e).__name__}: {str(e)[:200]}"
     
