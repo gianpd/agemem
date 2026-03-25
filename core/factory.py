@@ -236,6 +236,7 @@ class OrchestratorFactory:
         if include_web_tools:
             # Lazy import to avoid dependency issues
             from tools.web_tools import tool_definitions as web_tools
-            result = web_tools + result
+            from tools.browser_tools import tool_definitions as browser_tools
+            result = web_tools + browser_tools + result
 
         return result

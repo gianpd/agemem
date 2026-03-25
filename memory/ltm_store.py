@@ -533,16 +533,21 @@ class LTMStore:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _tokenise(self, text: str) -> set[str]:
-        """Lowercase word tokens, stopwords excluded."""
+        """Lowercase word tokens, stopwords excluded. Includes short numeric tokens."""
         STOPWORDS = {
             "the", "a", "an", "is", "in", "on", "at", "to", "of",
             "and", "or", "but", "for", "with", "was", "be", "are",
         }
-        return {
-            w.lower().strip(".,!?;:\"'()")
-            for w in text.split()
-            if w.lower() not in STOPWORDS and len(w) > 2
-        }
+        tokens = set()
+        for w in text.split():
+            w = w.lower().strip(".,!?;:\"'()")
+            # Skip stopwords
+            if w in STOPWORDS:
+                continue
+            # Include if longer than 2 chars OR if it's a number
+            if len(w) > 2 or w.isdigit():
+                tokens.add(w)
+        return tokens
 
     def _overlap_score(self, query_tokens: set[str], content: str) -> float:
         """Jaccard-like overlap between query and content token sets."""
@@ -556,14 +561,13 @@ class LTMStore:
     def _find_similar(self, content: str) -> Optional[MemoryEntry]:
         """
         Duplicate detection: uses embedding similarity when semantic search is enabled,
-        otherwise uses full-content Jaccard overlap.
+        otherwise uses Jaccard overlap.
 
         SEMANTIC PATH: Uses cosine similarity on embeddings (requires sqlite-vec).
-        OVERLAP PATH: Uses Jaccard similarity on tokenised content.
+        JACCARD PATH: Pure token-overlap similarity with configurable threshold.
 
-        Known limitations:
-        - Overlap path cannot detect paraphrases (BUG2a) — requires semantic search.
-        - Overlap path uses token overlap threshold, not semantic understanding.
+        Jaccard-only approach prevents BUG2b (false-positive collapse of similar-but-distinct
+        facts) since facts that share a prefix but diverge in meaning will have < 0.7 overlap.
         """
         # SEMANTIC_DEDUP: Use embedding similarity when semantic search is enabled
         if self._semantic_enabled and self._db is not None:
@@ -581,23 +585,25 @@ class LTMStore:
                 if best_sim >= self._config.LTM_DEDUP_THRESHOLD:
                     return self._entries[best_id]
                 return None
-            # embedding generation failed — fall through to Jaccard
+            # embedding generation failed — fall through to Jaccard fallback
             logger.warning("_find_similar: embedding failed, falling back to Jaccard dedup")
 
-        # OVERLAP_FALLBACK: Use full-content Jaccard similarity.
-        # This fixes BUG2b (false-positive prefix collapse) by comparing entire
-        # content rather than just leading words. BUG2a (paraphrase detection)
-        # remains a known limitation of the overlap path.
+        # JACCARD_FALLBACK: Pure token-overlap similarity
         query_tokens = self._tokenise(content)
         best_entry: Optional[MemoryEntry] = None
         best_score = 0.0
+
         for entry in self._entries.values():
             score = self._overlap_score(query_tokens, entry.content)
             if score > best_score:
                 best_score, best_entry = score, entry
 
-        threshold = getattr(self._config, 'LTM_DEDUP_OVERLAP_THRESHOLD', 0.7)
-        return best_entry if best_score >= threshold else None
+        # Return match only if above threshold
+        jaccard_threshold = getattr(self._config, 'LTM_DEDUP_OVERLAP_THRESHOLD', 0.7)
+        if best_score >= jaccard_threshold:
+            return best_entry
+
+        return None
 
     # SEMANTIC_DEDUP: Helper to get cached embedding for an entry
     def _get_cached_embedding(self, entry_id: str) -> Optional["np.ndarray"]:

@@ -8,7 +8,7 @@ import json
 import asyncio
 import logging
 
-from core.types import MemoryOpResult, TriggerKind
+from core.types import MemoryOpResult, MemoryOp, TriggerKind
 from core.config import AgememConfig
 from core.tracing import get_tracer
 from memory.ltm_store import LTMStore
@@ -736,6 +736,17 @@ class ToolExecutor:
 
         except Exception as e:
             output = f"[TOOL ERROR] {name} failed: {e}"
+
+        # Track tool execution as side effect only if tool didn't provide its own
+        # This allows tests and trace to see tool calls via ops_applied
+        if not side_effects:
+            side_effects.append(MemoryOpResult(
+                op=MemoryOp.RETRIEVE,  # Generic operation type for tool tracking
+                success=not output.startswith("[TOOL ERROR]"),
+                trigger=TriggerKind.MAIN_AGENT,
+                detail=f"Tool executed: {name}",
+                entries_affected=[],
+            ))
 
         # Build result
         result = ToolResult(

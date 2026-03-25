@@ -346,13 +346,15 @@ def _is_ip_private(ip_str: str) -> tuple[bool, str]:
     Check if an IP address is in a private/internal range.
 
     Args:
-        ip_str: A string that is ALREADY VALIDATED as an IP address literal.
+        ip_str: A string that may or may not be a valid IP address.
 
     Returns (is_private, reason) tuple.
-    Raises:
-        ValueError: If ip_str is not a valid IP address (caller must ensure valid input).
+    For invalid IPs, returns (True, "Invalid IP: <ip_str>").
     """
-    addr = ipaddress.ip_address(ip_str)  # Let ValueError propagate to caller
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True, f"Invalid IP: {ip_str}"
     for network in BLOCKED_IP_NETWORKS:
         if addr in network:
             return True, f"IP {ip_str} is in blocked network {network}"

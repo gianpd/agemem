@@ -872,7 +872,8 @@ class TestPromptReloadIntegration(unittest.TestCase):
 
     def test_reload_clears_registry_cache(self):
         """reload() clears registry cache and reloads from disk."""
-        from prompts import get_prompt, reload as reload_prompts
+        from prompts import reload as reload_prompts
+        from prompts.registry import PromptRegistry
 
         # Create initial version
         self._create_test_file("test-v1_0_0.md", """---
@@ -888,12 +889,9 @@ author: test
 Original content.
 """)
 
-        # Force fresh registry for this test
-        import prompts
-        prompts._registry = None
-
-        # Load via prompts module (uses global registry)
-        original = get_prompt("test")
+        # Create a registry with the temp directory
+        registry = PromptRegistry(self.prompts_dir)
+        original = registry.get_prompt("test")
         self.assertEqual(original.content, "Original content.")
 
         # Modify file directly
@@ -911,12 +909,12 @@ Modified content.
 """)
 
         # Without reload, still get cached version
-        cached = get_prompt("test")
+        cached = registry.get_prompt("test")
         self.assertEqual(cached.content, "Original content.")
 
         # After reload, get new content
-        reload_prompts()
-        refreshed = get_prompt("test")
+        registry.reload()
+        refreshed = registry.get_prompt("test")
         self.assertEqual(refreshed.content, "Modified content.")
 
 

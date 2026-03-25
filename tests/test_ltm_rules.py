@@ -321,21 +321,21 @@ class TestLTM06LTMAddOnThreshold(unittest.TestCase):
 
 
 class TestLTM07DuplicateDetection(unittest.TestCase):
-    """LTM-07: Update existing entry instead of ADD if similar exists."""
+    """LTM-07: Update existing entry instead of ADD if similar exists (Jaccard >= 0.7)."""
 
     def test_duplicate_content_routes_to_update(self):
-        """Adding similar content updates existing entry."""
-        cfg = _cfg(LTM_SIMILARITY_WORDS=3, LTM_UPDATE_THRESHOLD=0.5)
+        """Adding identical content updates existing entry."""
+        cfg = _cfg(LTM_SIMILARITY_WORDS=3, LTM_DEDUP_OVERLAP_THRESHOLD=0.7)
         store = LTMStore(cfg)
 
         # Add initial entry
-        result1 = store.add("Python is great for ML", learning_score=0.8)
+        result1 = store.add("Python is great for machine learning", learning_score=0.8)
         self.assertEqual(result1.op, MemoryOp.ADD)
 
-        # Add similar content - should update
+        # Add identical content - should update (Jaccard = 1.0)
         result2 = store.add("Python is great for machine learning", learning_score=0.85)
         self.assertEqual(result2.op, MemoryOp.UPDATE,
-                         "Similar content should route to UPDATE not ADD")
+                         "Identical content should route to UPDATE not ADD")
 
     def test_different_content_creates_new_entry(self):
         """Different content creates new ADD operation."""

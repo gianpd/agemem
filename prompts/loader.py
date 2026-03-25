@@ -37,6 +37,11 @@ _active_versions: dict[str, str] = {}
 # Default prompts directory
 DEFAULT_PROMPTS_DIR = Path(__file__).parent / "prompts"
 
+# Allow override via environment variable for testing
+_env_prompts_dir = os.environ.get("AGEMEM_PROMPTS_DIR")
+if _env_prompts_dir:
+    DEFAULT_PROMPTS_DIR = Path(_env_prompts_dir)
+
 
 @dataclass
 class ParsedFrontmatter:

@@ -226,7 +226,7 @@ class TestContextFlowInvestigation:
         - System messages (pinned) are preserved
         """
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = create_test_config(temp_dir, token_limit=500)
+            config = create_test_config(temp_dir, token_limit=1500)
             tracer = ContextFlowTracer(config)
 
             # Create mock client
@@ -244,7 +244,7 @@ class TestContextFlowInvestigation:
                 )
 
             # Run multiple turns to reach 75% capacity
-            for turn in range(20):
+            for turn in range(50):
                 query = generate_seeded_query(turn)
                 response = orchestrator.chat(query)
 

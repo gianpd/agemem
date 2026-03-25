@@ -71,10 +71,11 @@ def activate_version(prompt_id: str, version: str) -> bool:
 def reload() -> None:
     """Reload the registry from disk."""
     global _registry
-    if _registry is None:
-        _registry = get_registry()
-    else:
-        _registry.reload()
+    # Also reset the global registry in registry.py to allow fresh start
+    import prompts.registry
+    prompts.registry._global_registry = None
+    _registry = None
+    _registry = get_registry()
 
 
 # Convenience accessors

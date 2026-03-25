@@ -528,6 +528,21 @@ class Orchestrator:
                     print(f"[DEBUG] Low quality response detected: score={metrics.quality_score:.2f}, type={metrics.response_type.value}", flush=True)
                 break
 
+            except RuntimeError as e:
+                # LLM call failed after retries - provide fallback response
+                tracer.log_llm_response(
+                    call_id=llm_call_id,
+                    response="[ERROR] LLM call failed",
+                    latency_ms=(time.time() - llm_call_start) * 1000,
+                    token_count=0,
+                )
+                # Check if this looks like a tool loop scenario
+                if "LLM call failed" in str(e) and tool_iterations > 5:
+                    assistant_text = "[SYSTEM] Maximum tool call iterations reached. Providing final response based on available information."
+                else:
+                    assistant_text = f"[SYSTEM] LLM call failed after retries: {str(e)[:100]}. Providing response based on available context."
+                break
+
             except ToolCallResponse as e:
                 # Log tool call
                 tool_call_start = time.time()

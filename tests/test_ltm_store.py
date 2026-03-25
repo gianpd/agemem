@@ -40,61 +40,63 @@ def _cfg(**overrides) -> AgememConfig:
 
 
 class TestFindSimilar(unittest.TestCase):
-    """Tests for _find_similar method - naive duplicate detection."""
+    """Tests for _find_similar method - Jaccard-based duplicate detection."""
 
     def test_find_similar_exact_match(self):
-        """_find_similar returns entry when first N words match exactly."""
+        """_find_similar returns entry when content is identical (Jaccard=1.0)."""
         cfg = _cfg(LTM_SIMILARITY_WORDS=3)
         store = LTMStore(cfg)
 
         # Add an entry
         store.add("Python is great for machine learning", learning_score=0.8)
 
-        # Find similar with exact same first 3 words
-        result = store._find_similar("Python is great for data science")
+        # Find similar with identical content
+        result = store._find_similar("Python is great for machine learning")
 
         self.assertIsNotNone(result)
-        self.assertIn("Python is great", result.content)
+        self.assertIn("Python", result.content)
+
+    def test_find_similar_high_overlap(self):
+        """_find_similar returns entry when Jaccard overlap >= 0.7."""
+        cfg = _cfg(LTM_SIMILARITY_WORDS=3)
+        store = LTMStore(cfg)
+
+        # Add an entry with enough unique tokens
+        store.add("Python machine learning deep neural networks", learning_score=0.8)
+
+        # High overlap: shares most tokens (python, machine, learning, deep, neural, networks vs python, machine, learning, deep)
+        # Jaccard = 4/6 = 0.67, just below threshold - add more overlap
+        result = store._find_similar("Python machine learning deep neural networks training")
+
+        # Should match since it's a superset
+        self.assertIsNotNone(result)
 
     def test_find_similar_no_match(self):
-        """_find_similar returns None when no similar entry exists."""
+        """_find_similar returns None when Jaccard overlap is low."""
         cfg = _cfg(LTM_SIMILARITY_WORDS=3)
         store = LTMStore(cfg)
 
         # Add an entry
         store.add("Python is great for ML", learning_score=0.8)
 
-        # Try to find different content
+        # Try to find different content - no overlap
         result = store._find_similar("JavaScript is used for web")
 
         self.assertIsNone(result)
 
     def test_find_similar_case_insensitive(self):
-        """_find_similar is case insensitive for matching."""
+        """_find_similar is case insensitive (tokenization lowercases)."""
         cfg = _cfg(LTM_SIMILARITY_WORDS=3)
         store = LTMStore(cfg)
 
         # Add entry with lowercase
-        store.add("python is great for ML", learning_score=0.8)
+        store.add("python machine learning", learning_score=0.8)
 
-        # Search with uppercase - should match
-        result = store._find_similar("PYTHON IS GREAT for data")
+        # Search with uppercase - should match (same tokens after lowercasing)
+        result = store._find_similar("PYTHON MACHINE LEARNING")
 
         self.assertIsNotNone(result)
-        self.assertIn("python is great", result.content.lower())
-
-    def test_find_similar_partial_match_not_enough_words(self):
-        """_find_similar requires at least N words to match."""
-        cfg = _cfg(LTM_SIMILARITY_WORDS=6)
-        store = LTMStore(cfg)
-
-        # Add entry with 6+ words
-        store.add("Python is great for machine learning projects", learning_score=0.8)
-
-        # Only first 3 words match - should not find
-        result = store._find_similar("Python is great for something else entirely")
-
-        self.assertIsNone(result)
+        self.assertIn("python", result.content.lower())
 
     def test_find_similar_empty_store(self):
         """_find_similar returns None when store is empty."""
@@ -105,46 +107,48 @@ class TestFindSimilar(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    def test_find_similar_multiple_entries_returns_first_match(self):
-        """_find_similar returns a matching entry when duplicates exist."""
-        cfg = _cfg(LTM_SIMILARITY_WORDS=2)
+    def test_find_similar_multiple_entries(self):
+        """_find_similar returns entry with highest Jaccard overlap."""
+        cfg = _cfg(LTM_SIMILARITY_WORDS=2, LTM_DEDUP_OVERLAP_THRESHOLD=0.7)
         store = LTMStore(cfg)
 
-        # Add multiple entries with same leading words
-        store.add("Python programming is fun", learning_score=0.8)
-        store.add("Python programming for beginners", learning_score=0.7)
+        # Add multiple entries - one with high overlap potential
+        store.add("Python programming machine learning deep networks", learning_score=0.8)
+        store.add("JavaScript web development frontend frameworks", learning_score=0.7)
 
-        # Should find one of them (dict iteration order not guaranteed)
-        result = store._find_similar("Python programming advanced topics")
+        # Query shares most tokens with Python entry (Jaccard >= 0.7)
+        result = store._find_similar("Python programming machine learning deep")
 
         self.assertIsNotNone(result)
-        self.assertIn("Python programming", result.content)
+        self.assertIn("Python", result.content)
 
     def test_find_similar_with_punctuation(self):
-        """_find_similar requires exact word match including punctuation."""
+        """_find_similar handles punctuation in tokenization."""
         cfg = _cfg(LTM_SIMILARITY_WORDS=3)
         store = LTMStore(cfg)
 
-        # Add entry with punctuation attached to words
-        store.add("hello, world! how are you?", learning_score=0.8)
+        # Add entry with punctuation
+        store.add("hello world machine learning", learning_score=0.8)
 
-        # Match exact same punctuation - should find
-        result = store._find_similar("hello, world! how")
+        # Match with punctuation stripped - high overlap
+        result = store._find_similar("hello, world! machine learning?")
 
         self.assertIsNotNone(result)
 
-    def test_find_similar_punctuation_differs(self):
-        """_find_similar matches when punctuation differs but words are same."""
-        cfg = _cfg(LTM_SIMILARITY_WORDS=3)
+    def test_find_similar_distinct_facts_not_matched(self):
+        """_find_similar does NOT match facts with shared prefix but different meaning."""
+        cfg = _cfg(LTM_SIMILARITY_WORDS=4, LTM_DEDUP_OVERLAP_THRESHOLD=0.7)
         store = LTMStore(cfg)
 
-        # Add entry without punctuation
-        store.add("hello world how are you", learning_score=0.8)
+        # Add a fact about Python for data science
+        store.add("Python is a programming language used for data science", learning_score=0.8)
 
-        # Search with different content after leading words
-        result = store._find_similar("hello world how are you today")
+        # Try to find similar - different domain (web backends)
+        # Jaccard ~0.5, below threshold
+        result = store._find_similar("Python is a programming language used for web backends")
 
-        self.assertIsNotNone(result)
+        # Should NOT match - prevents BUG2b
+        self.assertIsNone(result)
 
 
 class TestSearch(unittest.TestCase):
@@ -350,16 +354,17 @@ class TestSearchAndFindSimilarIntegration(unittest.TestCase):
         self.assertIn("Python", results[0].content)
 
     def test_find_similar_prevents_duplicate_via_add(self):
-        """_find_similar prevents duplicates when using add()."""
-        cfg = _cfg(LTM_SIMILARITY_WORDS=3, LTM_UPDATE_THRESHOLD=0.5)
+        """_find_similar prevents duplicates when using add() with high Jaccard overlap."""
+        cfg = _cfg(LTM_SIMILARITY_WORDS=3, LTM_DEDUP_OVERLAP_THRESHOLD=0.7)
         store = LTMStore(cfg)
 
         # Add initial entry
-        result1 = store.add("Python is great for ML", learning_score=0.6)
+        result1 = store.add("Python machine learning deep neural networks", learning_score=0.6)
         self.assertEqual(store.size(), 1)
 
-        # Add similar content - should update, not create new
-        result2 = store.add("Python is great for data science", learning_score=0.7)
+        # Add nearly identical content - should update, not create new
+        # Jaccard = 6/6 = 1.0 (exact match of significant tokens)
+        result2 = store.add("Python machine learning deep neural networks", learning_score=0.7)
         self.assertEqual(store.size(), 1)  # Still 1 entry
 
 

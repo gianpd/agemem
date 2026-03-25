@@ -135,8 +135,8 @@ class TestLTMStore(unittest.TestCase):
 
     def test_T03_duplicate_routes_to_update(self):
         self.store.add("Python is a programming language", learning_score=0.8)
-        # Same leading words → should UPDATE, not ADD second entry
-        result = self.store.add("Python is a programming language version 3", learning_score=0.9)
+        # Identical content → should UPDATE, not ADD second entry (Jaccard = 1.0)
+        result = self.store.add("Python is a programming language", learning_score=0.9)
         self.assertEqual(result.op, MemoryOp.UPDATE)
         self.assertEqual(self.store.size(), 1)  # still one entry
 
@@ -756,11 +756,11 @@ class TestOrchestrator(unittest.TestCase):
         force_fit and the context should remain under the limit.
 
         Note: STM_TOKEN_LIMIT must exceed the pinned system prompt size.
-        The default system prompt is ~373 tokens. We use 600 to have
+        The default system prompt is ~560 tokens. We use 1500 to have
         sufficient headroom for 6 turns of user/assistant messages.
         """
         cfg = _cfg(
-            STM_TOKEN_LIMIT=600,  # Must exceed pinned system prompt (~373 tokens) + conversation
+            STM_TOKEN_LIMIT=1500,  # Must exceed pinned system prompt (~560 tokens) + conversation
             STM_WARNING_THRESHOLD=0.5,
             STM_CRITICAL_THRESHOLD=0.85,
             STM_MIN_MESSAGES=2,
