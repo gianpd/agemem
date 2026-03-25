@@ -1,7 +1,7 @@
 """
 Web-related tool implementations.
 
-Tools for web search, file writing, and document ingestion.
+Tools for web search, file writing, and browser automation.
 """
 
 import json
@@ -170,37 +170,6 @@ tool_definitions = [
     {
         "type": "function",
         "function": {
-            "name": "ingest_document",
-            "description": (
-                "Ingest a document into the corpus with NER entity extraction. "
-                "Supports both .md and .pdf files. "
-                "For .pdf: converts to markdown via Docling, extracts entities via GLiNER, adds to corpus. "
-                "For .md: adds to corpus with entity extraction. "
-                "Returns doc_id on success."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file (.md or .pdf)"
-                    },
-                    "doc_type": {
-                        "type": "string",
-                        "description": "Document type: document, contract, research, cronoprogramma, etc. (PDF only, default: document)"
-                    },
-                    "labels": {
-                        "type": "string",
-                        "description": "Label set for entity extraction: edilizia, legal, research (PDF only, default: edilizia)"
-                    }
-                },
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "browser_navigate",
             "description": (
                 "Navigate to a URL using Playwright browser automation and capture a screenshot. "
@@ -208,6 +177,7 @@ tool_definitions = [
                 "debugging web issues, or archiving page state. "
                 "Supports connecting to an existing browser via CDP (Chrome DevTools Protocol) - "
                 "set BROWSER_CDP_ENDPOINT=http://localhost:9222 to use your logged-in browser session. "
+                "Set keep_session=true to keep the browser open for subsequent browser_* tools (click, scroll, type, etc.). "
                 "Returns the path to the saved screenshot. "
                 "Requires playwright to be installed: pip install playwright && playwright install chromium"
             ),
@@ -252,6 +222,11 @@ tool_definitions = [
                     "use_cdp": {
                         "type": "boolean",
                         "description": "Connect to existing browser via CDP instead of launching new. Auto-enabled if BROWSER_CDP_ENDPOINT is set.",
+                        "default": False
+                    },
+                    "keep_session": {
+                        "type": "boolean",
+                        "description": "Keep browser session open for subsequent browser_* tools (click, scroll, type, read_page). Call browser_close when done.",
                         "default": False
                     }
                 },
@@ -1161,84 +1136,6 @@ def write_file(path: str, content: str) -> str:
         return f"[TOOL ERROR] write_file unexpected error: {e}"
 
 
-def ingest_document(path: str, doc_type: str = "document", labels: str = "edilizia") -> str:
-    """
-    Ingest a document into the corpus.
-
-    Supports both .md and .pdf files:
-    - .md files: processed directly with entity extraction
-    - .pdf files: converted via Docling using uv run ingest/ingest.py
-
-    Args:
-        path: Path to the file (.md or .pdf)
-        doc_type: Document type for PDFs (default: document)
-        labels: Label set for PDFs (default: edilizia)
-
-    Returns:
-        Success message with doc_id or error
-    """
-    import subprocess
-    import re
-
-    file_path = Path(path)
-
-    if not file_path.exists():
-        return f"Error: File not found: {path}"
-
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".md":
-        # Markdown ingestion - import and call ingest function directly
-        try:
-            from ingest.ingest import ingest
-            doc_id = ingest(str(file_path))
-            logger.info(f"[ingest_document] Ingested markdown {path} as {doc_id}")
-            return f"Successfully ingested markdown. doc_id: {doc_id}"
-        except Exception as e:
-            return f"Error ingesting markdown: {e}"
-
-    elif suffix == ".pdf":
-        # PDF ingestion - use uv run ingest/ingest.py
-        cmd = [
-            "uv", "run", "ingest/ingest.py",
-            str(file_path),
-            doc_type,
-            "--labels", labels
-        ]
-
-        try:
-            logger.info(f"[ingest_document] Running: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 minutes for large PDFs
-                cwd=str(Path(__file__).parent.parent)  # Run from project root
-            )
-
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                return f"Error ingesting PDF: {error_msg}"
-
-            # Extract doc_id from output (last line usually contains it)
-            output = result.stdout.strip()
-            doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
-            doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
-
-            logger.info(f"[ingest_document] Ingested PDF {path} as {doc_id}")
-            return f"Successfully ingested PDF.\n\n{output}"
-
-        except subprocess.TimeoutExpired:
-            return "Error: PDF ingestion timed out (after 10 minutes)"
-        except FileNotFoundError:
-            return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
-        except Exception as e:
-            return f"Error ingesting PDF: {e}"
-
-    else:
-        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
-
-
 # =============================================================================
 # BROWSER AUTOMATION TOOLS
 # =============================================================================
@@ -1253,6 +1150,7 @@ async def browser_navigate(
     use_cdp: bool = False,
     cdp_endpoint: Optional[str] = None,
     wait_until: str = "networkidle",
+    keep_session: bool = False,
 ) -> str:
     """
     Navigate to a URL using Playwright and capture a screenshot.
@@ -1270,6 +1168,12 @@ async def browser_navigate(
     - Preserves your logged-in sessions, cookies, and saved passwords
     - Does NOT close the browser when done (your browser stays open)
 
+    SESSION PERSISTENCE:
+    - Set keep_session=True to keep browser open for subsequent browser_* tools
+    - When True, the browser session is shared and can be used by browser_click,
+      browser_scroll, browser_type, browser_read_page, etc.
+    - Call browser_close when done with the session.
+
     Args:
         url: URL to navigate to. Must be HTTPS and from conversation context.
         action: Short description for filename (default: "navigate")
@@ -1281,6 +1185,7 @@ async def browser_navigate(
         cdp_endpoint: CDP endpoint URL (default: http://localhost:9222)
         wait_until: When to consider navigation complete: 'networkidle' (default),
                    'domcontentloaded' (faster, for JS-heavy sites), or 'load'
+        keep_session: Keep browser open for subsequent browser_* tools (default: False)
 
     Returns:
         Path to saved screenshot or error message.
@@ -1322,6 +1227,29 @@ async def browser_navigate(
     # Determine if we should use CDP mode
     cdp_url = cdp_endpoint or BROWSER_CDP_ENDPOINT or "http://localhost:9222"
     should_use_cdp = use_cdp or BROWSER_CONNECT_OVER_CDP
+
+    # If keep_session is True, use shared BrowserSession for multi-step workflows
+    if keep_session:
+        try:
+            from tools.browser_tools import BrowserSession
+            session = BrowserSession.get_instance()
+            page = await session.get_page(use_cdp=should_use_cdp, cdp_endpoint=cdp_url, headless=headless)
+
+            # Navigate
+            await page.goto(clean_url, wait_until=wait_until, timeout=30000)
+            if wait_ms > 0:
+                await page.wait_for_timeout(wait_ms)
+
+            # Capture screenshot
+            await page.screenshot(path=str(screenshot_path), full_page=full_page)
+
+            mode_info = " (CDP mode - used your logged-in browser)" if should_use_cdp else " (session kept open for browser_* tools)"
+            logger.info(f"[browser_navigate] Screenshot saved: {screenshot_path}")
+            return f"Successfully captured screenshot of {clean_url}{mode_info}\nSaved to: {screenshot_path}"
+
+        except Exception as e:
+            logger.error(f"[browser_navigate] Error with keep_session: {e}")
+            return f"[BROWSER ERROR] {type(e).__name__}: {str(e)[:200]}"
 
     try:
         async with async_playwright() as pw:
@@ -1435,6 +1363,7 @@ def browser_navigate_tool(
     cdp_endpoint: Optional[str] = None,
     wait_until: str = "networkidle",
     output_dir: str = "screenshots",
+    keep_session: bool = False,
 ) -> str:
     """
     Synchronous wrapper for browser_navigate tool interface.
@@ -1443,6 +1372,12 @@ def browser_navigate_tool(
     - Set use_cdp=True to connect to an existing browser via CDP
     - Or set BROWSER_CDP_ENDPOINT environment variable
     - Preserves your logged-in sessions, cookies, and saved passwords
+
+    SESSION PERSISTENCE:
+    - Set keep_session=True to keep browser open for subsequent browser_* tools
+    - When True, the browser session is shared and can be used by browser_click,
+      browser_scroll, browser_type, browser_read_page, etc.
+    - Call browser_close when done with the session.
 
     Args:
         url: URL to navigate to. Must be HTTPS and from conversation context.
@@ -1455,6 +1390,7 @@ def browser_navigate_tool(
         wait_until: When to consider navigation complete: 'networkidle' (default),
                    'domcontentloaded' (faster, for JS-heavy sites), or 'load'
         output_dir: Directory to save screenshots (default: "screenshots")
+        keep_session: Keep browser open for subsequent browser_* tools (default: False)
 
     Returns:
         Path to saved screenshot or error message.
@@ -1466,20 +1402,20 @@ def browser_navigate_tool(
             import nest_asyncio
             nest_asyncio.apply(loop)
             return loop.run_until_complete(
-                browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+                browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until, keep_session)
             )
         except ImportError:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     lambda: asyncio.run(
-                        browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+                        browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until, keep_session)
                     )
                 )
                 return future.result()
     except RuntimeError:
         return asyncio.run(
-            browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until)
+            browser_navigate(url, action, full_page, wait_ms, headless, output_dir, use_cdp, cdp_endpoint, wait_until, keep_session)
         )
     except Exception as e:
         logger.error(f"[browser_navigate_tool] Error: {e}")

@@ -133,7 +133,7 @@ class ToolExecutor:
     def _execute_ingest_document(self, arguments: dict) -> str:
         """Execute ingest_document tool."""
         try:
-            from tools.web_tools import ingest_document
+            from tools.corpus import ingest_document
             path = arguments.get("path", "")
             return ingest_document(path)
         except Exception as e:
@@ -149,6 +149,101 @@ class ToolExecutor:
             return fetch_url_tool(url, max_length, save_path)
         except Exception as e:
             return f"[TOOL ERROR] fetch_url failed: {e}"
+
+    def _execute_browser_navigate(self, arguments: dict) -> str:
+        """Execute browser_navigate tool."""
+        try:
+            from tools.web_tools import browser_navigate_tool
+            return browser_navigate_tool(
+                url=arguments.get("url", ""),
+                action=arguments.get("action", "navigate"),
+                full_page=arguments.get("full_page", True),
+                wait_ms=arguments.get("wait_ms", 1000),
+                headless=arguments.get("headless", True),
+                use_cdp=arguments.get("use_cdp", False),
+                wait_until=arguments.get("wait_until", "networkidle"),
+                output_dir=arguments.get("output_dir", "screenshots"),
+                keep_session=arguments.get("keep_session", False),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_navigate failed: {e}"
+
+    # --- Browser Automation Tools ---
+
+    def _execute_browser_click(self, arguments: dict) -> str:
+        """Execute browser_click tool."""
+        try:
+            from tools.browser_tools import browser_click_tool
+            return browser_click_tool(
+                x=arguments.get("x", 0),
+                y=arguments.get("y", 0),
+                button=arguments.get("button", "left"),
+                double=arguments.get("double", False),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_click failed: {e}"
+
+    def _execute_browser_scroll(self, arguments: dict) -> str:
+        """Execute browser_scroll tool."""
+        try:
+            from tools.browser_tools import browser_scroll_tool
+            return browser_scroll_tool(
+                direction=arguments.get("direction", "down"),
+                amount=arguments.get("amount", 500),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_scroll failed: {e}"
+
+    def _execute_browser_type(self, arguments: dict) -> str:
+        """Execute browser_type tool."""
+        try:
+            from tools.browser_tools import browser_type_tool
+            return browser_type_tool(
+                text=arguments.get("text", ""),
+                clear_first=arguments.get("clear_first", False),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_type failed: {e}"
+
+    def _execute_browser_press(self, arguments: dict) -> str:
+        """Execute browser_press tool."""
+        try:
+            from tools.browser_tools import browser_press_tool
+            return browser_press_tool(
+                key=arguments.get("key", "Enter"),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_press failed: {e}"
+
+    def _execute_browser_read_page(self, arguments: dict) -> str:
+        """Execute browser_read_page tool."""
+        try:
+            from tools.browser_tools import browser_read_page_tool
+            return browser_read_page_tool(
+                selector=arguments.get("selector"),
+                max_length=arguments.get("max_length", 10000),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_read_page failed: {e}"
+
+    def _execute_browser_screenshot(self, arguments: dict) -> str:
+        """Execute browser_screenshot tool."""
+        try:
+            from tools.browser_tools import browser_screenshot_tool
+            return browser_screenshot_tool(
+                full_page=arguments.get("full_page", True),
+                output_dir=arguments.get("output_dir", "screenshots"),
+            )
+        except Exception as e:
+            return f"[TOOL ERROR] browser_screenshot failed: {e}"
+
+    def _execute_browser_close(self, arguments: dict) -> str:
+        """Execute browser_close tool."""
+        try:
+            from tools.browser_tools import browser_close_tool
+            return browser_close_tool()
+        except Exception as e:
+            return f"[TOOL ERROR] browser_close failed: {e}"
 
     # --- Corpus Tools ---
 
@@ -583,6 +678,22 @@ class ToolExecutor:
                 output = self._execute_web_search(arguments)
             elif name == "fetch_url":
                 output = self._execute_fetch_url(arguments)
+            elif name == "browser_navigate":
+                output = self._execute_browser_navigate(arguments)
+            elif name == "browser_click":
+                output = self._execute_browser_click(arguments)
+            elif name == "browser_scroll":
+                output = self._execute_browser_scroll(arguments)
+            elif name == "browser_type":
+                output = self._execute_browser_type(arguments)
+            elif name == "browser_press":
+                output = self._execute_browser_press(arguments)
+            elif name == "browser_read_page":
+                output = self._execute_browser_read_page(arguments)
+            elif name == "browser_screenshot":
+                output = self._execute_browser_screenshot(arguments)
+            elif name == "browser_close":
+                output = self._execute_browser_close(arguments)
             elif name == "write_file":
                 output = self._execute_write_file(arguments)
             elif name == "ingest_document":

@@ -3,6 +3,7 @@ tools package for AgeMem agent.
 
 This package provides various tools for the agent including:
 - Web search and fetch tools (web_tools.py)
+- Browser automation tools (browser_tools.py)
 - Corpus/document management tools (corpus.py)
 - Query expansion utilities (query_expansion.py)
 
@@ -17,6 +18,7 @@ from .corpus import (
     grep_corpus,
     read_document,
     read_lines,
+    ingest_document,
     tool_definitions as corpus_tool_definitions,
 )
 
@@ -31,12 +33,29 @@ def __getattr__(name):
         'fetch_url',
         'fetch_url_tool',
         'write_file',
-        'ingest_document',
         'browser_navigate',
         'browser_navigate_tool',
         'register_conversation_urls',
         'validate_url_for_fetch',
         'web_tool_definitions',
+    }
+    browser_exports = {
+        'browser_click',
+        'browser_click_tool',
+        'browser_scroll',
+        'browser_scroll_tool',
+        'browser_type',
+        'browser_type_tool',
+        'browser_press',
+        'browser_press_tool',
+        'browser_read_page',
+        'browser_read_page_tool',
+        'browser_screenshot',
+        'browser_screenshot_tool',
+        'browser_close',
+        'browser_close_tool',
+        'BrowserSession',
+        'browser_tool_definitions',
     }
     config_exports = {
         'BROWSER_CDP_ENDPOINT',
@@ -45,6 +64,9 @@ def __getattr__(name):
     if name in web_exports:
         from . import web_tools
         return getattr(web_tools, name)
+    if name in browser_exports:
+        from . import browser_tools
+        return getattr(browser_tools, name)
     if name in config_exports:
         from core.config import BROWSER_CDP_ENDPOINT, BROWSER_CONNECT_OVER_CDP
         if name == 'BROWSER_CDP_ENDPOINT':
@@ -60,12 +82,28 @@ __all__ = [
     "fetch_url",
     "fetch_url_tool",
     "write_file",
-    "ingest_document",
     "browser_navigate",
     "browser_navigate_tool",
     "register_conversation_urls",
     "validate_url_for_fetch",
     "web_tool_definitions",
+    # Browser tools (lazy loaded)
+    "browser_click",
+    "browser_click_tool",
+    "browser_scroll",
+    "browser_scroll_tool",
+    "browser_type",
+    "browser_type_tool",
+    "browser_press",
+    "browser_press_tool",
+    "browser_read_page",
+    "browser_read_page_tool",
+    "browser_screenshot",
+    "browser_screenshot_tool",
+    "browser_close",
+    "browser_close_tool",
+    "BrowserSession",
+    "browser_tool_definitions",
     # Browser CDP config
     "BROWSER_CDP_ENDPOINT",
     "BROWSER_CONNECT_OVER_CDP",
@@ -75,6 +113,7 @@ __all__ = [
     "grep_corpus",
     "read_document",
     "read_lines",
+    "ingest_document",
     "corpus_tool_definitions",
     # Query expansion
     "QueryExpander",

@@ -15,7 +15,7 @@ from core.config import CORPUS, MAX_READ_LINES
 
 logger = logging.getLogger("agemem")
 
-tool_definitions =[
+tool_definitions = [
     {
         "type": "function",
         "function": {
@@ -108,6 +108,37 @@ tool_definitions =[
                     "end_line": {"type": "integer", "description": "End line number (1-indexed)."}
                 },
                 "required":["doc_id", "start_line", "end_line"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ingest_document",
+            "description": (
+                "Ingest a document into the corpus with NER entity extraction. "
+                "Supports both .md and .pdf files. "
+                "For .pdf: converts to markdown via Docling, extracts entities via GLiNER, adds to corpus. "
+                "For .md: adds to corpus with entity extraction. "
+                "Returns doc_id on success."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file (.md or .pdf)"
+                    },
+                    "doc_type": {
+                        "type": "string",
+                        "description": "Document type: document, contract, research, cronoprogramma, etc. (PDF only, default: document)"
+                    },
+                    "labels": {
+                        "type": "string",
+                        "description": "Label set for entity extraction: edilizia, legal, research (PDF only, default: edilizia)"
+                    }
+                },
+                "required": ["path"]
             }
         }
     }
@@ -335,7 +366,86 @@ def read_lines(doc_id: str, start_line: int, end_line: int) -> str:
         return f"Lines {start_line}-{end_line} of {doc_id}:\n\n{result}"
     except IOError as e:
         return f"Error reading document: {e}"
-    
+
+
+def ingest_document(path: str, doc_type: str = "document", labels: str = "edilizia") -> str:
+    """
+    Ingest a document into the corpus.
+
+    Supports both .md and .pdf files:
+    - .md files: processed directly with entity extraction
+    - .pdf files: converted via Docling using uv run ingest/ingest.py
+
+    Args:
+        path: Path to the file (.md or .pdf)
+        doc_type: Document type for PDFs (default: document)
+        labels: Label set for PDFs (default: edilizia)
+
+    Returns:
+        Success message with doc_id or error
+    """
+    import subprocess
+
+    file_path = Path(path)
+
+    if not file_path.exists():
+        return f"Error: File not found: {path}"
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".md":
+        # Markdown ingestion - import and call ingest function directly
+        try:
+            from ingest.ingest import ingest
+            doc_id = ingest(str(file_path))
+            logger.info(f"[ingest_document] Ingested markdown {path} as {doc_id}")
+            return f"Successfully ingested markdown. doc_id: {doc_id}"
+        except Exception as e:
+            return f"Error ingesting markdown: {e}"
+
+    elif suffix == ".pdf":
+        # PDF ingestion - use uv run ingest/ingest.py
+        cmd = [
+            "uv", "run", "ingest/ingest.py",
+            str(file_path),
+            doc_type,
+            "--labels", labels
+        ]
+
+        try:
+            logger.info(f"[ingest_document] Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minutes for large PDFs
+                cwd=str(Path(__file__).parent.parent)  # Run from project root
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                return f"Error ingesting PDF: {error_msg}"
+
+            # Extract doc_id from output (last line usually contains it)
+            output = result.stdout.strip()
+            import re
+            doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
+            doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
+
+            logger.info(f"[ingest_document] Ingested PDF {path} as {doc_id}")
+            return f"Successfully ingested PDF.\n\n{output}"
+
+        except subprocess.TimeoutExpired:
+            return "Error: PDF ingestion timed out (after 10 minutes)"
+        except FileNotFoundError:
+            return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
+        except Exception as e:
+            return f"Error ingesting PDF: {e}"
+
+    else:
+        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+
+
 if __name__ == "__main__":
     r1 = grep_corpus("referendum giustizia italia")
     print(r1)
