@@ -1,451 +1,417 @@
 """
-evaluation/llm_judge.py
-───────────────────────
-LLM-as-Judge client for AgeMem evaluation.
+LLM Judge for evaluating model answers against ground-truth.
 
-Integrates with llama.cpp server or any OpenAI-compatible endpoint
-to evaluate response correctness using task-specific prompts from
-LongMemEval methodology.
+Targets a local llama.cpp server (OpenAI-compatible /v1/chat/completions).
+Handles Qwen3-style <think>...</think> blocks in responses before score parsing.
+
+Usage:
+    judge = LLMJudge(api_base="http://localhost:8080/v1", model="qwen3-8b")
+    result = judge.evaluate(
+        question="Who was the first US president?",
+        expected_answer="George Washington",
+        model_response="The first president was George Washington.",
+        behavior_type="HOTPOT_J",
+    )
+    print(result.score, result.parse_status)
 """
 
 from __future__ import annotations
 
-import json
-import os
+import logging
+import re
 import time
-import threading
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
-from functools import wraps
 
-import httpx
+import requests
 
-try:
-    import backoff
-    HAVE_BACKOFF = True
-except ImportError:
-    HAVE_BACKOFF = False
-
-try:
-    import openai
-    from openai import OpenAI
-    HAVE_OPENAI = True
-except ImportError:
-    HAVE_OPENAI = False
-    OpenAI = object  # type: ignore
+logger = logging.getLogger(__name__)
 
 
-class RateLimiter:
-    """Thread-safe rate limiter with adaptive backoff."""
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
 
-    def __init__(self, min_interval: float = 0.5, backoff_factor: float = 2.0, max_backoff: float = 60.0):
-        self.min_interval = min_interval
-        self.backoff_factor = backoff_factor
-        self.max_backoff = max_backoff
-        self._lock = threading.Lock()
-        self._last_request_time = 0.0
-        self._current_backoff = 0.0
-        self._consecutive_429s = 0
-
-    def wait_before_request(self) -> None:
-        """Wait appropriate time before making a request."""
-        with self._lock:
-            now = time.time()
-            wait_time = max(self._current_backoff, self.min_interval - (now - self._last_request_time))
-            if wait_time > 0:
-                time.sleep(wait_time)
-            self._last_request_time = time.time()
-
-    def on_success(self) -> None:
-        """Reset backoff on successful request."""
-        with self._lock:
-            self._consecutive_429s = 0
-            self._current_backoff = 0.0
-
-    def on_rate_limit(self, retry_after: Optional[float] = None) -> None:
-        """Increase backoff on rate limit."""
-        with self._lock:
-            self._consecutive_429s += 1
-            # Use retry_after if provided, otherwise exponential backoff
-            if retry_after and retry_after > 0:
-                self._current_backoff = min(retry_after, self.max_backoff)
-            else:
-                self._current_backoff = min(
-                    self.min_interval * (self.backoff_factor ** self._consecutive_429s),
-                    self.max_backoff
-                )
+class ParseStatus(str, Enum):
+    OK            = "ok"
+    PARSE_FAILURE = "parse_failure"
+    HTTP_ERROR    = "http_error"
+    TIMEOUT       = "timeout"
+    EXCEPTION     = "exception"
 
 
 @dataclass
 class JudgeResult:
-    """Result of LLM judgment."""
-    is_correct: bool
-    raw_response: str
+    """Full provenance for a single judge call."""
+    score: float                    # 0.0–1.0; may be 0.0 on failure
+    parse_status: ParseStatus
+    raw_response: str               # full text returned by the model
+    think_block: str                # <think>…</think> content, empty if absent
+    score_text: str                 # the substring that was parsed into score
     latency_ms: float
-    model: str
+    error: Optional[str] = None
 
+    @property
+    def ok(self) -> bool:
+        return self.parse_status == ParseStatus.OK
+
+
+# ---------------------------------------------------------------------------
+# Prompt template
+# ---------------------------------------------------------------------------
+
+JUDGE_PROMPT_TEMPLATE = """\
+You are an expert judge evaluating the correctness of answers to questions.
+
+Given the following information:
+- Question: {question}
+- Ground-truth Answer: {ground_truth}
+- Agent's Answer: {agent_answer}
+
+Please evaluate the generated answer on a scale of 0.0 to 1.0:
+- 1.0: Perfect match or equivalent correct answer
+- 0.8-0.9: Mostly correct with minor differences
+- 0.6-0.7: Partially correct or close approximation
+- 0.4-0.5: Some correct elements but significant errors
+- 0.2-0.3: Mostly incorrect with few correct elements
+- 0.0-0.1: Completely incorrect or irrelevant
+
+Respond with only a number between 0.0 and 1.0 (e.g., "0.85")\
+"""
+
+
+# ---------------------------------------------------------------------------
+# Think-block stripping
+# ---------------------------------------------------------------------------
+
+# Matches <think>…</think> including multiline content.
+# Non-greedy so nested or multiple blocks are handled independently.
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think_block(text: str) -> tuple[str, str]:
+    """
+    Remove all <think>…</think> blocks from *text*.
+
+    Returns:
+        (clean_text, think_content)
+        think_content is the concatenated inner text of all think blocks,
+        empty string if none were present.
+    """
+    think_parts: list[str] = []
+
+    def _capture(m: re.Match) -> str:
+        think_parts.append(m.group(1).strip())
+        return ""
+
+    clean = _THINK_RE.sub(_capture, text).strip()
+    return clean, "\n\n".join(think_parts)
+
+
+# ---------------------------------------------------------------------------
+# Score parsing
+# ---------------------------------------------------------------------------
+
+# Ordered from most-specific to least-specific.
+_SCORE_PATTERNS: list[re.Pattern] = [
+    # Explicit marker:  FINAL_SCORE: 0.85
+    re.compile(r"FINAL_SCORE\s*:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+    # Bare decimal first (0.85, .9)
+    re.compile(r"\b(0?\.[0-9]+|1\.0|0\.0)\b"),
+    # Integer 0 or 1
+    re.compile(r"\b([01])\b"),
+]
+
+
+def parse_score(text: str) -> tuple[float, str, ParseStatus]:
+    """
+    Extract a 0.0–1.0 score from *text* (think-block already stripped).
+
+    Returns:
+        (score, matched_text, status)
+    """
+    for pattern in _SCORE_PATTERNS:
+        matches = pattern.findall(text)
+        # Take the *last* match — chain-of-thought models put the answer last
+        if matches:
+            raw = matches[-1]
+            try:
+                v = float(raw)
+                if 0.0 <= v <= 1.0:
+                    return v, raw, ParseStatus.OK
+            except ValueError:
+                continue
+
+    return 0.0, "", ParseStatus.PARSE_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# LLM Judge
+# ---------------------------------------------------------------------------
 
 class LLMJudge:
     """
-    LLM-as-Judge for evaluating AgeMem responses.
+    Calls a local llama.cpp OpenAI-compatible server to score agent answers.
 
-    Supports local llama.cpp server via OpenAI-compatible API.
+    Parameters
+    ----------
+    api_base:
+        Base URL of the llama.cpp server, e.g. "http://localhost:8080/v1".
+    model:
+        Model name string forwarded to the API (llama.cpp ignores it but
+        some proxies use it for routing).
+    api_key:
+        Passed as Bearer token; use "EMPTY" for keyless local servers.
+    temperature:
+        Sampling temperature. 0.0 gives deterministic greedy output.
+    max_tokens:
+        Upper bound on response length. 512 is enough for score-only replies;
+        increase to ~3000 if the model emits <think> blocks.
+    timeout_s:
+        HTTP request timeout in seconds.
+    retries:
+        Number of retry attempts on transient HTTP/network errors.
+    retry_delay_s:
+        Seconds to wait between retries (simple fixed backoff).
     """
-
-    # Task-specific prompts from LongMemEval
-    PROMPTS = {
-        "IE": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
-
-        "MR": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
-
-        "TR": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
-
-        "KU": """I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.
-
-Question: {question}
-
-Correct Answer: {answer}
-
-Model Response: {response}
-
-Is the model response correct? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
-
-        "ABS": """I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.
-
-Question: {question}
-
-Explanation: {answer}
-
-Model Response: {response}
-
-Does the model correctly identify the question as unanswerable? Answer with ONLY a single word: yes or no. Do not include any thinking, reasoning, or explanation.""",
-    }
-
-    # JSON-format prompts for structured output
-    PROMPTS_JSON = {
-        "IE": """Evaluate if the model response contains the correct answer.
-
-Question: {question}
-Correct Answer: {answer}
-Model Response: {response}
-
-Return a JSON object with a single boolean field "correct" (true if the response contains the correct answer or is equivalent, false otherwise).""",
-
-        "MR": """Evaluate if the model response contains the correct answer.
-
-Question: {question}
-Correct Answer: {answer}
-Model Response: {response}
-
-Return a JSON object with a single boolean field "correct" (true if the response contains the correct answer or is equivalent, false otherwise).""",
-
-        "TR": """Evaluate if the model response contains the correct answer.
-
-Question: {question}
-Correct Answer: {answer}
-Model Response: {response}
-
-Return a JSON object with a single boolean field "correct" (true if the response contains the correct answer, false otherwise). Note: Do not penalize off-by-one errors for time calculations.""",
-
-        "KU": """Evaluate if the model response contains the correct updated answer.
-
-Question: {question}
-Correct Answer: {answer}
-Model Response: {response}
-
-Return a JSON object with a single boolean field "correct" (true if the response contains the updated correct answer, false otherwise).""",
-
-        "ABS": """Evaluate if the model correctly identifies the question as unanswerable.
-
-Question: {question}
-Explanation: {answer}
-Model Response: {response}
-
-Return a JSON object with a single boolean field "correct" (true if the model correctly identifies the question as unanswerable, false otherwise).""",
-    }
 
     def __init__(
         self,
         api_base: str = "http://localhost:8080/v1",
+        model: str = "local-model",
         api_key: str = "EMPTY",
-        model: str = "Qwen3.5-9B-UD-Q4_K_XL.gguf",
         temperature: float = 0.0,
-        max_tokens: int = 250,
-        timeout: float = 120.0,
-        use_json: bool = False,
-        min_request_interval: float = 0.5,
+        max_tokens: int = 512,
+        timeout_s: float = 120.0,
+        retries: int = 2,
+        retry_delay_s: float = 2.0,
     ) -> None:
-        """
-        Initialize LLM-as-Judge.
-
-        Args:
-            api_base: OpenAI-compatible API endpoint (llama.cpp server)
-            api_key: API key (use "EMPTY" for local servers)
-            model: Model name for the judge
-            temperature: Sampling temperature (0.0 for deterministic)
-            max_tokens: Maximum tokens to generate
-            timeout: Request timeout in seconds (default: 120.0)
-            use_json: Use JSON response format for structured output
-            min_request_interval: Minimum seconds between requests (default: 0.5)
-        """
-        if not HAVE_OPENAI:
-            raise ImportError("openai package is required for LLMJudge. Install with: pip install openai")
-
+        self.endpoint = api_base.rstrip("/") + "/chat/completions"
         self.model = model
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.timeout = timeout
-        self.use_json = use_json
+        self.timeout_s = timeout_s
+        self.retries = retries
+        self.retry_delay_s = retry_delay_s
 
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            timeout=httpx.Timeout(timeout, connect=30.0),
+        logger.info(
+            "LLMJudge initialised: endpoint=%s model=%s temperature=%s max_tokens=%s",
+            self.endpoint, self.model, self.temperature, self.max_tokens,
         )
 
-        # Rate limiter for API calls
-        self._rate_limiter = RateLimiter(min_interval=min_request_interval)
-
-    def _call_judge(self, prompt: str) -> tuple[str, float]:
-        """
-        Call the judge model with rate limiting and retry logic.
-
-        Returns:
-            Tuple of (response_text, latency_ms)
-        """
-        t0 = time.time()
-
-        # Build API call parameters
-        call_params = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "n": 1,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-
-        # Add JSON response format if enabled
-        if self.use_json:
-            call_params["response_format"] = {"type": "json_object"}
-
-        def _extract_retry_after(error: Exception) -> Optional[float]:
-            """Extract retry-after from error response."""
-            try:
-                if hasattr(error, 'response') and error.response:
-                    headers = getattr(error.response, 'headers', {})
-                    if headers:
-                        retry_after = headers.get('retry-after')
-                        if retry_after:
-                            return float(retry_after)
-                # Check for x-ratelimit-reset header (OpenRouter style)
-                if hasattr(error, 'response') and error.response:
-                    headers = getattr(error.response, 'headers', {})
-                    reset = headers.get('x-ratelimit-reset')
-                    if reset:
-                        return float(reset)
-            except (ValueError, TypeError, AttributeError):
-                pass
-            return None
-
-        max_attempts = 8
-        last_error = None
-
-        for attempt in range(max_attempts):
-            # Wait before request (rate limiting)
-            self._rate_limiter.wait_before_request()
-
-            try:
-                completion = self.client.chat.completions.create(**call_params)
-                self._rate_limiter.on_success()
-
-                latency_ms = (time.time() - t0) * 1000
-                response = completion.choices[0].message.content.strip()
-                return response, latency_ms
-
-            except openai.RateLimitError as e:
-                retry_after = _extract_retry_after(e)
-                self._rate_limiter.on_rate_limit(retry_after)
-                last_error = e
-
-                # Wait with exponential backoff + jitter
-                wait_time = self._rate_limiter._current_backoff
-                jitter = wait_time * 0.1 * (0.5 - time.time() % 1)  # Simple jitter
-                actual_wait = wait_time + abs(jitter)
-
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"Rate limit hit (attempt {attempt + 1}/{max_attempts}), "
-                    f"waiting {actual_wait:.1f}s before retry"
-                )
-                time.sleep(actual_wait)
-                continue
-
-            except openai.APIError as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    wait_time = 2 ** (attempt + 1)  # Exponential backoff
-                    time.sleep(wait_time)
-                    continue
-                raise
-
-        # All retries exhausted
-        raise last_error or RuntimeError("Max retries exceeded")
-
-    def _parse_judge_response(self, raw_response: str) -> bool:
-        """
-        Parse judge response to extract yes/no answer.
-        Handles JSON format, chain-of-thought models, and text responses.
-
-        Args:
-            raw_response: Raw text from judge model
-
-        Returns:
-            True if answer is yes/correct, False otherwise
-        """
-        import re
-
-        # First try JSON parsing if enabled
-        if self.use_json:
-            # Try parsing entire response as JSON first
-            try:
-                data = json.loads(raw_response)
-                if "correct" in data:
-                    return bool(data["correct"])
-                if "is_correct" in data:
-                    return bool(data["is_correct"])
-                if "answer" in data:
-                    return str(data["answer"]).lower() in ("yes", "true", "1")
-            except json.JSONDecodeError:
-                pass
-
-            # Try extracting JSON from response (handles thinking + JSON)
-            json_pattern = r'\{[^{}]*"correct"\s*:\s*(true|false)[^{}]*\}'
-            match = re.search(json_pattern, raw_response, re.IGNORECASE)
-            if match:
-                try:
-                    # Find the full JSON object
-                    start = raw_response.find('{')
-                    if start != -1:
-                        # Find matching closing brace
-                        depth = 0
-                        for i, c in enumerate(raw_response[start:]):
-                            if c == '{':
-                                depth += 1
-                            elif c == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    json_str = raw_response[start:start+i+1]
-                                    data = json.loads(json_str)
-                                    if "correct" in data:
-                                        return bool(data["correct"])
-                                    break
-                except (json.JSONDecodeError, ValueError):
-                    pass
-
-        response_lower = raw_response.lower()
-
-        # Look for "yes" or "no" at start/end of response or after common delimiters
-        # Also handles Qwen-style thinking tags (Unicode U+200B zero-width space variants)
-        patterns = [
-            r'^\s*(yes|no)[\s\.,;!?]*$',  # standalone yes/no
-            r'[\n\r]\s*(yes|no)\s*$',  # yes/no at end of line
-            r'answer[\s]*[:\-]?\s*(yes|no)',  # "answer: yes/no"
-            r'^(yes|no)\s*[\.,;]',  # yes/no at start
-            r'[\.,;]\s*(yes|no)\s*$',  # yes/no at end after punctuation
-            r'\*?\s*(yes|no)\s*$',  # after thinking close tag or similar markers
-            r'(?:thinking|thought).*?(yes|no)',  # after thinking section
-            r'(?:conclusion|conclude).*?(yes|no)',  # after conclusion
-            r'(?:therefore|thus|so).*?(yes|no)',  # after reasoning words
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, response_lower, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1) == "yes"
-
-        # Fallback: simple substring search (original behavior)
-        return "yes" in response_lower
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def evaluate(
         self,
         question: str,
         expected_answer: str,
         model_response: str,
-        behavior_type: str,
+        behavior_type: str = "HOTPOT_J",   # reserved for future routing
     ) -> JudgeResult:
         """
-        Evaluate a response using task-specific criteria.
+        Score *model_response* against *expected_answer* for *question*.
 
-        Args:
-            question: The original question
-            expected_answer: The expected/correct answer
-            model_response: The response from the model being evaluated
-            behavior_type: One of IE, MR, TR, KU, ABS
-
-        Returns:
-            JudgeResult with correctness determination
+        Always returns a JudgeResult; never raises. Check result.ok to
+        distinguish genuine scores from failures.
         """
-        # Get appropriate prompt template
-        if self.use_json:
-            prompt_template = self.PROMPTS_JSON.get(behavior_type, self.PROMPTS_JSON["IE"])
-        else:
-            prompt_template = self.PROMPTS.get(behavior_type, self.PROMPTS["IE"])
-
-        # Format prompt
-        prompt = prompt_template.format(
+        prompt = JUDGE_PROMPT_TEMPLATE.format(
             question=question,
-            answer=expected_answer,
-            response=model_response,
+            ground_truth=expected_answer,
+            agent_answer=model_response,
         )
 
-        # Call judge
-        raw_response, latency_ms = self._call_judge(prompt)
+        start = time.perf_counter()
+        raw, status, error = self._call_with_retry(prompt)
+        latency_ms = (time.perf_counter() - start) * 1000
 
-        # Parse yes/no response (handle chain-of-thought models)
-        is_correct = self._parse_judge_response(raw_response)
+        if status != ParseStatus.OK:
+            # HTTP/timeout/exception — no score available
+            return JudgeResult(
+                score=0.0,
+                parse_status=status,
+                raw_response=raw,
+                think_block="",
+                score_text="",
+                latency_ms=latency_ms,
+                error=error,
+            )
+
+        # Strip Qwen think block before score extraction
+        clean, think = strip_think_block(raw)
+
+        score, score_text, parse_status = parse_score(clean)
+
+        if parse_status != ParseStatus.OK:
+            logger.warning(
+                "Score parse failed for behavior_type=%s | clean_response=%r",
+                behavior_type, clean[:300],
+            )
+
+        logger.debug(
+            "Judge result: score=%.2f status=%s think_len=%d score_text=%r latency=%.0fms",
+            score, parse_status.value, len(think), score_text, latency_ms,
+        )
 
         return JudgeResult(
-            is_correct=is_correct,
-            raw_response=raw_response,
+            score=score,
+            parse_status=parse_status,
+            raw_response=raw,
+            think_block=think,
+            score_text=score_text,
             latency_ms=latency_ms,
-            model=self.model,
+            error=error,
         )
 
-    def health_check(self) -> bool:
-        """Check if judge server is accessible."""
-        try:
-            # Simple health check with explicit timeout
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "Say yes"}],
-                max_tokens=5,
-                temperature=0,
-                timeout=30.0,
-            )
-            return True
-        except Exception:
-            return False
+    # ------------------------------------------------------------------
+    # HTTP layer
+    # ------------------------------------------------------------------
+
+    def _call_with_retry(self, prompt: str) -> tuple[str, ParseStatus, Optional[str]]:
+        """
+        POST to the llama.cpp endpoint with fixed-backoff retries.
+
+        Returns:
+            (response_text, status, error_message)
+        """
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        last_error: Optional[str] = None
+
+        for attempt in range(self.retries + 1):
+            if attempt > 0:
+                logger.info("Retrying judge call (attempt %d/%d)…", attempt + 1, self.retries + 1)
+                time.sleep(self.retry_delay_s)
+
+            try:
+                resp = requests.post(
+                    self.endpoint,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=self.timeout_s,
+                )
+                resp.raise_for_status()
+
+            except requests.Timeout as exc:
+                last_error = f"Timeout after {self.timeout_s}s: {exc}"
+                logger.warning(last_error)
+                continue  # retry
+
+            except requests.HTTPError as exc:
+                last_error = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+                logger.warning("Judge HTTP error: %s", last_error)
+                # 4xx errors are not retryable
+                if exc.response.status_code < 500:
+                    return "", ParseStatus.HTTP_ERROR, last_error
+                continue  # retry 5xx
+
+            except requests.RequestException as exc:
+                last_error = f"Request error: {exc}"
+                logger.warning(last_error)
+                continue
+
+            except Exception as exc:
+                last_error = f"Unexpected error: {exc}"
+                logger.exception(last_error)
+                return "", ParseStatus.EXCEPTION, last_error
+
+            # Success — extract text
+            try:
+                text = resp.json()["choices"][0]["message"]["content"]
+                return text, ParseStatus.OK, None
+            except (KeyError, IndexError, ValueError) as exc:
+                last_error = f"Unexpected response shape: {exc} | body={resp.text[:300]}"
+                logger.warning(last_error)
+                return resp.text, ParseStatus.PARSE_FAILURE, last_error
+
+        # All retries exhausted
+        final_status = ParseStatus.TIMEOUT if "Timeout" in (last_error or "") else ParseStatus.HTTP_ERROR
+        return "", final_status, last_error
+
+
+# ---------------------------------------------------------------------------
+# Smoke-test  (python llm_judge.py)
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
+
+    # --- Unit tests for pure functions (no server required) ---
+
+    print("── strip_think_block ──────────────────────────────────────")
+    cases = [
+        "<think>This is my reasoning.</think>0.85",
+        "<think>\nStep 1: analyse\nStep 2: conclude\n</think>\n0.9",
+        "No think block here. 0.75",
+        "<THINK>case-insensitive</THINK>1.0",
+        "<think>first</think> some text <think>second</think>0.5",
+    ]
+    for c in cases:
+        clean, think = strip_think_block(c)
+        print(f"  input   : {c!r}")
+        print(f"  clean   : {clean!r}")
+        print(f"  think   : {think!r}")
+        print()
+
+    print("── parse_score ────────────────────────────────────────────")
+    score_cases = [
+        ("0.85", 0.85, ParseStatus.OK),
+        ("FINAL_SCORE: 0.9", 0.9, ParseStatus.OK),
+        ("The answer is 0.75 out of 1.0", 1.0, ParseStatus.OK),  # last match wins
+        ("1", 1.0, ParseStatus.OK),
+        ("0", 0.0, ParseStatus.OK),
+        ("no number here", 0.0, ParseStatus.PARSE_FAILURE),
+    ]
+    all_passed = True
+    for text, expected_score, expected_status in score_cases:
+        score, matched, status = parse_score(text)
+        ok = (score == expected_score) and (status == expected_status)
+        mark = "✓" if ok else "✗"
+        print(f"  {mark} {text!r:40s} → score={score} matched={matched!r} status={status.value}")
+        if not ok:
+            print(f"      expected score={expected_score} status={expected_status.value}")
+            all_passed = False
+    print()
+
+    if not all_passed:
+        print("Some unit tests FAILED.")
+        sys.exit(1)
+    print("All unit tests passed.\n")
+
+    # --- Live server test (skipped if server not reachable) ---
+    api_base = "http://localhost:8080/v1"
+    print(f"── Live server test ({api_base}) ──────────────────────────")
+    try:
+        ping = requests.get(api_base.replace("/v1", "/health"), timeout=2.0)
+        server_up = ping.ok
+    except Exception:
+        server_up = False
+
+    if not server_up:
+        print("  Server not reachable — skipping live test.")
+    else:
+        judge = LLMJudge(api_base=api_base)
+        result = judge.evaluate(
+            question="What is the capital of France?",
+            expected_answer="Paris",
+            model_response="The capital of France is Paris.",
+        )
+        print(f"  score       : {result.score}")
+        print(f"  parse_status: {result.parse_status.value}")
+        print(f"  score_text  : {result.score_text!r}")
+        print(f"  think_block : {result.think_block[:120]!r}")
+        print(f"  latency_ms  : {result.latency_ms:.0f}")
+        print(f"  error       : {result.error}")

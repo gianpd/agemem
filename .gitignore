@@ -11,6 +11,7 @@ __pytest__
 *.pdf
 *.log
 *.db
+*.png
 
 documents/
 corpus/

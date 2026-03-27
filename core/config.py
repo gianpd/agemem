@@ -255,7 +255,7 @@ class AgememConfig:
     """Alpha Vantage API key for commodity price data."""
 
     # ── Query Expansion ───────────────────────────────────────────────────────
-    ENABLE_QUERY_EXPANSION: bool = True
+    ENABLE_QUERY_EXPANSION: bool = False
     """Enable query expansion for LTM retrieval. Opt-in, safe default."""
 
     QUERY_EXPANSION_N_VARIANTS: int = 3

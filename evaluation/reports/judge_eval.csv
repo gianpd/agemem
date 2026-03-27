@@ -1,0 +1,74 @@
+sample_id,index,query,gold,gold_titles,prediction,llm_judge_score,judge_status,latency_ms
+5a8b57f25542995d1e6f1371,1,Were Scott Derrickson and Ed Wood of the same nationality?,yes,Scott Derrickson|Ed Wood,,1.0,ok,45827.0
+5a8c7595554299585d9e36b6,2,What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,Chief of Protocol,Kiss and Tell (1945 film)|Shirley Temple,,1.0,ok,37055.0
+5a85ea095542994775f606a8,3,"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",Animorphs,The Hork-Bajir Chronicles|Animorphs,,1.0,ok,88430.0
+5adbf0a255429947ff17385a,4,Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,Laleli Mosque|Esma Sultan Mansion,,1.0,ok,46444.0
+5a8e3ea95542995a26add48d,5,"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City",Big Stone Gap (film)|Adriana Trigiani,,1.0,ok,58001.0
+5abd94525542992ac4f382d2,6,2014 S/S is the debut album of a South Korean boy group that was formed by who?,YG Entertainment,Winner (band)|2014 S/S,,1.0,ok,59201.0
+5a85b2d95542997b5ce40028,7,Who was known by his stage name Aladin and helped organizations improve their performance as a consultant?,Eenasul Fateh,Eenasul Fateh|Management consulting,,1.0,ok,36167.0
+5a87ab905542996e4f3088c1,8,The arena where the Lewiston Maineiacs played their home games can seat how many people?,"3,677 seated",Androscoggin Bank Colisée|Lewiston Maineiacs,,0.0,parse_failure,201915.0
+5a7bbb64554299042af8f7cc,9,"Who is older, Annie Morton or Terry Richardson?",Terry Richardson,Terry Richardson|Annie Morton,,1.0,ok,42130.0
+5a8db19d5542994ba4e3dd00,10,Are Local H and For Against both from the United States?,yes,Local H|For Against,,1.0,ok,63691.0
+5a7166395542994082a3e814,11,"What is the name of the fight song of the university whose main campus is in Lawrence, Kansas and whose branch campuses are in the Kansas City metropolitan area?",Kansas Song,University of Kansas|Kansas Song,,0.0,parse_failure,215643.0
+5a877e5d5542993e715abf7d,12,"What screenwriter with credits for ""Evolution"" co-wrote a film starring Nicolas Cage and Téa Leoni?",David Weissman,The Family Man|David Weissman,,1.0,ok,63243.0
+5ab3b0bf5542992ade7c6e39,13,What year did Guns N Roses perform a promo for a movie starring Arnold Schwarzenegger as a former New York Police detective?,1999,End of Days (film)|Oh My God (Guns N' Roses song),,0.0,parse_failure,228084.0
+5ab56e32554299637185c594,14,Are Random House Tower and 888 7th Avenue both used for real estate?,no,Random House Tower|888 7th Avenue,,0.0,parse_failure,213743.0
+5ab6d09255429954757d337d,15,The football manager who recruited David Beckham managed Manchester United during what timeframe?,from 1986 to 2013,Alex Ferguson|1995–96 Manchester United F.C. season,,1.0,ok,85259.0
+5a75e05c55429976ec32bc5f,16,Brown State Fishing Lake is in a country that has a population of how many inhabitants ?,"9,984","Brown County, Kansas|Brown State Fishing Lake",,0.0,parse_failure,209669.0
+5ab3e45655429976abd1bcd4,17,The Vermont Catamounts men's soccer team currently competes in a conference that was formerly known as what from 1988 to 1996?,the North Atlantic Conference,Vermont Catamounts men's soccer|America East Conference,,1.0,ok,77835.0
+5ab29c24554299449642c932,18,Are Giuseppe Verdi and Ambroise Thomas both Opera composers ?,yes,Giuseppe Verdi|Ambroise Thomas,,1.0,ok,41202.0
+5ae0d4c9554299603e418468,19,Roger O. Egeberg was Assistant Secretary for Health and Scientific Affairs during the administration of a president that served during what years?,1969 until 1974,Richard Nixon|Roger O. Egeberg,,1.0,ok,110971.0
+5a8133725542995ce29dcbdb,20,"Which writer was from England, Henry Roth or Robert Erskine Childers?",Robert Erskine Childers DSC,Henry Roth|Robert Erskine Childers,,1.0,ok,50328.0
+5ae7a8175542993210983ed8,21,Which other Mexican Formula One race car driver has held the podium besides the Force India driver born in 1990?,Pedro Rodríguez,Formula One drivers from Mexico|Sergio Pérez,,1.0,ok,51590.0
+5ae6050f55429929b0807a5e,22,This singer of A Rather Blustery Day also voiced what hedgehog?,Sonic,A Rather Blustery Day|Jim Cummings,,1.0,ok,116056.0
+5adddccd5542997dc7907069,23,"Aside from the Apple Remote, what other device can control the program Apple Remote was originally designed to interact with?",keyboard function keys,Front Row (software)|Apple Remote,,1.0,ok,47534.0
+5ae2070a5542994d89d5b313,24,"Which performance act has a higher instrument to person ratio, Badly Drawn Boy or Wolf Alice? ",Badly Drawn Boy,Badly Drawn Boy|Wolf Alice,,1.0,ok,69656.0
+5ae22b8d554299234fd0440f,25,What was the father of Kasper Schmeichel voted to be by the IFFHS in 1992?,World's Best Goalkeeper,Kasper Schmeichel|Peter Schmeichel,,1.0,ok,32131.0
+5a722b8655429971e9dc9329,26,Who was the writer of These Boots Are Made for Walkin' and who died in 2007?,Barton Lee Hazlewood,These Boots Are Made for Walkin'|Lee Hazlewood,,1.0,ok,56284.0
+5adf37a95542995ec70e8f97,27,"The 2011–12 VCU Rams men's basketball team, led by third year head coach Shaka Smart, represented Virginia Commonwealth University which was founded in what year?",1838,Virginia Commonwealth University|2011–12 VCU Rams men's basketball team,,1.0,ok,44270.0
+5abd259d55429924427fcf1a,28,"Are both Dictyosperma, and Huernia described as a genus?",yes,Huernia|Dictyosperma,,1.0,ok,35663.0
+5a828c8355429966c78a6a50,29,Kaiser Ventures corporation was founded by an American industrialist who became known as the father of modern American shipbuilding?,Henry J. Kaiser,Henry J. Kaiser|Kaiser Ventures,,0.0,parse_failure,204611.0
+5a8a3e745542996c9b8d5e70,30,"What is the name for the adventure in ""Tunnels and Trolls"", a game designed by Ken St. Andre?",Arena of Khazan,Arena of Khazan|Tunnels &amp; Trolls,,0.0,parse_failure,208354.0
+5ac23ff0554299636651994d,31,"When was Poison's album ""Shut Up, Make Love"" released?",2000,"Shut Up, Make Love|Poison (American band)",,0.0,parse_failure,242969.0
+5ae4a3265542995ad6573de5,32,"Hayden is a singer-songwriter from Canada, but where does Buck-Tick hail from?","Fujioka, Gunma",Buck-Tick|Hayden (musician),,1.0,ok,52457.0
+5ae0361155429925eb1afc2c,33,Which  French ace pilot and adventurer fly L'Oiseau Blanc,Charles Eugène,L'Oiseau Blanc|Charles Nungesser,,0.0,parse_failure,202294.0
+5abc0a5d5542993f40c73c64,34,Are Freakonomics and In the Realm of the Hackers both American documentaries?,no,Freakonomics (film)|In the Realm of the Hackers,,1.0,ok,46786.0
+5a7cc50e554299452d57ba3e,35,"Which band, Letters to Cleo or Screaming Trees, had more members?",Letters to Cleo,Letters to Cleo|Screaming Trees,,1.0,ok,47001.0
+5abf63f15542997ec76fd3ea,36,Alexander Kerensky was defeated and destroyed by the Bolsheviks in the course of a civil war that ended when ?,October 1922,Socialist Revolutionary Party|Russian Civil War,,0.9,ok,193287.0
+5a8ef2a75542995a26add583,37,Seven Brief Lessons on Physics was written by an Italian physicist that has worked in France since what year?,2000,Carlo Rovelli|Seven Brief Lessons on Physics,,1.0,ok,41850.0
+5a80721b554299485f5985ef,38,"The Livesey Hal War Memorial commemorates the fallen of which war, that had over 60 million casualties?",World War II,Livesey Hall War Memorial|World War II casualties,,0.0,parse_failure,206804.0
+5ab51dae5542991779162d82,39,Are both Elko Regional Airport and Gerald R. Ford International Airport located in Michigan?,no,Elko Regional Airport|Gerald R. Ford International Airport,,1.0,ok,151245.0
+5a7571135542992d0ec05f98,40,Ralph Hefferline was a psychology professor at a university that is located in what city?,New York City,Columbia University|Ralph Hefferline,,1.0,ok,38210.0
+5a7a0e1e5542990783324e1a,41,Which dog's ancestors include Gordon and Irish Setters: the Manchester Terrier or the Scotch Collie?,Scotch Collie,Scotch Collie|Manchester Terrier,,0.0,parse_failure,203582.0
+5a74106b55429979e288289e,42,Where is the company that Sachin Warrier worked for as a software engineer headquartered? ,Mumbai,Tata Consultancy Services|Sachin Warrier,,1.0,ok,67231.0
+5a79311755429970f5fffe67,43,"A Japanese manga series based on a 16 year old high school student Ichitaka Seto, is written and illustrated by someone born in what year?",1962,I&quot;s|Masakazu Katsura,,1.0,ok,63344.0
+5ab2d3df554299194fa9352c,44,The battle in which Giuseppe Arimondi lost his life secured what for Ethiopia?,sovereignty,Giuseppe Arimondi|Battle of Adwa,,1.0,ok,48069.0
+5a760ab65542994ccc918697,45,Alfred Balk served as the secretary of the Committee on the Employment of Minority Groups in the News Media under which United States Vice President?,Nelson Rockefeller,Alfred Balk|Nelson Rockefeller,,0.0,parse_failure,204110.0
+5a7d54165542995f4f402256,46,"A medieval fortress in Dirleton, East Lothian, Scotland borders on the south side of what coastal area?",Yellowcraig,Yellowcraigs|Dirleton Castle,,1.0,ok,140993.0
+5ab859a955429934fafe6d7b,47,Who is the writer of this song that was inspired by words on a tombstone and was the first track on the box set Back to Mono?,Phil Spector,To Know Him Is to Love Him|Back to Mono (1958–1969),,1.0,ok,36591.0
+5add61d65542995b365fab21,48,What type of forum did a former Soviet statesman initiate?,Organizations could come together to address global issues,World Summit of Nobel Peace Laureates|Mikhail Gorbachev,,0.0,parse_failure,206892.0
+5a8e068b5542995085b37384,49,Are Ferocactus and Silene both types of plant?,yes,Ferocactus|Silene,,1.0,ok,39701.0
+5abbf698554299114383a0b5,50,Which British first-generation jet-powered medium bomber was used in the South West Pacific theatre of World War II?,English Electric Canberra,No. 2 Squadron RAAF|English Electric Canberra,,0.0,parse_failure,212558.0
+5a8e1027554299653c1aa15f,51,Which year and which conference was the 14th season for this conference as part of the NCAA Division that the Colorado Buffaloes played in with a record of 2-6 in conference play?,2009 Big 12 Conference,2009 Colorado Buffaloes football team|2009 Big 12 Conference football season,,1.0,ok,42788.0
+5ab84bf555429916710eb01f,52,In 1991 Euromarché was bought by a chain that operated how any hypermarkets at the end of 2016?,"1,462",Carrefour|Euromarché,,1.0,ok,40068.0
+5a77724455429972597f153e,53,What race track in the midwest hosts a 500 mile race eavery May?,Indianapolis Motor Speedway,1957 Indianapolis 500|Indianapolis Motor Speedway,,1.0,ok,35705.0
+5a87c13f5542996e4f30890c,54,"In what city did the ""Prince of tenors"" star in a film based on an opera by Giacomo Puccini?",Rome,Tosca (1956 film)|Franco Corelli,,1.0,ok,37555.0
+5ab96ab755429970cfb8eacd,55,"Ellie Goulding worked with what other writers on her third studio album, Delirium?","Max Martin, Savan Kotecha and Ilya Salmanzadeh",On My Mind (Ellie Goulding song)|Delirium (Ellie Goulding album),,1.0,ok,69159.0
+5a8a43eb5542996c9b8d5e82,56,Which Australian city founded in 1838 contains a boarding school opened by a Prime Minister of Australia and named after a school in London of the same name.,"Marion, South Australia","Marion, South Australia|Westminster School, Adelaide",,0.0,parse_failure,222309.0
+5ae73acb5542991e8301cc07,57,D1NZ is a series based on what oversteering technique?,Drifting,Drifting (motorsport)|D1NZ,,1.0,ok,48416.0
+5a7320565542991f9a20c61d,58,who is younger Keith Bostic or Jerry Glanville ?,Keith Bostic,Keith Bostic (American football)|Jerry Glanville,,0.0,parse_failure,210438.0
+5ae32e125542991a06ce9946,59,"According to the 2001 census, what was the population of the city in which Kirton End is located?","35,124","Boston, Lincolnshire|Kirton End",,1.0,ok,51825.0
+5adc53f75542996e6852530a,60,Are both Cypress and Ajuga genera?,no,Ajuga|Cypress,,0.0,parse_failure,195939.0
+5a8b20335542996c9b8d5fb3,61,What distinction is held by the former NBA player who was a member of the Charlotte Hornets during their 1992-93 season and was head coach for the WNBA team Charlotte Sting?,shortest player ever to play in the National Basketball Association,Muggsy Bogues|1992–93 Charlotte Hornets season,,1.0,ok,51600.0
+5a85fb085542994775f606de,62,What is the name of the executive producer of the film that has a score composed by Jerry Goldsmith?,Ronald Shusett,Alien (film)|Alien (soundtrack),,1.0,ok,48915.0
+5a7be2595542997c3ec972ac,63,"Who was born earlier, Emma Bull or Virginia Woolf?",Adeline Virginia Woolf,Virginia Woolf|Emma Bull,,1.0,ok,34598.0
+5a77152355429966f1a36c2e,64,What was the Roud Folk Song Index of the nursery rhyme inspiring What Are Little Girls Made Of?,821,What Are Little Boys Made Of?|What Are Little Girls Made Of?,,0.0,parse_failure,207250.0
+5a8f4c8d554299458435d5a3,65,Scott Parkin has been a vocal critic of Exxonmobil and another corporation that has operations in how many countries ?,more than 70 countries,Scott Parkin|Halliburton,,1.0,ok,57705.0
+5a80840f554299485f59863b,66,What WB supernatrual drama series was Jawbreaker star Rose Mcgowan best known for being in?,Charmed,Jawbreaker (film)|Rose McGowan,,1.0,ok,56135.0
+5a8361b65542992ef85e22a0,67,Vince Phillips held a junior welterweight title by an organization recognized by what larger Hall of Fame?,International Boxing Hall of Fame,Vince Phillips|International Boxing Federation,,1.0,ok,46659.0
+5ae7ba7a5542993210983f12,68,"What is the name of the singer who's song was released as the lead single from the album ""Confessions"", and that had popular song stuck behind for eight consecutive weeks?",Usher,Yeah! (Usher song)|I Don't Wanna Know,,0.0,parse_failure,210507.0
+5ac2acff55429921a00ab02b,69,who is the younger brother of The episode guest stars of The Hard Easy ,Bill Murray,The Hard Easy (Adventure Time)|Brian Doyle-Murray,,1.0,ok,53387.0
+5aba7cfe554299232ef4a2fd,70,The 2017–18 Wigan Athletic F.C. season will be a year in which the team competes in the league cup known as what for sponsorship reasons?,Carabao Cup,EFL Cup|2017–18 Wigan Athletic F.C. season,,0.0,parse_failure,208941.0
+5ae5aba0554299546bf82f17,71,"Which of Tara Strong major voice role in animated series is an American animated television series based on the DC Comics fictional superhero team, the ""Teen Titans""?",Teen Titans Go!,Teen Titans Go! (TV series)|Tara Strong,,0.0,parse_failure,196556.0
+5ae1f4cb554299234fd0436d,72,What is the inhabitant of the city where  122nd SS-Standarte was formed in2014,"276,170 inhabitants",Strasbourg|122nd SS-Standarte,,0.0,parse_failure,203630.0
+5ae7e1fc55429952e35ea9cc,73,What color clothing do people of the Netherlands wear during Oranjegekte or to celebrate the national holiday Koningsdag? ,orange,Koningsdag|Oranjegekte,,0.0,parse_failure,207298.0
