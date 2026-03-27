@@ -62,3 +62,22 @@ HotpotQA directly mirrors the complexities of the Corpus Modality by forcing the
 
 **Methodology:**
 The evaluation was executed dynamically using the corpus tool suite (`python evaluation/run_hotpotqa.py --mode corpus`). For each of the 736 sampled queries, the Qwen3.5-27B agent was tasked with utilizing tools to search, read, and cross-reference documents to formulate an answer. The final outputs were processed through an LLM-as-Judge pipeline (`llm_judge_eval.py`) utilizing Gemini-3.1-lite-flash. The judge evaluated the agent's final prediction against the HotpotQA gold standard supporting facts and answers, outputting a continuous J-score. This double-blind computational judging methodology ensures objectivity while accurately capturing the nuances of multi-document retrieval memory and intermediate inferential chaining.
+
+
+### 6. Next Steps: LTM Validation and RAG Baseline Comparative Analysis
+
+To finalize the comprehensive evaluation of the AgeMem-Hybrid ecosystem and contextualize the highly successful Corpus modality results, the immediate next phase of our research will focus on comparative benchmarking. This will involve isolating specific modalities to establish empirical baselines and rigorously prove the architectural superiority of our agentic framework over traditional retrieval paradigms.
+
+The future evaluation roadmap is defined by the following strategic steps:
+
+*   **Phase 1: LTM-Only Modality Evaluation**
+    We will formally evaluate the Long-Term Memory (LTM) modality in isolation. In this configuration, the agent will bypass the active retrieval corpus tool suite, and the "gold standard" context paragraphs will be pre-loaded directly into memory (an oracle setting). 
+    *   *Expected Outcome:* We expect the LTM modality to yield J-scores strictly within the range reported in the original AgeMem paper (0.50 – 0.60 J-score baseline). Validating this ensures our foundational inference engine behaves consistently with established literature when given perfect, pre-filtered context.
+
+*   **Phase 2: Establishment of a RAG-Only Baseline**
+    To accurately measure the value-add of the AgeMem-Hybrid's autonomous tool-use (Corpus mode), we will establish a control baseline using a standard, single-pass Retrieval-Augmented Generation (RAG) pipeline. This RAG-only modality will rely on traditional semantic vector-search methodologies rather than iterative, agentic multi-hop tool interactions (`grep_corpus`, `read_lines`, etc.).
+
+*   **Hypothesized Strategic Outcomes & Implications**
+    The core hypothesis for this next experimental phase is that the **AgeMem-Hybrid Corpus mode will significantly outperform the RAG-only modality.** Standard RAG pipelines fundamentally struggle with multi-hop logical chaining, as they typically rely on single-query semantic similarity that fails to traverse complex entity relationships across disparate documents. 
+    
+By demonstrating that our Corpus mode's autonomous query reformulation and active reading tools yield substantially higher J-scores than a standard RAG pipeline, we will definitively prove the superiority of the AgeMem-Hybrid ecosystem. It will quantitatively validate that for complex, multi-hop reasoning over large and noisy document corpora, dynamic agentic retrieval is an empirical necessity over static semantic search.
