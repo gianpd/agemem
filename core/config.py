@@ -162,6 +162,10 @@ class AgememConfig:
     STM_EVICT_THRESHOLD: float = 0.30
     """relevance_score <= this makes a message a FILTER candidate."""
 
+    STM_MEMORY_PIN_THRESHOLD: float = 0.75
+    """Minimum semantic similarity for a retrieved LTM entry to be pinned in STM.
+    Entries below this threshold are still injected but can be evicted by filter()."""
+
     STM_SUMMARY_WINDOW: int = 8
     """Number of recent non-pinned messages the SUMMARY operation compresses."""
 

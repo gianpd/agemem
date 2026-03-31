@@ -167,24 +167,31 @@ class STMContext:
         trigger: TriggerKind = TriggerKind.SYSTEM_RULE,
     ) -> MemoryOpResult:
         """
-        Inject LTM entries into STM as pinned system messages.
+        Inject LTM entries into STM as system messages.
         Only injects entries that are not already in context.
+
+        Pinning and relevance are driven by semantic similarity:
+        - relevance_score = entry.similarity_score (not learning_score)
+        - is_pinned only when similarity_score >= STM_MEMORY_PIN_THRESHOLD
+        - Entries below the pin threshold are still injected but evictable.
         """
         existing_ids = {
             m.content.split("]")[0].lstrip("[MEMORY:")
             for m in self._messages
             if m.role == "system" and "[MEMORY:" in m.content
         }
+        pin_threshold = self._config.STM_MEMORY_PIN_THRESHOLD
         injected: list[str] = []
         for entry in entries:
             tag = f"[MEMORY:{entry.entry_id}]"
             if entry.entry_id in existing_ids:
                 continue
+            should_pin = entry.similarity_score >= pin_threshold
             self.add_message(
                 role="system",
                 content=f"{tag} {entry.content}",
-                is_pinned=True,
-                relevance_score=entry.learning_score,
+                is_pinned=should_pin,
+                relevance_score=entry.similarity_score,
             )
             injected.append(entry.entry_id)
 

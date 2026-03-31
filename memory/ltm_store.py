@@ -97,7 +97,7 @@ class LTMStore:
             apply_semantic_schema(str(self._semantic_db_path))
 
             # Open connection
-            self._db = sqlite3.connect(str(self._semantic_db_path))
+            self._db = sqlite3.connect(str(self._semantic_db_path), check_same_thread=False)
 
             # Load sqlite-vec extension
             self._db.enable_load_extension(True)
@@ -324,7 +324,13 @@ class LTMStore:
             # Sort by similarity score (descending, higher is better)
             # All scores are now normalized to [0, 1] similarity scale
             merged = sorted(all_results.values(), key=lambda x: x[1], reverse=True)
-            return [entry for entry, _ in merged[:effective_top_k]]
+
+            # Attach similarity scores to entries for downstream use (STM pinning)
+            result_entries = []
+            for entry, score in merged[:effective_top_k]:
+                entry.similarity_score = score
+                result_entries.append(entry)
+            return result_entries
 
     def search_by_vector(
         self,
@@ -391,8 +397,12 @@ class LTMStore:
                 # Sort by similarity descending
                 scored_entries.sort(key=lambda x: x[0], reverse=True)
 
-                # Return top_k entries
-                return [entry for _, entry in scored_entries[:top_k]]
+                # Return top_k entries with similarity scores attached
+                result_entries = []
+                for similarity, entry in scored_entries[:top_k]:
+                    entry.similarity_score = similarity
+                    result_entries.append(entry)
+                return result_entries
 
             except Exception as e:
                 logger.error(f"Vector search failed: {e}")

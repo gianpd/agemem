@@ -64,6 +64,7 @@ class MemoryEntry:
     updated_at: float = field(default_factory=time.time)
     access_count: int = 0
     learning_score: float = 0.0     # aggregated signal from LearningFeedback
+    similarity_score: float = 0.0   # semantic similarity to current query (set during retrieval)
     tags: list[str] = field(default_factory=list)
     source_turn: int = 0            # which conversation turn created this
 
