@@ -96,15 +96,22 @@ class EmbeddingModule:
 
     @property
     def model(self) -> "SentenceTransformer":
-        """Lazy-load the model on first access."""
+        """Lazy-load the model on first access (local only, no network)."""
         if self._model is None:
             # Lazy import to avoid requiring sentence_transformers at import time
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(
-                self.MODEL_NAME,
-                cache_folder=str(self._cache_path),
-                trust_remote_code=True,
-            )
+            try:
+                self._model = SentenceTransformer(
+                    self.MODEL_NAME,
+                    cache_folder=str(self._cache_path),
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+            except Exception:
+                raise RuntimeError(
+                    f"Embedding model '{self.MODEL_NAME}' not found locally. "
+                    f"Run: python scripts/preload_model.py  (with internet)"
+                ) from None
         return self._model
 
     @property
