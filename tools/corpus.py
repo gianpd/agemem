@@ -176,10 +176,18 @@ def _get_doc_info(md_file: Path, meta: dict) -> dict:
     }
 
 
-def list_documents() -> str:
-    """List all ingested documents with metadata."""
-    docs =[]
-    for md_file in sorted(CORPUS.glob("*.md")):
+def _get_corpus_path(custom_path: Optional[Path] = None) -> Path:
+    """Get corpus path, using custom path if provided or default CORPUS."""
+    if custom_path is not None:
+        return custom_path
+    return CORPUS
+
+
+def list_documents(corpus_path: Optional[Path] = None) -> str:
+    """List all ingested documents with metadata. Supports custom corpus path."""
+    corpus = _get_corpus_path(corpus_path)
+    docs = []
+    for md_file in sorted(corpus.glob("*.md")):
         try:
             with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -191,12 +199,13 @@ def list_documents() -> str:
     return json.dumps({"documents": docs, "count": len(docs)}, indent=2)
 
 
-def search_metadata(keyword: str) -> str:
-    """Search document metadata for a keyword anywhere in the frontmatter."""
+def search_metadata(keyword: str, corpus_path: Optional[Path] = None) -> str:
+    """Search document metadata for a keyword anywhere in the frontmatter. Supports custom corpus path."""
+    corpus = _get_corpus_path(corpus_path)
     keyword_lower = keyword.lower()
-    matches =[]
+    matches = []
 
-    for md_file in sorted(CORPUS.glob("*.md")):
+    for md_file in sorted(corpus.glob("*.md")):
         try:
             with open(md_file, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -214,28 +223,30 @@ def search_metadata(keyword: str) -> str:
     return json.dumps({"matches": matches, "count": len(matches)}, indent=2)
 
 
-def grep_corpus(pattern: str, context_lines: int = 3) -> str:
+def grep_corpus(pattern: str, context_lines: int = 3, corpus_path: Optional[Path] = None) -> str:
     """
-    Search document body text using pure Python. 
+    Search document body text using pure Python.
     Intelligently skips YAML frontmatter and groups context.
+    Supports custom corpus path.
     """
+    corpus = _get_corpus_path(corpus_path)
     context_lines = min(context_lines, 5)
-    
+
     # AUTO-FIX: If the LLM mistakenly uses spaces instead of pipes, and no regex operators are present
     if not any(c in pattern for c in "|.*+?()[]{}") and " " in pattern:
         pattern = "|".join(pattern.split())
-        
+
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
         return f"Error: Invalid regular expression - {e}"
 
-    all_results =[]
+    all_results = []
     total_matches = 0
     char_count = 0
     MAX_CHARS = 4000
 
-    for md_file in sorted(CORPUS.rglob("*.md")):
+    for md_file in sorted(corpus.rglob("*.md")):
         if char_count > MAX_CHARS:
             break
 
@@ -302,15 +313,16 @@ def grep_corpus(pattern: str, context_lines: int = 3) -> str:
     return result_str
 
 
-def _find_file_by_doc_id(doc_id: str) -> Optional[Path]:
-    """Resolve a doc_id to its actual file path."""
+def _find_file_by_doc_id(doc_id: str, corpus_path: Optional[Path] = None) -> Optional[Path]:
+    """Resolve a doc_id to its actual file path. Supports custom corpus path."""
+    corpus = _get_corpus_path(corpus_path)
     # First try exact filename match
-    direct_path = CORPUS / f"{doc_id}.md"
+    direct_path = corpus / f"{doc_id}.md"
     if direct_path.exists():
         return direct_path
-        
+
     # Then fallback to parsing frontmatter to find the true ID
-    for md_file in CORPUS.glob("*.md"):
+    for md_file in corpus.glob("*.md"):
         if md_file.stem == doc_id:
             return md_file
         try:
@@ -324,9 +336,9 @@ def _find_file_by_doc_id(doc_id: str) -> Optional[Path]:
     return None
 
 
-def read_document(doc_id: str) -> str:
-    """Read the full content of a document by doc_id."""
-    target_file = _find_file_by_doc_id(doc_id)
+def read_document(doc_id: str, corpus_path: Optional[Path] = None) -> str:
+    """Read the full content of a document by doc_id. Supports custom corpus path."""
+    target_file = _find_file_by_doc_id(doc_id, corpus_path)
     
     if not target_file:
         return f"Error: Document '{doc_id}' not found"
@@ -343,9 +355,9 @@ def read_document(doc_id: str) -> str:
         return f"Error reading document: {e}"
 
 
-def read_lines(doc_id: str, start_line: int, end_line: int) -> str:
-    """Read a specific line range from a document."""
-    target_file = _find_file_by_doc_id(doc_id)
+def read_lines(doc_id: str, start_line: int, end_line: int, corpus_path: Optional[Path] = None) -> str:
+    """Read a specific line range from a document. Supports custom corpus path."""
+    target_file = _find_file_by_doc_id(doc_id, corpus_path)
 
     if not target_file:
         return f"Error: Document '{doc_id}' not found"
@@ -444,6 +456,244 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
 
     else:
         return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+
+
+def ingest_document_to_corpus(
+    path: str,
+    target_corpus: Path,
+    doc_type: str = "document",
+    labels: str = "edilizia",
+) -> str:
+    """
+    Ingest a document into a specific corpus directory.
+
+    This is similar to ingest_document but allows specifying a custom corpus path,
+    enabling per-user isolation.
+
+    Args:
+        path: Path to the file (.md or .pdf)
+        target_corpus: Target corpus directory Path
+        doc_type: Document type for PDFs (default: document)
+        labels: Label set for PDFs (default: edilizia)
+
+    Returns:
+        Success message with doc_id or error
+    """
+    import subprocess
+
+    file_path = Path(path)
+
+    if not file_path.exists():
+        return f"Error: File not found: {path}"
+
+    # Ensure target corpus exists
+    target_corpus.mkdir(parents=True, exist_ok=True)
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".md":
+        # Markdown ingestion - process directly with entity extraction
+        try:
+            from ingest.ingest import ingest_markdown, write_document, extract_entities, load_labels
+
+            # Read markdown
+            markdown = file_path.read_text(encoding="utf-8")
+            sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+
+            # Load labels and extract entities
+            label_config = load_labels(labels)
+            entities = extract_entities(markdown, label_config)
+
+            # Write to target corpus
+            out_path = write_document(file_path, markdown, sections, entities, doc_type, label_config)
+
+            # Move the output file to target corpus if it's not already there
+            if out_path.parent != target_corpus:
+                import shutil
+                final_path = target_corpus / out_path.name
+                shutil.move(str(out_path), str(final_path))
+                out_path = final_path
+
+            doc_id = out_path.stem
+            logger.info(f"[ingest_document_to_corpus] Ingested markdown {path} to {target_corpus} as {doc_id}")
+            return f"Successfully ingested markdown. doc_id: {doc_id}"
+
+        except Exception as e:
+            logger.error(f"[ingest_document_to_corpus] Error: {e}")
+            return f"Error ingesting markdown: {e}"
+
+    elif suffix == ".pdf":
+        # PDF ingestion - use uv run ingest/ingest.py
+        cmd = [
+            "uv", "run", "ingest/ingest.py",
+            str(file_path),
+            doc_type,
+            "--labels", labels
+        ]
+
+        try:
+            logger.info(f"[ingest_document_to_corpus] Running: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minutes for large PDFs
+                cwd=str(Path(__file__).parent.parent)  # Run from project root
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                return f"Error ingesting PDF: {error_msg}"
+
+            # Extract doc_id from output
+            output = result.stdout.strip()
+            doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
+            doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
+
+            # Move the generated file to target corpus
+            default_corpus_path = CORPUS / f"{doc_id}.md"
+            if default_corpus_path.exists() and default_corpus_path.parent != target_corpus:
+                import shutil
+                final_path = target_corpus / default_corpus_path.name
+                shutil.move(str(default_corpus_path), str(final_path))
+                logger.info(f"[ingest_document_to_corpus] Moved {doc_id}.md to {target_corpus}")
+
+            logger.info(f"[ingest_document_to_corpus] Ingested PDF {path} as {doc_id}")
+            return f"Successfully ingested PDF.\n\ndoc_id: {doc_id}"
+
+        except subprocess.TimeoutExpired:
+            return "Error: PDF ingestion timed out (after 10 minutes)"
+        except FileNotFoundError:
+            return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
+        except Exception as e:
+            return f"Error ingesting PDF: {e}"
+
+    else:
+        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+
+
+def search_corpus_structured(
+    query: str,
+    corpus_path: Path,
+    max_results: int = 10,
+    search_type: str = "keyword",
+) -> list[dict]:
+    """
+    Search corpus and return structured results for API responses.
+
+    Args:
+        query: Search query string
+        corpus_path: Corpus directory to search
+        max_results: Maximum number of results to return
+        search_type: 'keyword' (regex), 'semantic' (embedding), or 'hybrid'
+
+    Returns:
+        List of dicts with doc_id, title, snippet, score, source_type
+    """
+    results = []
+
+    # Keyword search (regex-based)
+    if search_type in ("keyword", "hybrid"):
+        keyword_results = _keyword_search_structured(query, corpus_path, max_results)
+        for r in keyword_results:
+            if search_type == "hybrid":
+                r["source_type"] = "keyword"
+            else:
+                r["source_type"] = "keyword"
+            results.append(r)
+
+    # Semantic search (embedding-based) - placeholder for future implementation
+    if search_type == "semantic":
+        # For now, fall back to keyword search with a note
+        semantic_results = _keyword_search_structured(query, corpus_path, max_results)
+        for r in semantic_results:
+            r["source_type"] = "semantic"  # Mark as semantic even though using keyword for now
+            results.append(r)
+
+    # Hybrid: combine keyword and semantic results
+    if search_type == "hybrid":
+        # Deduplicate by doc_id, preferring higher scores
+        seen = {}
+        for r in results:
+            doc_id = r["doc_id"]
+            if doc_id not in seen or r["score"] > seen[doc_id]["score"]:
+                seen[doc_id] = r
+        results = list(seen.values())
+
+    # Sort by score descending and limit
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:max_results]
+
+
+def _keyword_search_structured(query: str, corpus_path: Path, max_results: int) -> list[dict]:
+    """Perform keyword-based search and return structured results."""
+    results = []
+    query_lower = query.lower()
+    query_tokens = set(query_lower.split())
+
+    for md_file in sorted(corpus_path.glob("*.md")):
+        try:
+            with open(md_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            meta, body_text, _ = _parse_frontmatter(content)
+            doc_id = meta.get("doc_id", md_file.stem)
+            title = meta.get("doc_title", meta.get("title", md_file.stem))
+
+            # Score by token overlap in body text
+            body_lower = body_text.lower()
+            body_tokens = set(body_lower.split())
+
+            # Jaccard-like overlap
+            intersection = query_tokens & body_tokens
+            if not intersection:
+                continue
+
+            # Calculate relevance score
+            overlap_ratio = len(intersection) / len(query_tokens) if query_tokens else 0
+            score = overlap_ratio
+
+            # Extract snippet around first matching token
+            snippet = _extract_snippet(body_text, query_tokens, max_chars=500)
+
+            if snippet:
+                results.append({
+                    "doc_id": doc_id,
+                    "title": title,
+                    "snippet": snippet,
+                    "score": score,
+                })
+
+        except IOError as e:
+            logger.warning(f"[search_corpus_structured] Failed to read {md_file}: {e}")
+            continue
+
+    return results
+
+
+def _extract_snippet(text: str, query_tokens: set[str], max_chars: int = 500) -> str:
+    """Extract a snippet around the first matching query token."""
+    text_lower = text.lower()
+    lines = text.splitlines()
+
+    # Find the first line containing a query token
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        for token in query_tokens:
+            if token in line_lower:
+                # Extract context around this line
+                start = max(0, i - 2)
+                end = min(len(lines), i + 3)
+                snippet_lines = lines[start:end]
+
+                # Join and truncate
+                snippet = "\n".join(snippet_lines).strip()
+                if len(snippet) > max_chars:
+                    snippet = snippet[:max_chars] + "..."
+
+                return snippet
+
+    return ""
 
 
 if __name__ == "__main__":

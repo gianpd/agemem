@@ -38,22 +38,18 @@ if TYPE_CHECKING:
 
 def _get_cache_path() -> Path:
     """Get the model cache directory, creating it if needed."""
-    cache_path = Path.home() / ".cache" / "agemem" / "models"
+    cache_path = Path.home() / ".cache" / "agemem" / "models" / "hub"
     cache_path.mkdir(parents=True, exist_ok=True)
     return cache_path
 
 
 def _configure_hf_cache(cache_path: Path) -> None:
-    """
-    Configure HuggingFace cache via environment variables.
-
-    Sets HF_HOME, HF_HUB_CACHE, and TRANSFORMERS_CACHE to ensure
-    all model downloads go to the specified cache directory.
-    """
     cache_str = str(cache_path)
     os.environ["HF_HOME"] = cache_str
-    os.environ["HF_HUB_CACHE"] = cache_str
-    os.environ["TRANSFORMERS_CACHE"] = cache_str
+    os.environ["HF_HUB_CACHE"] = str(cache_path / "hub")
+    os.environ["TRANSFORMERS_CACHE"] = str(cache_path / "hub")
+    os.environ["HF_HUB_OFFLINE"] = "1"        # ← blocks ALL network calls
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"   # ← same for transformers
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -105,13 +101,14 @@ class EmbeddingModule:
                     self.MODEL_NAME,
                     cache_folder=str(self._cache_path),
                     trust_remote_code=True,
-                    local_files_only=True,
+                    local_files_only=True
                 )
-            except Exception:
+            except Exception as e:
                 raise RuntimeError(
                     f"Embedding model '{self.MODEL_NAME}' not found locally. "
-                    f"Run: python scripts/preload_model.py  (with internet)"
-                ) from None
+                    f"Run: python scripts/preload_model.py  (with internet)"        
+                    f"Original error: {e}"          # ← show the real cause
+                    ) from e                            # ← keep the traceback chain
         return self._model
 
     @property

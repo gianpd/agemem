@@ -153,7 +153,7 @@ class ToolExecutor:
     def _execute_browser_navigate(self, arguments: dict) -> str:
         """Execute browser_navigate tool."""
         try:
-            from tools.web_tools import browser_navigate_tool
+            from tools.browser_tools import browser_navigate_tool
             return browser_navigate_tool(
                 url=arguments.get("url", ""),
                 action=arguments.get("action", "navigate"),

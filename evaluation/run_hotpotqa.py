@@ -61,6 +61,12 @@ class EvalMode(str, Enum):
     CORPUS = "corpus"
 
 
+class Phase(str, Enum):
+    FULL = "full"        # current behaviour: store + eval + reset per sample
+    INGEST = "ingest"    # phase 1: populate LTM with all gold contexts, no eval
+    EVAL = "eval"        # phase 2: evaluate against pre-populated LTM, no clear
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -139,6 +145,7 @@ class RunConfig:
     Logged at the start of every run so results are fully reproducible.
     """
     mode: EvalMode
+    phase: Phase
     split: str
     setting: str
     judge_model: str
@@ -157,6 +164,7 @@ class RunConfig:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["mode"] = self.mode.value
+        d["phase"] = self.phase.value
         # Path objects are not JSON-serialisable — convert to strings
         d["persist_dir"] = str(self.persist_dir)
         d["corpus_dir"] = str(self.corpus_dir) if self.corpus_dir else None
@@ -345,11 +353,13 @@ class HotpotEvaluator:
         result = self.orchestrator._ltm.add(
             content=text,
             learning_score=0.5,
-            tags=["hotpot_stage1", "gold_context"],
+            tags=["hotpot_stage1", "gold_context", f"sample:{sample.id}"],
             trigger=TriggerKind.SYSTEM_RULE,
         )
         if not result.success:
             logger.warning("LTM storage failed for sample %s", sample.id)
+        else:
+            logger.debug("Stored gold context for sample %s (%d chars)", sample.id, len(text))
 
     def _store_corpus(self, sample: HotpotSample) -> None:
         from ingest.ingest import ingest
@@ -396,7 +406,9 @@ class HotpotEvaluator:
         error: Optional[str] = None
 
         try:
-            self._store_context(sample)
+            # Only store context in full mode; eval phase assumes LTM already populated
+            if self.config.phase != Phase.EVAL:
+                self._store_context(sample)
             predicted = self.orchestrator.chat(sample.question)
 
             raw = self.judge.evaluate(
@@ -427,7 +439,9 @@ class HotpotEvaluator:
     def _reset_state(self) -> None:
         """Reset per-sample state between evaluations."""
         self.orchestrator.reset_stm()
-        self.orchestrator.clear_ltm()
+        # Don't clear LTM in eval phase — it stays populated across all samples
+        if self.config.phase != Phase.EVAL:
+            self.orchestrator.clear_ltm()
         if self.config.mode == EvalMode.CORPUS:
             self._corpus_registry.clear()
 
@@ -437,6 +451,12 @@ class HotpotEvaluator:
 
     def run(self, samples: list[HotpotSample], output_path: Optional[Path] = None) -> list[EvalResult]:
         self.setup()
+
+        # Phase 1: ingest only — populate LTM with all gold contexts, then exit
+        if self.config.phase == Phase.INGEST:
+            return self._ingest_only(samples)
+
+        # Phase 2 (eval) or full: evaluate samples
         results: list[EvalResult] = []
 
         for i, sample in enumerate(samples, start=1):
@@ -463,6 +483,22 @@ class HotpotEvaluator:
 
         return results
 
+    def _ingest_only(self, samples: list[HotpotSample]) -> list[EvalResult]:
+        """Phase 1: store gold context for all samples into LTM, no evaluation."""
+        logger.info("=== INGEST PHASE: populating LTM with %d samples ===", len(samples))
+        for i, sample in enumerate(samples, start=1):
+            logger.info(
+                "[ingest %d/%d] id=%s type=%s level=%s",
+                i, len(samples), sample.id, sample.question_type, sample.level,
+            )
+            self._store_context(sample)
+
+        ltm_size = self.orchestrator._ltm.size()
+        logger.info("=== INGEST COMPLETE: LTM has %d entries ===", ltm_size)
+        print(f"\nLTM populated with {ltm_size} entries from {len(samples)} samples.")
+        print(f"Persist dir: {self.config.persist_dir}")
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Summary & persistence  (pure functions, easy to test independently)
@@ -482,6 +518,7 @@ def _print_summary(results: list[EvalResult], config: RunConfig) -> None:
     print("HOTPOTQA EVALUATION SUMMARY")
     print(f"{'='*60}")
     print(f"Mode            : {config.mode.value}")
+    print(f"Phase           : {config.phase.value}")
     print(f"Judge model     : {config.judge_model}")
     print(f"Total samples   : {len(results)}")
     print(f"Scored (OK)     : {len(scored)}")
@@ -522,6 +559,14 @@ def _save_results(
 # ---------------------------------------------------------------------------
 
 def _build_config(args: argparse.Namespace) -> RunConfig:
+    phase = Phase(args.phase)
+
+    # Ingest and eval phases MUST use a stable persist-dir (not a temp dir)
+    if phase in (Phase.INGEST, Phase.EVAL):
+        if not args.persist_dir:
+            args.persist_dir = Path("evaluation/persist/hotpot_ltm_750")
+            logger.info("Using default persist dir for %s phase: %s", phase.value, args.persist_dir)
+
     persist_dir = args.persist_dir or Path(tempfile.mkdtemp(prefix="hotpot_eval_"))
     mode = EvalMode(args.mode)
 
@@ -533,6 +578,7 @@ def _build_config(args: argparse.Namespace) -> RunConfig:
 
     return RunConfig(
         mode=mode,
+        phase=phase,
         split=args.split,
         setting=args.setting,
         judge_model=judge_model,
@@ -551,6 +597,14 @@ def main() -> None:
     parser.add_argument("--split", default="validation", help="Dataset split")
     parser.add_argument("--setting", default="distractor", choices=["distractor", "fullwiki"])
     parser.add_argument("--mode", default="ltm", choices=["ltm", "corpus"])
+    parser.add_argument(
+        "--phase", default="full", choices=["full", "ingest", "eval"],
+        help=(
+            "full: store+eval+reset per sample (default). "
+            "ingest: populate LTM only (phase 1). "
+            "eval: evaluate against pre-populated LTM (phase 2)."
+        ),
+    )
     parser.add_argument("--corpus-dir", type=Path, default=None)
     parser.add_argument("--data", type=Path, default=None, help="Local JSON override")
     parser.add_argument(
