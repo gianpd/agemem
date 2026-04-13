@@ -63,6 +63,7 @@ class ToolExecutor:
         llm: LLMClient,
         config: AgememConfig,
         tracer: Optional[Any] = None,
+        corpus_path: Optional[Any] = None,
     ):
         """
         Inject all dependencies at construction.
@@ -73,12 +74,16 @@ class ToolExecutor:
             llm: LLM client (for introspection tools that need LLM calls)
             config: AgeMem configuration (model names, timeouts, etc.)
             tracer: Optional tracer for logging (uses get_tracer() if None)
+            corpus_path: Optional per-user corpus path. When set, all corpus tools
+                         search this directory instead of the global CORPUS default.
+                         This is how the /chat API isolates documents per user.
         """
         self._stm = stm
         self._ltm = ltm
         self._llm = llm
         self._config = config
         self._tracer = tracer  # None means use get_tracer() lazily
+        self._corpus_path = corpus_path
 
         # Lazy-loaded tool modules (cached after first import)
         self._web_tools = None
@@ -251,7 +256,7 @@ class ToolExecutor:
         """Execute list_documents tool."""
         try:
             from tools.corpus import list_documents
-            return list_documents()
+            return list_documents(corpus_path=self._corpus_path)
         except Exception as e:
             return f"[TOOL ERROR] list_documents failed: {e}"
 
@@ -260,7 +265,7 @@ class ToolExecutor:
         try:
             from tools.corpus import search_metadata
             keyword = arguments.get("keyword", "")
-            return search_metadata(keyword)
+            return search_metadata(keyword, corpus_path=self._corpus_path)
         except Exception as e:
             return f"[TOOL ERROR] search_metadata failed: {e}"
 
@@ -270,7 +275,7 @@ class ToolExecutor:
             from tools.corpus import grep_corpus
             pattern = arguments.get("pattern", "")
             context_lines = arguments.get("context_lines", 3)
-            return grep_corpus(pattern, context_lines)
+            return grep_corpus(pattern, context_lines, corpus_path=self._corpus_path)
         except Exception as e:
             return f"[TOOL ERROR] grep_corpus failed: {e}"
 
@@ -279,7 +284,7 @@ class ToolExecutor:
         try:
             from tools.corpus import read_document
             doc_id = arguments.get("doc_id", "")
-            return read_document(doc_id)
+            return read_document(doc_id, corpus_path=self._corpus_path)
         except Exception as e:
             return f"[TOOL ERROR] read_document failed: {e}"
 
@@ -290,7 +295,7 @@ class ToolExecutor:
             doc_id = arguments.get("doc_id", "")
             start_line = arguments.get("start_line", 1)
             end_line = arguments.get("end_line", 75)
-            return read_lines(doc_id, start_line, end_line)
+            return read_lines(doc_id, start_line, end_line, corpus_path=self._corpus_path)
         except Exception as e:
             return f"[TOOL ERROR] read_lines failed: {e}"
 

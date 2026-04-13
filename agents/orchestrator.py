@@ -270,6 +270,14 @@ class Orchestrator:
                 acronym_dict=getattr(self._config, 'QUERY_EXPANSION_ACRONYM_DICT', {}),
             )
 
+        # Derive per-user corpus path from persist_dir.
+        # Convention: persist_dir=agent_memory/users/X → corpus_path=corpus/users/X
+        self._corpus_path = None
+        if self._persist_dir and "users" in self._persist_dir.parts:
+            idx = self._persist_dir.parts.index("users")
+            user_parts = self._persist_dir.parts[idx:]  # e.g. ("users", "alice")
+            self._corpus_path = Path("corpus").joinpath(*user_parts)
+
         # Tool executor - encapsulates all tool execution logic
         self._tool_executor = ToolExecutor(
             stm=self._stm,
@@ -277,6 +285,7 @@ class Orchestrator:
             llm=self._llm,
             config=self._config,
             tracer=None,  # Uses get_tracer() lazily
+            corpus_path=self._corpus_path,
         )
 
     def _init_prompt_registry(self) -> None:
@@ -738,6 +747,7 @@ class Orchestrator:
         self._persist_stm()
 
         # ── Trace ─────────────────────────────────────────────────────────────
+        turn_latency = (time.time() - t0) * 1000
         self._traces.append(TurnTrace(
             turn_index=turn_after,
             user_input=user_input,
@@ -748,11 +758,64 @@ class Orchestrator:
             tool_calls=turn_tool_calls,
             feedback=feedback,
             memory_agent_rationale=ma_rationale,
-            latency_ms=(time.time() - t0) * 1000,
+            latency_ms=turn_latency,
             prompt_versions=dict(self._prompt_versions),  # Copy for audit trail
         ))
 
+        # ── Seed logging ─────────────────────────────────────────────────────
+        # Write complete turn as a seed entry for fine-tuning dataset generation.
+        # Only logs turns with tool calls (direct responses have no tool training signal).
+        if turn_tool_calls:
+            self._write_seed(
+                user_input=user_input,
+                tool_calls=turn_tool_calls,
+                final_response=assistant_text,
+                turn_index=turn_after,
+                latency_ms=turn_latency,
+            )
+
         return assistant_text
+
+    # ── Seed logging helper ──────────────────────────────────────────────────
+
+    def _write_seed(
+        self,
+        user_input: str,
+        tool_calls: list[ToolCallTrace],
+        final_response: str,
+        turn_index: int,
+        latency_ms: float,
+    ) -> None:
+        """Write a seed entry to the seed log for fine-tuning dataset generation."""
+        # Get system prompt from STM's pinned message
+        system_prompt = ""
+        for msg in self._stm.messages():
+            if msg.role == "system" and msg.is_pinned:
+                system_prompt = msg.content
+                break
+
+        # Convert ToolCallTrace to plain dicts for the tracer
+        tc_dicts = [
+            {
+                "name": tc.name,
+                "arguments": tc.arguments,
+                "result": tc.result,
+                "duration_ms": tc.duration_ms,
+                "success": tc.success,
+            }
+            for tc in tool_calls
+        ]
+
+        tracer = get_tracer()
+        tracer.log_seed(
+            system_prompt=system_prompt,
+            user_message=user_input,
+            tool_calls=tc_dicts,
+            final_response=final_response,
+            model=self._config.DEFAULT_MODEL,
+            turn_index=turn_index,
+            latency_ms=latency_ms,
+        )
 
     # ── Inspection helpers ────────────────────────────────────────────────────
 
@@ -845,7 +908,7 @@ class Orchestrator:
         for q in queries:
             variant_hits = 0
             try:
-                result = grep_corpus(q, context_lines=3)
+                result = grep_corpus(q, context_lines=3, corpus_path=self._corpus_path)
             except Exception as e:
                 logger.debug(f"[query_expansion] grep_corpus failed for '{q[:40]}...': {e}")
                 hits_per_variant.append(0)
@@ -918,7 +981,7 @@ class Orchestrator:
         docs_used = 0
         for doc_id in list(doc_ids)[:3]:
             try:
-                content = read_document(doc_id)
+                content = read_document(doc_id, corpus_path=self._corpus_path)
                 if not content or content.startswith("Error:"):
                     continue
 

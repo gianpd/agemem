@@ -174,6 +174,8 @@ class STMContext:
         - relevance_score = entry.similarity_score (not learning_score)
         - is_pinned only when similarity_score >= STM_MEMORY_PIN_THRESHOLD
         - Entries below the pin threshold are still injected but evictable.
+
+        Handles both MemoryEntry objects and dict entries for robustness.
         """
         existing_ids = {
             m.content.split("]")[0].lstrip("[MEMORY:")
@@ -182,18 +184,43 @@ class STMContext:
         }
         pin_threshold = self._config.STM_MEMORY_PIN_THRESHOLD
         injected: list[str] = []
+
+        def _get_entry_id(entry) -> str:
+            """Get entry_id from MemoryEntry object or dict."""
+            if isinstance(entry, dict):
+                # Dicts from trigger_retrieval use 'source' or generate from content hash
+                return entry.get("source") or entry.get("entry_id") or str(hash(entry.get("content", "")))
+            return entry.entry_id
+
+        def _get_content(entry) -> str:
+            """Get content from MemoryEntry object or dict."""
+            if isinstance(entry, dict):
+                return entry.get("content", "")
+            return entry.content
+
+        def _get_similarity_score(entry) -> float:
+            """Get similarity_score from MemoryEntry object or dict."""
+            if isinstance(entry, dict):
+                # Dicts use 'score' key for similarity
+                return entry.get("score", entry.get("similarity_score", 0.0))
+            return entry.similarity_score
+
         for entry in entries:
-            tag = f"[MEMORY:{entry.entry_id}]"
-            if entry.entry_id in existing_ids:
+            entry_id = _get_entry_id(entry)
+            content = _get_content(entry)
+            similarity_score = _get_similarity_score(entry)
+
+            tag = f"[MEMORY:{entry_id}]"
+            if entry_id in existing_ids:
                 continue
-            should_pin = entry.similarity_score >= pin_threshold
+            should_pin = similarity_score >= pin_threshold
             self.add_message(
                 role="system",
-                content=f"{tag} {entry.content}",
+                content=f"{tag} {content}",
                 is_pinned=should_pin,
-                relevance_score=entry.similarity_score,
+                relevance_score=similarity_score,
             )
-            injected.append(entry.entry_id)
+            injected.append(entry_id)
 
         return MemoryOpResult(
             op=MemoryOp.RETRIEVE,
