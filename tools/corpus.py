@@ -167,11 +167,18 @@ def _parse_frontmatter(content: str) -> tuple[dict, str, str]:
 
 def _get_doc_info(md_file: Path, meta: dict) -> dict:
     """Extract standard fields from possibly varying metadata schemas."""
+    from datetime import date as date_type
+
+    raw_date = meta.get("doc_date", meta.get("date", ""))
+    # Convert date object to ISO string if needed
+    if isinstance(raw_date, date_type):
+        raw_date = raw_date.isoformat()
+
     return {
         "doc_id": meta.get("doc_id", md_file.stem),
         "title": meta.get("doc_title", meta.get("title", md_file.stem)),
         "type": meta.get("doc_type", meta.get("type", "unknown")),
-        "date": meta.get("doc_date", meta.get("date", "")),
+        "date": raw_date,
         "path": str(md_file)
     }
 
@@ -463,6 +470,7 @@ def ingest_document_to_corpus(
     target_corpus: Path,
     doc_type: str = "document",
     labels: str = "edilizia",
+    original_filename: str | None = None,
 ) -> str:
     """
     Ingest a document into a specific corpus directory.
@@ -475,6 +483,7 @@ def ingest_document_to_corpus(
         target_corpus: Target corpus directory Path
         doc_type: Document type for PDFs (default: document)
         labels: Label set for PDFs (default: edilizia)
+        original_filename: Original filename to use for doc_id/title (e.g. from upload)
 
     Returns:
         Success message with doc_id or error
@@ -494,7 +503,7 @@ def ingest_document_to_corpus(
     if suffix == ".md":
         # Markdown ingestion - process directly with entity extraction
         try:
-            from ingest.ingest import ingest_markdown, write_document, extract_entities, load_labels
+            from ingest.ingest import write_document, extract_entities, load_labels
 
             # Read markdown
             markdown = file_path.read_text(encoding="utf-8")
@@ -504,15 +513,12 @@ def ingest_document_to_corpus(
             label_config = load_labels(labels)
             entities = extract_entities(markdown, label_config)
 
-            # Write to target corpus
-            out_path = write_document(file_path, markdown, sections, entities, doc_type, label_config)
-
-            # Move the output file to target corpus if it's not already there
-            if out_path.parent != target_corpus:
-                import shutil
-                final_path = target_corpus / out_path.name
-                shutil.move(str(out_path), str(final_path))
-                out_path = final_path
+            # Write directly to target corpus, using original_filename for doc_id/title
+            out_path = write_document(
+                file_path, markdown, sections, entities, doc_type, label_config,
+                display_name=original_filename,
+                target_corpus=target_corpus,
+            )
 
             doc_id = out_path.stem
             logger.info(f"[ingest_document_to_corpus] Ingested markdown {path} to {target_corpus} as {doc_id}")
@@ -523,13 +529,16 @@ def ingest_document_to_corpus(
             return f"Error ingesting markdown: {e}"
 
     elif suffix == ".pdf":
-        # PDF ingestion - use uv run ingest/ingest.py
+        # PDF ingestion - use uv run ingest/ingest.py with corpus path
         cmd = [
             "uv", "run", "ingest/ingest.py",
             str(file_path),
             doc_type,
-            "--labels", labels
+            "--labels", labels,
+            "--corpus", str(target_corpus),
         ]
+        if original_filename:
+            cmd.extend(["--original-filename", original_filename])
 
         try:
             logger.info(f"[ingest_document_to_corpus] Running: {' '.join(cmd)}")
@@ -550,15 +559,7 @@ def ingest_document_to_corpus(
             doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
             doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
 
-            # Move the generated file to target corpus
-            default_corpus_path = CORPUS / f"{doc_id}.md"
-            if default_corpus_path.exists() and default_corpus_path.parent != target_corpus:
-                import shutil
-                final_path = target_corpus / default_corpus_path.name
-                shutil.move(str(default_corpus_path), str(final_path))
-                logger.info(f"[ingest_document_to_corpus] Moved {doc_id}.md to {target_corpus}")
-
-            logger.info(f"[ingest_document_to_corpus] Ingested PDF {path} as {doc_id}")
+            logger.info(f"[ingest_document_to_corpus] Ingested PDF {path} as {doc_id} to {target_corpus}")
             return f"Successfully ingested PDF.\n\ndoc_id: {doc_id}"
 
         except subprocess.TimeoutExpired:

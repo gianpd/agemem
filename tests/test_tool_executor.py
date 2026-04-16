@@ -101,7 +101,7 @@ class TestToolExecutor:
 
             assert result.success
             assert result.output == "document content"
-            mock_read.assert_called_once_with("test_doc")
+            mock_read.assert_called_once_with("test_doc", corpus_path=None)
 
     def test_execute_with_side_effects(self):
         """Tools can return side effects."""

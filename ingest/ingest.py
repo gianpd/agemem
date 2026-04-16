@@ -781,11 +781,38 @@ def write_document(
     entities: Dict[str, List[str]],
     doc_type: str,
     label_config: Dict[str, Any],
+    display_name: Optional[str] = None,
+    target_corpus: Optional[Path] = None,
 ) -> Path:
-    """Write document with frontmatter to corpus directory."""
+    """
+    Write document with frontmatter to corpus directory.
+
+    Args:
+        pdf: Path to the source file (used for hash and content)
+        markdown: Document content in markdown format
+        sections: List of section titles extracted from markdown
+        entities: Extracted named entities
+        doc_type: Document type/category
+        label_config: Label configuration used for NER
+        display_name: Optional name to use for doc_id/title instead of pdf.stem
+                      (useful when source file is a temp file)
+        target_corpus: Optional custom corpus directory (default: global CORPUS)
+
+    Returns:
+        Path to the created corpus document
+    """
+    corpus_dir = target_corpus if target_corpus is not None else CORPUS
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use display_name if provided, otherwise use pdf.stem
+    name_for_id = display_name or pdf.stem
+    # Remove extension from display_name if present
+    if display_name and Path(display_name).suffix:
+        name_for_id = Path(display_name).stem
+
     # Hash-safe doc_id: stem + 6-char md5 to prevent collisions
     raw_bytes = pdf.read_bytes()
-    safe_stem = re.sub(r'\W+', '_', pdf.stem.lower()).strip('_')
+    safe_stem = re.sub(r'\W+', '_', name_for_id.lower()).strip('_')
     short_hash = hashlib.md5(raw_bytes).hexdigest()[:6]
     doc_id = f"{safe_stem}_{short_hash}"
 
@@ -796,7 +823,7 @@ def write_document(
     frontmatter = {
         # ── identity ──────────────────────────────────────────
         "doc_id": doc_id,
-        "doc_title": _guess_title(markdown, pdf.stem),
+        "doc_title": _guess_title(markdown, name_for_id),
         "doc_type": doc_type,
         "source_file": str(pdf),
         "source_hash": src_hash,
@@ -815,8 +842,7 @@ def write_document(
         "sections": sections[:25],
     }
 
-    CORPUS.mkdir(parents=True, exist_ok=True)
-    out_path = CORPUS / f"{doc_id}.md"
+    out_path = corpus_dir / f"{doc_id}.md"
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("---\n")
@@ -830,10 +856,17 @@ def write_document(
 
 
 # ── index ──────────────────────────────────────────────────────
-def update_index(doc_id: str, title: str, doc_type: str,
-                 doc_date: Optional[str], filepath: Path):
+def update_index(
+    doc_id: str,
+    title: str,
+    doc_type: str,
+    doc_date: Optional[str],
+    filepath: Path,
+    target_corpus: Optional[Path] = None,
+):
     """Update the corpus index with document metadata."""
-    idx_path = CORPUS / "_index.yaml"
+    corpus_dir = target_corpus if target_corpus is not None else CORPUS
+    idx_path = corpus_dir / "_index.yaml"
     index: Dict = {}
     if idx_path.exists():
         with open(idx_path) as f:
@@ -859,6 +892,7 @@ def ingest_markdown(
     md_path: Path,
     doc_type: str = "document",
     labels_arg: Optional[str] = None,
+    target_corpus: Optional[str] = None,
 ) -> str:
     """
     Ingest a markdown file directly (no PDF parsing needed).
@@ -867,6 +901,7 @@ def ingest_markdown(
         md_path: Path to the markdown file
         doc_type: Document type/category
         labels_arg: Label configuration (built-in name or path:key)
+        target_corpus: Custom corpus directory path (default: global CORPUS)
 
     Returns:
         Document ID string
@@ -877,6 +912,9 @@ def ingest_markdown(
     if not md_path.exists():
         print(f"[error] File not found: {md_path}")
         sys.exit(1)
+
+    # Convert target_corpus string to Path if provided
+    corpus_path = Path(target_corpus) if target_corpus else None
 
     # Load label configuration
     print(f"[0/3] Loading labels configuration...")
@@ -892,13 +930,13 @@ def ingest_markdown(
     entities = extract_entities(markdown)
 
     print(f"[3/3] Writing markdown ...")
-    out_path = write_document(md_path, markdown, sections, entities, doc_type, _current_label_config)
+    out_path = write_document(md_path, markdown, sections, entities, doc_type, _current_label_config, target_corpus=corpus_path)
 
     doc_id = out_path.stem
     title = _guess_title(markdown, md_path.stem)
     doc_date = detect_doc_date(markdown, entities)
 
-    update_index(doc_id, title, doc_type, doc_date, out_path)
+    update_index(doc_id, title, doc_type, doc_date, out_path, target_corpus=corpus_path)
 
     print(f"\n✓  {out_path}  ({len(markdown):,} chars, {len(sections)} sections)")
     print(f"   doc_id : {doc_id}")
@@ -921,6 +959,8 @@ def ingest(
     post_process: bool = True,
     post_process_config: str = "default",
     enable_multiscale: Optional[bool] = None,
+    original_filename: Optional[str] = None,
+    target_corpus: Optional[str] = None,
 ) -> str:
     """
     Ingest a PDF document into the corpus.
@@ -938,6 +978,8 @@ def ingest(
         post_process_config: Post-processor config ("default", "conservative", "aggressive")
         enable_multiscale: Enable multi-scale extraction for better recall.
                           Auto-enabled for 'generic' labels if not specified.
+        original_filename: Original filename to use for doc_id/title (e.g. from upload)
+        target_corpus: Custom corpus directory path (default: global CORPUS)
 
     Returns:
         Document ID string
@@ -948,6 +990,9 @@ def ingest(
     if not pdf.exists():
         print(f"[error] File not found: {pdf_path}")
         sys.exit(1)
+
+    # Convert target_corpus string to Path if provided
+    corpus_path = Path(target_corpus) if target_corpus else None
 
     # Load label configuration
     print(f"[0/4] Loading labels configuration...")
@@ -990,14 +1035,21 @@ def ingest(
     )
 
     print(f"[3/4] Writing markdown ...")
-    out_path = write_document(pdf, markdown, sections, entities, doc_type, _current_label_config)
+    out_path = write_document(
+        pdf, markdown, sections, entities, doc_type, _current_label_config,
+        display_name=original_filename,
+        target_corpus=corpus_path,
+    )
 
     doc_id = out_path.stem
-    title = _guess_title(markdown, pdf.stem)
+    name_for_title = original_filename or pdf.stem
+    if original_filename and Path(original_filename).suffix:
+        name_for_title = Path(original_filename).stem
+    title = _guess_title(markdown, name_for_title)
     doc_date = detect_doc_date(markdown, entities)
 
     print(f"[4/4] Updating   _index.yaml ...")
-    update_index(doc_id, title, doc_type, doc_date, out_path)
+    update_index(doc_id, title, doc_type, doc_date, out_path, target_corpus=corpus_path)
 
     print(f"\n✓  {out_path}  ({len(markdown):,} chars, {len(sections)} sections)")
     print(f"   doc_id : {doc_id}")
@@ -1219,6 +1271,18 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         default=False,
         help="Disable table structure recognition entirely (fastest option)"
     )
+    parser.add_argument(
+        "--original-filename",
+        dest="original_filename",
+        default=None,
+        help="Original filename to use for doc_id/title (used when source is a temp file)"
+    )
+    parser.add_argument(
+        "--corpus",
+        dest="target_corpus",
+        default=None,
+        help="Custom corpus directory path (default: corpus/)"
+    )
 
     args = parser.parse_args()
 
@@ -1253,6 +1317,7 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
             input_path,
             args.doc_type,
             args.labels_arg,
+            target_corpus=args.target_corpus,
         )
     else:
         ingest(
@@ -1266,6 +1331,8 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
             post_process=args.post_process,
             post_process_config=args.post_process_config,
             enable_multiscale=args.enable_multiscale,
+            original_filename=args.original_filename,
+            target_corpus=args.target_corpus,
         )
 
 

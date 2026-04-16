@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -150,12 +151,122 @@ class StructuredFormatter(logging.Formatter):
         else:
             # Human-readable format
             parts = [f"[{entry['timestamp']}] [{entry['level']:5}] [{entry['logger']}]"]
-            if "trace_id" in entry:
+            if "trace_id" in entry and entry["trace_id"]:
                 parts.append(f"[{entry['trace_id'][:8]}]")
             parts.append(entry["message"])
             if "duration_ms" in entry:
                 parts.append(f"({entry['duration_ms']:.1f}ms)")
             return " ".join(parts)
+
+
+# ── Seed Domain/Difficulty Helpers ────────────────────────────────────────────
+
+_CORPUS_TOOLS = {
+    "list_documents", "search_metadata", "grep_corpus",
+    "read_document", "read_lines", "ingest_document",
+}
+_PERSISTENCE_TOOLS = {
+    "force_memory_persistence", "validate_memory_commit",
+    "assess_persistence_need", "log_persistence_failure",
+}
+_INTROSPECTION_TOOLS = {
+    "assess_conversation_drift", "are_you_ready_to_get_in_context_ltm",
+    "paraphrase_for_coverage", "trigger_contextual_ltm_retrieval",
+    "validate_ltm_relevance", "refine_retrieval_target",
+    "log_retrieval_decision",
+}
+_EXTERNAL_TOOLS = {"web_search", "fetch_url", "write_file"}
+_BROWSER_TOOLS = {
+    "browser_navigate", "browser_click", "browser_scroll",
+    "browser_type", "browser_press", "browser_read_page",
+    "browser_screenshot", "browser_close",
+}
+
+
+def _map_seed_domain(tool_calls: list[dict]) -> str:
+    """Map tool call sequence to a domain ID for the seed."""
+    if not tool_calls:
+        return "DIRECT-RESPONSE"
+
+    categories = set()
+    has_error_recovery = False
+    for i, tc in enumerate(tool_calls):
+        name = tc.get("name", "")
+        if name in _CORPUS_TOOLS:
+            categories.add("CORPUS")
+        elif name in _PERSISTENCE_TOOLS:
+            categories.add("PERSISTENCE")
+        elif name in _INTROSPECTION_TOOLS:
+            categories.add("INTROSPECTION")
+        elif name in _EXTERNAL_TOOLS:
+            categories.add("EXTERNAL")
+        elif name in _BROWSER_TOOLS:
+            categories.add("BROWSER")
+        if not tc.get("success", True) and i + 1 < len(tool_calls):
+            has_error_recovery = True
+
+    if has_error_recovery:
+        return "TOOL-RECOVER"
+    if len(categories) >= 2:
+        return "TOOL-CHAIN"
+    if categories == {"PERSISTENCE"}:
+        return "MEMORY-PERSIST"
+    if categories == {"CORPUS"}:
+        return "CORPUS-CHAIN" if len(tool_calls) >= 2 else "CORPUS-QUERY"
+    if categories == {"EXTERNAL"}:
+        return "EXTERNAL-SEARCH"
+    if categories == {"BROWSER"}:
+        return "BROWSER-AUTOMATION"
+    if categories == {"INTROSPECTION"}:
+        return "MEMORY-INTROSPECT"
+    return "TOOL-CHAIN"
+
+
+def _estimate_seed_difficulty(tool_calls: list[dict], user_message: str) -> int:
+    """Estimate difficulty 1-5."""
+    n = len(tool_calls)
+    categories = set()
+    has_errors = False
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        if name in _CORPUS_TOOLS:
+            categories.add("CORPUS")
+        elif name in _PERSISTENCE_TOOLS:
+            categories.add("PERSISTENCE")
+        elif name in _INTROSPECTION_TOOLS:
+            categories.add("INTROSPECTION")
+        elif name in _EXTERNAL_TOOLS:
+            categories.add("EXTERNAL")
+        elif name in _BROWSER_TOOLS:
+            categories.add("BROWSER")
+        if not tc.get("success", True):
+            has_errors = True
+
+    if n >= 5 or (has_errors and n >= 3):
+        return 5
+    if n >= 3 and len(categories) >= 2:
+        return 4
+    if n >= 2:
+        return 3
+    if n == 1 and (len(user_message) > 200 or has_errors):
+        return 2
+    if n == 1:
+        return 1
+    return 2
+
+
+def _get_seed_meta_skills(domain: str, tool_calls: list[dict]) -> list[str]:
+    """Assign meta skill tags."""
+    skills = ["META-REASON"]
+    if len(tool_calls) >= 2:
+        skills.append("META-TOOL-CHAIN")
+    if domain == "TOOL-RECOVER":
+        skills.append("META-TOOL-RECOVER")
+    if domain == "MEMORY-PERSIST":
+        skills.append("META-MEMORY-OPS")
+    if any(not tc.get("success", True) for tc in tool_calls):
+        skills.append("META-ERROR-HANDLING")
+    return skills
 
 
 # ── Interaction Logger ───────────────────────────────────────────────────────
@@ -182,7 +293,7 @@ class InteractionLogger:
         retention_days: int = 30,
         max_file_size_mb: int = 50,
     ):
-        self._log_dir = Path(log_dir)
+        self._log_dir = Path(log_dir).resolve()
         self._log_dir.mkdir(parents=True, exist_ok=True)
 
         self._debug = debug
@@ -194,6 +305,10 @@ class InteractionLogger:
         # State tracking to reduce log noise
         self._last_message_count: int = 0
         self._raw_response_logged: bool = False
+
+        # Seed file for direct dataset capture (append-only JSONL)
+        self._seed_file = None
+        self._seed_lock = threading.Lock()
 
         # Set up loggers
         self._setup_loggers()
@@ -262,6 +377,11 @@ class InteractionLogger:
         debug_handler.suffix = "%Y-%m-%d"
         debug_handler.setFormatter(StructuredFormatter(json_format=False))
         self._debug_logger.addHandler(debug_handler)
+
+        # Seed file: append-only JSONL for distilled-pipeline fine-tuning
+        # Each line is a complete seed in OpenAI chat format with meta.
+        # Opened lazily on first write, stays open for the session.
+        self._seed_file_path = self._log_dir / "seeds.jsonl"
 
     # ── Trace Management ──────────────────────────────────────────────────────
 
@@ -885,6 +1005,108 @@ class InteractionLogger:
         if self._current_trace:
             self._current_trace.ltm_entries = count
 
+    # ── Seed Logging ────────────────────────────────────────────────────────────
+
+    def log_seed(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tool_calls: list[dict],
+        final_response: str,
+        model: str = "unknown",
+        turn_index: int = 0,
+        latency_ms: float = 0.0,
+    ):
+        """
+        Write a complete seed entry to seeds.jsonl.
+
+        Called once per conversation turn, after the orchestrator completes.
+        The output is directly consumable by the distilled-pipeline's SeedLoader.
+
+        Args:
+            system_prompt: The pinned system prompt from STM.
+            user_message: The user's input to chat().
+            tool_calls: List of dicts with keys: name, arguments (dict),
+                        result (str), duration_ms (float), success (bool).
+            final_response: The assistant's text response.
+            model: LLM model identifier.
+            turn_index: Turn number within the session.
+            latency_ms: Total turn duration.
+        """
+        # Build reasoning from tool call chain
+        reasoning_steps = []
+        for i, tc in enumerate(tool_calls, 1):
+            args = tc.get("arguments", {})
+            if isinstance(args, dict):
+                args_display = ", ".join(
+                    f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}"
+                    for k, v in args.items()
+                )
+            else:
+                args_display = str(args)[:100]
+
+            result = tc.get("result", "")
+            success = tc.get("success", True)
+            if not success:
+                result_summary = "ERROR"
+            elif result:
+                result_summary = result.split("\n")[0][:120]
+            else:
+                result_summary = "(no result)"
+
+            reasoning_steps.append(
+                f"Step {i}: Call {tc['name']}({args_display}) -> {result_summary}"
+            )
+
+        reasoning = "\n".join(reasoning_steps)
+        answer = final_response if final_response else "(tool call sequence completed)"
+
+        # Map domain from tool categories
+        domain = _map_seed_domain(tool_calls)
+        difficulty = _estimate_seed_difficulty(tool_calls, user_message)
+        meta_skills = _get_seed_meta_skills(domain, tool_calls)
+        tool_names = [tc["name"] for tc in tool_calls if tc.get("name")]
+
+        # Build seed ID from timestamp
+        now = datetime.now()
+        date_str = now.strftime("%Y%m%d_%H%M%S")
+        seed_id = f"agemem_{date_str}_{turn_index:04d}"
+
+        seed = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+                {
+                    "role": "assistant",
+                    "content": f"[Reasoning]\n{reasoning}\n[/Reasoning]\n[Answer]\n{answer}\n[/Answer]",
+                },
+            ],
+            "meta": {
+                "domain": domain,
+                "difficulty": difficulty,
+                "seed_id": seed_id,
+                "meta_skills": meta_skills,
+                "source_model": model,
+                "tools_used": tool_names,
+                "tool_count": len(tool_calls),
+                "turn_duration_ms": round(latency_ms, 1),
+            },
+            "status": "seed",
+        }
+
+        # Write to seed file (open lazily, keep open, thread-safe)
+        try:
+            with self._seed_lock:
+                if self._seed_file is None:
+                    self._seed_file = open(
+                        self._seed_file_path, "a", encoding="utf-8"
+                    )
+                self._seed_file.write(json.dumps(seed, ensure_ascii=False) + "\n")
+                self._seed_file.flush()
+        except Exception:
+            # Seed logging should never break the main flow
+            pass
+
     # ── Context Manager ───────────────────────────────────────────────────────
 
     @contextmanager
@@ -980,4 +1202,6 @@ def shutdown_tracing():
             handler.close()
         for handler in _tracer._debug_logger.handlers:
             handler.close()
+        if _tracer._seed_file:
+            _tracer._seed_file.close()
     _tracer = None

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from core.config import AgememConfig, DEFAULT_CONFIG
 from agents.llm_client import LLMClient
 from agents.orchestrator import Orchestrator
+from core.yaml_config import AgememYAMLConfig, load_config, to_llm_config, to_learning_scorer_llm_config, to_config_overrides, resolve_tool_list
 
 
 @dataclass
@@ -113,6 +114,71 @@ class OrchestratorFactory:
         )
         orch.set_tools(resolved_tools)
 
+        return orch
+
+    @classmethod
+    def from_yaml(
+        cls,
+        yaml_path: Optional[Path] = None,
+        persist_dir: Optional[Path] = None,
+    ) -> Orchestrator:
+        """Build an Orchestrator from a YAML config file.
+
+        The YAML file is the single source of truth for API startup.
+        Environment variables fill in null/missing values; explicit YAML
+        values take precedence.
+
+        Args:
+            yaml_path: Path to config.yaml. None auto-discovers via AGEMEM_CONFIG env
+                       or falls back to config.yaml in the project root.
+            persist_dir: Optional override for persist_dir (e.g. per-user isolation).
+                         If None, uses the value from the YAML config.
+
+        Returns:
+            Configured Orchestrator instance.
+        """
+        cfg = load_config(yaml_path)
+
+        # Create LLM clients from YAML config
+        from core.llm_factory import LLMClientFactory
+
+        main_llm_config = to_llm_config(cfg)
+        factory = LLMClientFactory(main_llm_config)
+        main_llm = factory.create()
+
+        factory_config = {
+            "model": main_llm_config.model,
+            "max_tokens": main_llm_config.max_tokens,
+            "temperature": main_llm_config.temperature,
+        }
+
+        # Learning scorer (optional)
+        learning_scorer_llm = None
+        if cfg.learning_scorer.enabled:
+            try:
+                ls_config = to_learning_scorer_llm_config(cfg)
+                ls_factory = LLMClientFactory(ls_config)
+                learning_scorer_llm = ls_factory.create()
+            except ValueError:
+                pass  # Graceful degradation
+
+        # Resolve persist dir
+        resolved_persist = persist_dir or Path(cfg.memory.persist_dir)
+
+        # Build AgememConfig with YAML overrides
+        overrides = to_config_overrides(cfg)
+        config = cls._build_config(factory_config, resolved_persist, overrides)
+
+        # Resolve tools from YAML flags
+        tools = resolve_tool_list(cfg)
+
+        # Build orchestrator
+        orch = Orchestrator(
+            llm=main_llm,
+            config=config,
+            learning_scorer_llm=learning_scorer_llm,
+        )
+        orch.set_tools(tools)
         return orch
 
     @classmethod
