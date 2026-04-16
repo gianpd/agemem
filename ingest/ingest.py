@@ -771,6 +771,32 @@ def parse_pdf(
     return markdown, sections
 
 
+def parse_docx(docx_path: Path) -> tuple[str, List[str]]:
+    """
+    Convert DOCX to markdown using Docling.
+
+    Returns (full_markdown, list_of_section_titles).
+    """
+    # Ensure models are downloaded before first conversion
+    _ensure_models_downloaded()
+
+    # Use a simple converter - DOCX doesn't need OCR or table options
+    print("      Initializing converter...")
+    converter = DocumentConverter()
+
+    print(f"      Converting DOCX...")
+    result = converter.convert(str(docx_path))
+
+    print("      Exporting to markdown...")
+    markdown = result.document.export_to_markdown()
+    sections = re.findall(r'^#{1,2}\s+(.+)$', markdown, re.MULTILINE)
+
+    # Clear GPU cache after conversion
+    _clear_gpu_cache()
+
+    return markdown, sections
+
+
 # ═══════════════════════════════════════════════════════════════
 # 2. WRITE — YAML frontmatter + full markdown body
 # ═══════════════════════════════════════════════════════════════
@@ -946,6 +972,99 @@ def ingest_markdown(
 
 
 # ═══════════════════════════════════════════════════════════════
+# DOCX Ingestion — Docling conversion with entity extraction
+# ═══════════════════════════════════════════════════════════════
+
+def ingest_docx(
+    docx_path: str,
+    doc_type: str = "document",
+    labels_arg: Optional[str] = None,
+    post_process: bool = True,
+    post_process_config: str = "default",
+    enable_multiscale: Optional[bool] = None,
+    original_filename: Optional[str] = None,
+    target_corpus: Optional[str] = None,
+) -> str:
+    """
+    Ingest a DOCX document into the corpus.
+
+    Args:
+        docx_path: Path to the DOCX file
+        doc_type: Document type/category
+        labels_arg: Label configuration (built-in name or path:key)
+        post_process: Apply entity post-processing pipeline
+        post_process_config: Post-processor config ("default", "conservative", "aggressive")
+        enable_multiscale: Enable multi-scale extraction for better recall
+        original_filename: Original filename to use for doc_id/title
+        target_corpus: Custom corpus directory path
+
+    Returns:
+        Document ID string
+    """
+    global _current_label_config
+
+    docx = Path(docx_path)
+    if not docx.exists():
+        print(f"[error] File not found: {docx_path}")
+        sys.exit(1)
+
+    corpus_path = Path(target_corpus) if target_corpus else None
+
+    # Load label configuration
+    print(f"[0/4] Loading labels configuration...")
+    _current_label_config = load_labels(labels_arg)
+    print(f"      Using: {_current_label_config['description']}")
+
+    # Auto-enable multi-scale for generic documents
+    is_generic = labels_arg == "generic" or _current_label_config.get("description", "").lower().startswith("generic")
+    if enable_multiscale is None:
+        enable_multiscale = is_generic
+
+    print(f"[1/4] Parsing    {docx.name}  (docling) ...")
+    markdown, sections = parse_docx(docx)
+
+    print(f"[2/4] Extracting entities  ({NER_BACKEND}) ...")
+
+    processor = None
+    if post_process:
+        try:
+            processor = create_processor(post_process_config)
+            print(f"      [post-process] Using {post_process_config} config")
+        except Exception as e:
+            print(f"      [warn] Failed to create post-processor: {e}")
+
+    entities = extract_entities(
+        markdown,
+        post_processor=processor,
+        enable_multiscale=enable_multiscale,
+        secondary_threshold=0.25 if is_generic else 0.3,
+    )
+
+    print(f"[3/4] Writing markdown ...")
+    out_path = write_document(
+        docx, markdown, sections, entities, doc_type, _current_label_config,
+        display_name=original_filename,
+        target_corpus=corpus_path,
+    )
+
+    doc_id = out_path.stem
+    name_for_title = original_filename or docx.stem
+    if original_filename and Path(original_filename).suffix:
+        name_for_title = Path(original_filename).stem
+    title = _guess_title(markdown, name_for_title)
+    doc_date = detect_doc_date(markdown, entities)
+
+    print(f"[4/4] Updating   _index.yaml ...")
+    update_index(doc_id, title, doc_type, doc_date, out_path, target_corpus=corpus_path)
+
+    print(f"\n✓  {out_path}  ({len(markdown):,} chars, {len(sections)} sections)")
+    print(f"   doc_id : {doc_id}")
+    print(f"   entities found : { {k: len(v) for k, v in entities.items()} }")
+
+    return doc_id
+
+
+# ═══════════════════════════════════════════════════════════════
 # 4. INGEST — orchestrate
 # ═══════════════════════════════════════════════════════════════
 def ingest(
@@ -1069,7 +1188,7 @@ def ingest_directory(
     recursive: bool = True,
 ) -> List[str]:
     """
-    Ingest all PDF and markdown documents from a directory into the corpus.
+    Ingest all PDF, DOCX, and markdown documents from a directory into the corpus.
 
     Args:
         dir_path: Path to the directory containing documents
@@ -1093,20 +1212,21 @@ def ingest_directory(
         print(f"[error] Not a directory: {dir_path}")
         sys.exit(1)
 
-    # Find all PDF and markdown files
+    # Find all PDF, DOCX, and markdown files
     base_pattern = "**/*" if recursive else "*"
     pdf_files = sorted(dir_path.glob(f"{base_pattern}.pdf"))
+    docx_files = sorted(dir_path.glob(f"{base_pattern}.docx"))
     md_files = sorted(dir_path.glob(f"{base_pattern}.md"))
 
-    all_files = pdf_files + md_files
+    all_files = pdf_files + docx_files + md_files
 
     if not all_files:
-        print(f"[warn] No PDF or markdown files found in {dir_path}")
+        print(f"[warn] No PDF, DOCX, or markdown files found in {dir_path}")
         return []
 
     print(f"\n{'='*60}")
     print(f"Directory Ingestion: {dir_path}")
-    print(f"Found {len(pdf_files)} PDF file(s), {len(md_files)} markdown file(s)")
+    print(f"Found {len(pdf_files)} PDF file(s), {len(docx_files)} DOCX file(s), {len(md_files)} markdown file(s)")
     if recursive:
         print("(searching subdirectories recursively)")
     print(f"{'='*60}\n")
@@ -1115,12 +1235,18 @@ def ingest_directory(
     failed = []
 
     for i, file_path in enumerate(all_files, 1):
-        file_type = "markdown" if file_path.suffix == ".md" else "PDF"
+        file_type = "markdown" if file_path.suffix == ".md" else ("DOCX" if file_path.suffix == ".docx" else "PDF")
         print(f"\n[{i}/{len(all_files)}] Processing ({file_type}): {file_path.relative_to(dir_path)}")
         try:
             if file_path.suffix == ".md":
                 doc_id = ingest_markdown(
                     file_path,
+                    doc_type,
+                    labels_arg,
+                )
+            elif file_path.suffix == ".docx":
+                doc_id = ingest_docx(
+                    str(file_path),
                     doc_type,
                     labels_arg,
                 )
@@ -1159,19 +1285,20 @@ def ingest_directory(
 def main():
     """Main entry point with argument parsing."""
     parser = argparse.ArgumentParser(
-        description="Ingest PDF and markdown documents into the corpus with NER extraction.",
+        description="Ingest PDF, DOCX, and markdown documents into the corpus with NER extraction.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s report.pdf
-  %(prog)s notes.md                          # ingest a markdown file
+  %(prog)s document.docx                      # ingest a DOCX file
+  %(prog)s notes.md                           # ingest a markdown file
   %(prog)s contracts/acme.pdf contract --labels legal
   %(prog)s papers/ml_paper.pdf research --labels research
   %(prog)s bandi/gara.pdf bando --labels edilizia
   %(prog)s unknown.pdf document --labels generic     # unknown document type
   %(prog)s doc.pdf custom --labels /path/to/my_labels.yaml:medical
   %(prog)s scanned.pdf document --ocr          # force OCR for scanned PDFs
-  %(prog)s documents/                          # ingest all PDFs and .md files in directory
+  %(prog)s documents/                          # ingest all PDFs, DOCX, and .md files in directory
   %(prog)s mixed_docs/ --labels generic --multiscale  # use multi-scale extraction
 
 Built-in label sets:
@@ -1184,7 +1311,7 @@ For custom labels, create a YAML file with the same structure as
 ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
         """
     )
-    parser.add_argument("path", nargs="?", default=None, help="Path to PDF/markdown file or directory to ingest")
+    parser.add_argument("path", nargs="?", default=None, help="Path to PDF/DOCX/markdown file or directory to ingest")
     parser.add_argument(
         "doc_type",
         nargs="?",
@@ -1317,6 +1444,18 @@ ingest/gliner_config.yaml and reference it as 'path/to/file.yaml:key'.
             input_path,
             args.doc_type,
             args.labels_arg,
+            target_corpus=args.target_corpus,
+        )
+    elif input_path.suffix.lower() == ".docx":
+        # Handle DOCX file
+        ingest_docx(
+            str(input_path),
+            args.doc_type,
+            args.labels_arg,
+            post_process=args.post_process,
+            post_process_config=args.post_process_config,
+            enable_multiscale=args.enable_multiscale,
+            original_filename=args.original_filename,
             target_corpus=args.target_corpus,
         )
     else:

@@ -117,8 +117,8 @@ tool_definitions = [
             "name": "ingest_document",
             "description": (
                 "Ingest a document into the corpus with NER entity extraction. "
-                "Supports both .md and .pdf files. "
-                "For .pdf: converts to markdown via Docling, extracts entities via GLiNER, adds to corpus. "
+                "Supports .md, .pdf, and .docx files. "
+                "For .pdf/.docx: converts to markdown via Docling, extracts entities via GLiNER, adds to corpus. "
                 "For .md: adds to corpus with entity extraction. "
                 "Returns doc_id on success."
             ),
@@ -127,15 +127,15 @@ tool_definitions = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file (.md or .pdf)"
+                        "description": "Path to the file (.md, .pdf, or .docx)"
                     },
                     "doc_type": {
                         "type": "string",
-                        "description": "Document type: document, contract, research, cronoprogramma, etc. (PDF only, default: document)"
+                        "description": "Document type: document, contract, research, cronoprogramma, etc. (PDF/DOCX only, default: document)"
                     },
                     "labels": {
                         "type": "string",
-                        "description": "Label set for entity extraction: edilizia, legal, research (PDF only, default: edilizia)"
+                        "description": "Label set for entity extraction: edilizia, legal, research (PDF/DOCX only, default: edilizia)"
                     }
                 },
                 "required": ["path"]
@@ -391,14 +391,15 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
     """
     Ingest a document into the corpus.
 
-    Supports both .md and .pdf files:
+    Supports .md, .pdf, and .docx files:
     - .md files: processed directly with entity extraction
     - .pdf files: converted via Docling using uv run ingest/ingest.py
+    - .docx files: converted via Docling using uv run ingest/ingest.py
 
     Args:
-        path: Path to the file (.md or .pdf)
-        doc_type: Document type for PDFs (default: document)
-        labels: Label set for PDFs (default: edilizia)
+        path: Path to the file (.md, .pdf, or .docx)
+        doc_type: Document type for PDFs/DOCX (default: document)
+        labels: Label set for PDFs/DOCX (default: edilizia)
 
     Returns:
         Success message with doc_id or error
@@ -422,8 +423,8 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
         except Exception as e:
             return f"Error ingesting markdown: {e}"
 
-    elif suffix == ".pdf":
-        # PDF ingestion - use uv run ingest/ingest.py
+    elif suffix in (".pdf", ".docx"):
+        # PDF/DOCX ingestion - use uv run ingest/ingest.py
         cmd = [
             "uv", "run", "ingest/ingest.py",
             str(file_path),
@@ -437,13 +438,13 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minutes for large PDFs
+                timeout=600,  # 10 minutes for large documents
                 cwd=str(Path(__file__).parent.parent)  # Run from project root
             )
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                return f"Error ingesting PDF: {error_msg}"
+                return f"Error ingesting {suffix}: {error_msg}"
 
             # Extract doc_id from output (last line usually contains it)
             output = result.stdout.strip()
@@ -451,18 +452,18 @@ def ingest_document(path: str, doc_type: str = "document", labels: str = "ediliz
             doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
             doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
 
-            logger.info(f"[ingest_document] Ingested PDF {path} as {doc_id}")
-            return f"Successfully ingested PDF.\n\n{output}"
+            logger.info(f"[ingest_document] Ingested {suffix} {path} as {doc_id}")
+            return f"Successfully ingested {suffix}.\n\n{output}"
 
         except subprocess.TimeoutExpired:
-            return "Error: PDF ingestion timed out (after 10 minutes)"
+            return f"Error: {suffix} ingestion timed out (after 10 minutes)"
         except FileNotFoundError:
             return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
         except Exception as e:
-            return f"Error ingesting PDF: {e}"
+            return f"Error ingesting {suffix}: {e}"
 
     else:
-        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+        return f"Error: Unsupported file type '{suffix}'. Only .md, .pdf, and .docx files are supported."
 
 
 def ingest_document_to_corpus(
@@ -478,11 +479,13 @@ def ingest_document_to_corpus(
     This is similar to ingest_document but allows specifying a custom corpus path,
     enabling per-user isolation.
 
+    Supports .md, .pdf, and .docx files.
+
     Args:
-        path: Path to the file (.md or .pdf)
+        path: Path to the file (.md, .pdf, or .docx)
         target_corpus: Target corpus directory Path
-        doc_type: Document type for PDFs (default: document)
-        labels: Label set for PDFs (default: edilizia)
+        doc_type: Document type for PDFs/DOCX (default: document)
+        labels: Label set for PDFs/DOCX (default: edilizia)
         original_filename: Original filename to use for doc_id/title (e.g. from upload)
 
     Returns:
@@ -528,8 +531,8 @@ def ingest_document_to_corpus(
             logger.error(f"[ingest_document_to_corpus] Error: {e}")
             return f"Error ingesting markdown: {e}"
 
-    elif suffix == ".pdf":
-        # PDF ingestion - use uv run ingest/ingest.py with corpus path
+    elif suffix in (".pdf", ".docx"):
+        # PDF/DOCX ingestion - use uv run ingest/ingest.py with corpus path
         cmd = [
             "uv", "run", "ingest/ingest.py",
             str(file_path),
@@ -546,31 +549,31 @@ def ingest_document_to_corpus(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minutes for large PDFs
+                timeout=600,  # 10 minutes for large documents
                 cwd=str(Path(__file__).parent.parent)  # Run from project root
             )
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                return f"Error ingesting PDF: {error_msg}"
+                return f"Error ingesting {suffix}: {error_msg}"
 
             # Extract doc_id from output
             output = result.stdout.strip()
             doc_id_match = re.search(r'doc_id\s*[:=]\s*(\S+)', output)
             doc_id = doc_id_match.group(1) if doc_id_match else "unknown"
 
-            logger.info(f"[ingest_document_to_corpus] Ingested PDF {path} as {doc_id} to {target_corpus}")
-            return f"Successfully ingested PDF.\n\ndoc_id: {doc_id}"
+            logger.info(f"[ingest_document_to_corpus] Ingested {suffix} {path} as {doc_id} to {target_corpus}")
+            return f"Successfully ingested {suffix}.\n\ndoc_id: {doc_id}"
 
         except subprocess.TimeoutExpired:
-            return "Error: PDF ingestion timed out (after 10 minutes)"
+            return f"Error: {suffix} ingestion timed out (after 10 minutes)"
         except FileNotFoundError:
             return "Error: 'uv' command not found. Make sure uv is installed and in PATH."
         except Exception as e:
-            return f"Error ingesting PDF: {e}"
+            return f"Error ingesting {suffix}: {e}"
 
     else:
-        return f"Error: Unsupported file type '{suffix}'. Only .md and .pdf files are supported."
+        return f"Error: Unsupported file type '{suffix}'. Only .md, .pdf, and .docx files are supported."
 
 
 def search_corpus_structured(
