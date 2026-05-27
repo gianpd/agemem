@@ -69,12 +69,18 @@ class STMContext:
         Converts unsupported 'tool' role messages to 'user' messages for compatibility.
         """
         # Separate system messages from conversation messages
+        # System messages with content_parts cannot be merged - they stay separate
         system_parts = []
+        system_multimodal = []
         conversation = []
 
         for m in self._messages:
             if m.role == "system":
-                system_parts.append(m.content)
+                if m.content_parts is not None:
+                    # Multi-modal system message - keep separate
+                    system_multimodal.append(m.to_openai_dict())
+                else:
+                    system_parts.append(m.content)
             elif m.role == "tool":
                 # Keep tool messages as proper tool role with tool_call_id
                 # This is required for proper tool calling with models that support it
@@ -85,9 +91,10 @@ class STMContext:
 
         result = []
         if system_parts:
-            # Merge all system messages into one
+            # Merge all text-only system messages into one
             result.append({"role": "system", "content": "\n\n".join(system_parts)})
-
+        # Add multi-modal system messages after merged text system
+        result.extend(system_multimodal)
         result.extend(conversation)
         return result
 
@@ -112,20 +119,34 @@ class STMContext:
         self,
         role: str,
         content: Optional[str] = None,
+        content_parts: Optional[list[dict]] = None,
         is_pinned: bool = False,
         relevance_score: float = 1.0,
         tool_call_id: Optional[str] = None,
         tool_calls: Optional[list[dict]] = None,
     ) -> None:
-        """Append a new message.  Pinned = never evicted by FILTER."""
-        if not content:
+        """Append a new message.  Pinned = never evicted by FILTER.
+
+        Supports multi-modal content via content_parts (OpenAI-style content array).
+        """
+        if not content and not content_parts:
             # convert no content to empty string
             content = ""
+        # Token estimation: count text content, images add 0 (LLM handles image tokens)
+        token_estimate = 0
+        if content:
+            token_estimate = self._tc.count(content)
+        elif content_parts:
+            # Count text parts only
+            for part in content_parts:
+                if part.get("type") == "text":
+                    token_estimate += self._tc.count(part.get("text", ""))
         msg = ContextMessage(
             role=role,
             content=content,
+            content_parts=content_parts,
             turn_index=self._turn_index,
-            token_estimate=self._tc.count(content or ""),
+            token_estimate=token_estimate,
             relevance_score=relevance_score,
             is_pinned=is_pinned,
             tool_call_id=tool_call_id,
@@ -370,6 +391,7 @@ class STMContext:
             {
                 "role": m.role,
                 "content": m.content,
+                "content_parts": m.content_parts,
                 "turn_index": m.turn_index,
                 "token_estimate": m.token_estimate,
                 "relevance_score": m.relevance_score,
@@ -393,6 +415,7 @@ class STMContext:
                 ContextMessage(
                     role=m["role"],
                     content=m["content"],
+                    content_parts=m.get("content_parts"),
                     turn_index=m["turn_index"],
                     token_estimate=m["token_estimate"],
                     relevance_score=m["relevance_score"],

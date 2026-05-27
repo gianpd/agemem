@@ -17,6 +17,7 @@ Design notes
 
 from __future__ import annotations
 
+import re
 import time
 import hashlib
 from dataclasses import dataclass, field
@@ -92,6 +93,7 @@ class ContextMessage:
     """A single message in the active STM context window."""
     role: str                        # "system" | "user" | "assistant" | "tool"
     content: Optional[str] = None    # None for assistant tool calls
+    content_parts: Optional[list[dict]] = None  # Multi-modal content: [{"type": "text", "text": "..."}, {"type": "image_url", "image_url": {"url": "..."}}]
     turn_index: int = 0
     token_estimate: int = 0
     relevance_score: float = 1.0    # used by FILTER to rank eviction priority
@@ -100,7 +102,18 @@ class ContextMessage:
     tool_calls: Optional[list[dict]] = None  # for assistant role: tool calls made
 
     def to_openai_dict(self) -> dict:
-        """Convert to OpenAI-compatible dict, with content sanitization for llama.cpp compatibility."""
+        """Convert to OpenAI-compatible dict, handling multi-modal content."""
+        # Multi-modal content: use content_parts array format
+        if self.content_parts is not None:
+            result: dict = {"role": self.role}
+            result["content"] = self.content_parts
+            if self.tool_call_id:
+                result["tool_call_id"] = self.tool_call_id
+            if self.tool_calls:
+                result["tool_calls"] = self.tool_calls
+            return result
+
+        # Text-only content: sanitize for llama.cpp compatibility
         # Sanitize content to prevent parser failures
         # Replace control characters and normalize whitespace
         content = self.content
@@ -179,7 +192,8 @@ class Skill:
     description: str
     trigger_keywords: list[str]  # Keywords that activate this skill
     hint_message: str           # Message added to context when skill is triggered
-    source_doc_id: Optional[str] = None  # If loaded from corpus
+    source_doc_id: Optional[str] = None  # Canonical doc ID from frontmatter
+    source_path: Optional[str] = None    # Relative path to skill document
     priority: int = 0           # Higher = more important (for ordering)
 
     def matches_input(self, user_input: str, min_matches: int = 1) -> bool:
@@ -197,7 +211,10 @@ class Skill:
             return False
 
         user_lower = user_input.lower()
-        matches = sum(1 for kw in self.trigger_keywords if kw.lower() in user_lower)
+        matches = sum(
+            1 for kw in self.trigger_keywords
+            if re.search(r'\b' + re.escape(kw.lower()) + r'\b', user_lower)
+        )
         return matches >= min_matches
 
 

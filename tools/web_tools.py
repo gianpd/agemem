@@ -23,6 +23,7 @@ from core.config import (
     UWOT_SEARCH_ENABLED,
     UWOT_SEARCH_SERVICE_URL,
     FETCH_ONLY_MENTIONED_URLS,
+    FETCH_ALLOW_LOCALHOST,
 )
 
 # Security configuration for fetch_url
@@ -544,6 +545,21 @@ def _sanitize_fetched_content(content: str, source_url: str) -> str:
     return content
 
 
+def _is_localhost(hostname: str) -> bool:
+    """Check if hostname is a localhost variant."""
+    hostname_lower = hostname.lower()
+    if hostname_lower in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    # Check if it's a 127.x.x.x IP
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr in ipaddress.ip_network("127.0.0.0/8"):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
 def validate_url_for_fetch(url: str, require_context: bool = True) -> tuple[bool, str, Optional[str]]:
     """
     Comprehensive URL validation for fetch_url security.
@@ -571,26 +587,32 @@ def validate_url_for_fetch(url: str, require_context: bool = True) -> tuple[bool
     except Exception as e:
         return False, f"Invalid URL format: {e}", None
 
-    # Check scheme - HTTPS only
-    if parsed.scheme != 'https':
-        return False, f"Only HTTPS URLs are allowed (got: {parsed.scheme})", None
-
     # Check for empty hostname
     if not parsed.hostname:
         return False, "URL must have a valid hostname", None
 
     hostname = parsed.hostname.lower()
+    is_localhost_url = _is_localhost(hostname)
+
+    # Check scheme - HTTPS only (except localhost when explicitly allowed)
+    if parsed.scheme not in ('https', 'http'):
+        return False, f"Only HTTP/HTTPS URLs are allowed (got: {parsed.scheme})", None
+
+    if parsed.scheme == 'http' and not (FETCH_ALLOW_LOCALHOST and is_localhost_url):
+        return False, f"Only HTTPS URLs are allowed for external hosts (got: {parsed.scheme})", None
 
     # DNS resolution and IP validation (CRIT-1: DNS rebinding protection)
-    # This resolves the hostname and validates all resulting IPs
-    is_valid_ip, ip_error = _resolve_and_validate_host(hostname)
-    if not is_valid_ip:
-        return False, f"Security violation: {ip_error}", None
+    # Skip for localhost when explicitly allowed
+    if not (FETCH_ALLOW_LOCALHOST and is_localhost_url):
+        is_valid_ip, ip_error = _resolve_and_validate_host(hostname)
+        if not is_valid_ip:
+            return False, f"Security violation: {ip_error}", None
 
-    # Check for homograph attacks
-    is_homograph, reason = _is_homograph_attack(hostname)
-    if is_homograph:
-        return False, f"Security violation: {reason}", None
+    # Check for homograph attacks (skip for localhost - no unicode localhost)
+    if not is_localhost_url:
+        is_homograph, reason = _is_homograph_attack(hostname)
+        if is_homograph:
+            return False, f"Security violation: {reason}", None
 
     # Check if URL is from conversation context
     if require_context and not _is_url_from_context(url):

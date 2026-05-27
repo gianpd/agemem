@@ -59,6 +59,7 @@ UWOT_API_KEY = os.getenv("UWOT_API_KEY", "")
 
 # Fetch URL security config
 FETCH_ONLY_MENTIONED_URLS = os.getenv("FETCH_ONLY_MENTIONED_URLS", "true").lower() == "true"
+FETCH_ALLOW_LOCALHOST = os.getenv("FETCH_ALLOW_LOCALHOST", "false").lower() == "true"
 UWOT_API_KEY = os.getenv("UWOT_API_KEY")
 
 # Browser automation config
@@ -81,6 +82,31 @@ CTX_COMPACT_TRIGGER = int(CTX_PROMPT_BUDGET * 0.80)
 TOOL_RESULT_MAX_CHARS = int(os.getenv("TOOL_RESULT_MAX_CHARS", "4000"))
 CHARS_PER_TOKEN = 3.5
 MAX_READ_LINES = 75
+
+# ─────────────────────────────────────────────────────────────
+# CONFIG — Corpus Read Protection (Multi-layer)
+# ─────────────────────────────────────────────────────────────
+CORPUS_READ_MAX_BYTES = int(os.getenv("CORPUS_READ_MAX_BYTES", "262144"))  # 256KB
+"""Maximum output bytes for read_document. Prevents context explosion."""
+
+CORPUS_READ_MAX_TOKENS = int(os.getenv("CORPUS_READ_MAX_TOKENS", "25000"))
+"""Maximum estimated tokens for read output. Layer 2 protection."""
+
+CORPUS_READ_DEFAULT_LINES = int(os.getenv("CORPUS_READ_DEFAULT_LINES", "2000"))
+"""Default line limit when no offset/limit specified."""
+
+CORPUS_READ_FAST_PATH_THRESHOLD = int(os.getenv("CORPUS_READ_FAST_PATH_THRESHOLD", "10485760"))  # 10MB
+"""Files larger than this use streaming path to avoid memory issues."""
+
+# ─────────────────────────────────────────────────────────────
+# CONFIG — Email (IONOS IMAP/SMTP)
+# ─────────────────────────────────────────────────────────────
+IONOS_EMAIL = os.getenv("IONOS_EMAIL", "")
+IONOS_PASSWORD = os.getenv("IONOS_PASSWORD", "")
+IONOS_IMAP_HOST = os.getenv("IONOS_IMAP_HOST", "imap.ionos.com")
+IONOS_IMAP_PORT = int(os.getenv("IONOS_IMAP_PORT", "993"))
+IONOS_SMTP_HOST = os.getenv("IONOS_SMTP_HOST", "smtp.ionos.com")
+IONOS_SMTP_PORT = int(os.getenv("IONOS_SMTP_PORT", "587"))
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG — Tools
@@ -244,8 +270,12 @@ class AgememConfig:
     SKILL_DEFAULT_RELEVANCE: float = 0.6
     """Default relevance score for skill hint messages."""
 
-    SKILL_TRIGGER_MIN_MATCHES: int = 1
-    """Minimum keyword matches required to trigger a skill."""
+    SKILL_TRIGGER_MIN_MATCHES: int = 2
+    """Minimum keyword matches required to trigger a skill.
+
+    Set to 2 to reduce false positives. A single common-word match (e.g.,
+    "contract" in isolation) should not fire a domain-specific skill.
+    """
 
     SKILL_CORPUS_PATH: Optional[str] = "corpus"
     """Path to corpus directory for loading skill documents."""

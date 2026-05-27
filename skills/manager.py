@@ -31,19 +31,37 @@ class SkillManager:
         self._skills: list[Skill] = []
         self._loaded = False
 
-    def load_skills(self, corpus_path: Optional[Path | str] = None) -> None:
+    def load_skills(
+        self,
+        corpus_path: Optional[Path | str] = None,
+        skip_isolated: bool = False,
+    ) -> None:
         """
         Load skills from corpus and built-in sources.
 
         Args:
             corpus_path: Path to corpus directory. If None, uses config.SKILL_CORPUS_PATH
+            skip_isolated: If True, skip users/ and tenants/ subdirectories (for global corpus)
         """
         if corpus_path is None:
             corpus_path = self._config.SKILL_CORPUS_PATH
 
+        corpus_skills = []  # Initialize before conditional to prevent NameError
         if corpus_path:
-            corpus_skills = load_skills_from_corpus(corpus_path)
-            self._skills.extend(corpus_skills)
+            corpus_skills = load_skills_from_corpus(corpus_path, skip_isolated=skip_isolated)
+
+        # Deduplication: later load wins (tenant override semantics)
+        skill_index = {s.skill_id: i for i, s in enumerate(self._skills)}
+        for skill in corpus_skills:
+            if skill.skill_id in skill_index:
+                # Replace existing skill (tenant override)
+                self._skills[skill_index[skill.skill_id]] = skill
+            else:
+                # Append new skill
+                self._skills.append(skill)
+
+        # Re-sort by priority after dedup
+        self._skills.sort(key=lambda s: s.priority, reverse=True)
 
         self._loaded = True
 

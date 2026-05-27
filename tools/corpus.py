@@ -11,7 +11,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from core.config import CORPUS, MAX_READ_LINES
+from core.config import (
+    CORPUS,
+    MAX_READ_LINES,
+    CORPUS_READ_MAX_BYTES,
+    CORPUS_READ_MAX_TOKENS,
+    CORPUS_READ_DEFAULT_LINES,
+    CORPUS_READ_FAST_PATH_THRESHOLD,
+)
 
 logger = logging.getLogger("agemem")
 
@@ -78,14 +85,22 @@ tool_definitions = [
         "function": {
             "name": "read_document",
             "description": (
-                "Read the full content of a specific document by its doc_id. "
-                "Returns the document content, truncated if too long. "
-                "For large documents, use read_lines to read specific portions."
+                "Read the content of a specific document by its doc_id. "
+                "IMPORTANT: By default, reads up to 2000 lines starting from the beginning. "
+                "For large documents, use offset and limit parameters to read in chunks. "
+                "offset: Line number to start reading from (0-indexed, default 0). "
+                "limit: Number of lines to read (default 2000, max 2000). "
+                "Example: read_document(doc_id='large-doc', offset=500, limit=100) reads lines 501-600. "
+                "If the document exceeds the byte limit (256KB), returns an error with size info. "
+                "Set truncate_on_byte_limit=true to truncate instead of erroring."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "doc_id": {"type": "string", "description": "The document ID (from list_documents)."}
+                    "doc_id": {"type": "string", "description": "The document ID (from list_documents)."},
+                    "offset": {"type": "integer", "description": "Line number to start reading from (0-indexed, default 0)."},
+                    "limit": {"type": "integer", "description": "Number of lines to read (default 2000, max 2000)."},
+                    "truncate_on_byte_limit": {"type": "boolean", "description": "If true, truncate content at byte limit instead of erroring."}
                 },
                 "required": ["doc_id"]
             }
@@ -97,8 +112,8 @@ tool_definitions = [
             "name": "read_lines",
             "description": (
                 "Read a specific line range from a document. "
-                "Useful for reading large documents in sections. "
-                "Line numbers are 1-indexed. Maximum 75 lines per call."
+                "Line numbers are 1-indexed. Maximum 75 lines per call. "
+                "Returns an error if the content exceeds the 256KB byte limit."
             ),
             "parameters": {
                 "type": "object",
@@ -190,53 +205,126 @@ def _get_corpus_path(custom_path: Optional[Path] = None) -> Path:
     return CORPUS
 
 
-def list_documents(corpus_path: Optional[Path] = None) -> str:
-    """List all ingested documents with metadata. Supports custom corpus path."""
-    corpus = _get_corpus_path(corpus_path)
+def _get_corpus_search_paths(
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> list[Path]:
+    """Get ordered list of corpus paths to search (tenant corpus first, then global fallback).
+
+    Args:
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        List of paths to search in priority order
+    """
+    primary = _get_corpus_path(corpus_path)
+    search_paths = [primary]
+    if global_corpus_path and global_corpus_path != primary:
+        search_paths.append(global_corpus_path)
+    return search_paths
+
+
+def list_documents(
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> str:
+    """List all ingested documents with metadata. Supports custom corpus path with global fallback.
+
+    Args:
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        JSON string with documents list and count
+    """
+    search_paths = _get_corpus_search_paths(corpus_path, global_corpus_path)
     docs = []
-    for md_file in sorted(corpus.glob("*.md")):
-        try:
-            with open(md_file, "r", encoding="utf-8") as f:
-                content = f.read()
-            meta, _, _ = _parse_frontmatter(content)
-            docs.append(_get_doc_info(md_file, meta))
-        except IOError as e:
-            logger.warning(f"[list_documents] Failed to read {md_file}: {e}")
+    seen_ids = set()  # Deduplicate by doc_id across corpora
+
+    for search_corpus in search_paths:
+        for md_file in sorted(search_corpus.glob("*.md")):
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                meta, _, _ = _parse_frontmatter(content)
+                doc_info = _get_doc_info(md_file, meta)
+                # Deduplicate: only add if doc_id not already seen
+                if doc_info["doc_id"] not in seen_ids:
+                    seen_ids.add(doc_info["doc_id"])
+                    docs.append(doc_info)
+            except IOError as e:
+                logger.warning(f"[list_documents] Failed to read {md_file}: {e}")
 
     return json.dumps({"documents": docs, "count": len(docs)}, indent=2)
 
 
-def search_metadata(keyword: str, corpus_path: Optional[Path] = None) -> str:
-    """Search document metadata for a keyword anywhere in the frontmatter. Supports custom corpus path."""
-    corpus = _get_corpus_path(corpus_path)
+def search_metadata(
+    keyword: str,
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> str:
+    """Search document metadata for a keyword anywhere in the frontmatter. Supports custom corpus path with global fallback.
+
+    Args:
+        keyword: Keyword to search in frontmatter
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        JSON string with matches list and count
+    """
+    search_paths = _get_corpus_search_paths(corpus_path, global_corpus_path)
     keyword_lower = keyword.lower()
     matches = []
+    seen_ids = set()  # Deduplicate by doc_id
 
-    for md_file in sorted(corpus.glob("*.md")):
-        try:
-            with open(md_file, "r", encoding="utf-8") as f:
-                content = f.read()
+    for search_corpus in search_paths:
+        for md_file in sorted(search_corpus.glob("*.md")):
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    content = f.read()
 
-            meta, _, raw_frontmatter = _parse_frontmatter(content)
-            
-            # Search the raw text of the frontmatter (handles nested lists/entities safely)
-            if keyword_lower in raw_frontmatter.lower():
-                doc_info = _get_doc_info(md_file, meta)
-                doc_info["matched_in"] = "frontmatter"
-                matches.append(doc_info)
-        except IOError:
-            continue
+                meta, _, raw_frontmatter = _parse_frontmatter(content)
+                doc_id = meta.get("doc_id", md_file.stem)
+
+                # Deduplicate: skip if already matched
+                if doc_id in seen_ids:
+                    continue
+
+                # Search the raw text of the frontmatter (handles nested lists/entities safely)
+                if keyword_lower in raw_frontmatter.lower():
+                    seen_ids.add(doc_id)
+                    doc_info = _get_doc_info(md_file, meta)
+                    doc_info["matched_in"] = "frontmatter"
+                    matches.append(doc_info)
+            except IOError:
+                continue
 
     return json.dumps({"matches": matches, "count": len(matches)}, indent=2)
 
 
-def grep_corpus(pattern: str, context_lines: int = 3, corpus_path: Optional[Path] = None) -> str:
+def grep_corpus(
+    pattern: str,
+    context_lines: int = 3,
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> str:
     """
     Search document body text using pure Python.
     Intelligently skips YAML frontmatter and groups context.
-    Supports custom corpus path.
+    Supports custom corpus path with global fallback.
+
+    Args:
+        pattern: Regex pattern to search
+        context_lines: Number of context lines around matches
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        Formatted string with matches and context
     """
-    corpus = _get_corpus_path(corpus_path)
+    search_paths = _get_corpus_search_paths(corpus_path, global_corpus_path)
     context_lines = min(context_lines, 5)
 
     # AUTO-FIX: If the LLM mistakenly uses spaces instead of pipes, and no regex operators are present
@@ -252,63 +340,70 @@ def grep_corpus(pattern: str, context_lines: int = 3, corpus_path: Optional[Path
     total_matches = 0
     char_count = 0
     MAX_CHARS = 4000
+    seen_doc_ids = set()  # Deduplicate by doc_id
 
-    for md_file in sorted(corpus.rglob("*.md")):
-        if char_count > MAX_CHARS:
-            break
+    for search_corpus in search_paths:
+        for md_file in sorted(search_corpus.glob("*.md")):
+            if char_count > MAX_CHARS:
+                break
 
-        try:
-            with open(md_file, "r", encoding="utf-8") as f:
-                content = f.read()
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    content = f.read()
 
-            meta, body_text, _ = _parse_frontmatter(content)
-            doc_id = meta.get("doc_id", md_file.stem)
+                meta, body_text, _ = _parse_frontmatter(content)
+                doc_id = meta.get("doc_id", md_file.stem)
 
-            lines = body_text.splitlines()
-            match_indices =[i for i, line in enumerate(lines) if regex.search(line)]
+                # Deduplicate: skip if already processed
+                if doc_id in seen_doc_ids:
+                    continue
 
-            if not match_indices:
-                continue
+                lines = body_text.splitlines()
+                match_indices = [i for i, line in enumerate(lines) if regex.search(line)]
 
-            total_matches += len(match_indices)
-            
-            file_header = f"\n📄[{doc_id}] ({len(match_indices)} matches)"
-            all_results.append(file_header)
-            char_count += len(file_header)
+                if not match_indices:
+                    continue
 
-            MAX_MATCHES_PER_FILE = 5
-            snippets = []
-            current_snippet =[]
-            last_idx = -100
+                seen_doc_ids.add(doc_id)
+                total_matches += len(match_indices)
 
-            for i in match_indices[:MAX_MATCHES_PER_FILE]:
-                start = max(0, i - context_lines)
-                end = min(len(lines), i + context_lines + 1)
+                file_header = f"\n📄[{doc_id}] ({len(match_indices)} matches)"
+                all_results.append(file_header)
+                char_count += len(file_header)
 
-                if start <= last_idx:
-                    current_snippet.extend(lines[last_idx:end])
-                else:
-                    if current_snippet:
-                        snippets.append("\n".join(current_snippet))
-                    current_snippet = lines[start:end]
+                MAX_MATCHES_PER_FILE = 5
+                snippets = []
+                current_snippet = []
+                last_idx = -100
 
-                last_idx = end
+                for i in match_indices[:MAX_MATCHES_PER_FILE]:
+                    start = max(0, i - context_lines)
+                    end = min(len(lines), i + context_lines + 1)
 
-            if current_snippet:
-                snippets.append("\n".join(current_snippet))
+                    if start <= last_idx:
+                        current_snippet.extend(lines[last_idx:end])
+                    else:
+                        if current_snippet:
+                            snippets.append("\n".join(current_snippet))
+                        current_snippet = lines[start:end]
 
-            for snip in snippets:
-                formatted_snip = f"...\n{snip.strip()}\n..."
-                all_results.append(formatted_snip)
-                char_count += len(formatted_snip)
+                    last_idx = end
 
-            if len(match_indices) > MAX_MATCHES_PER_FILE:
-                overflow_msg = f"  *(+{len(match_indices) - MAX_MATCHES_PER_FILE} more matches not shown)*"
-                all_results.append(overflow_msg)
-                char_count += len(overflow_msg)
+                if current_snippet:
+                    snippets.append("\n".join(current_snippet))
 
-        except Exception as e:
-            logger.warning(f"Error searching {md_file}: {e}")
+                for snip in snippets:
+                    formatted_snip = f"...\n{snip.strip()}\n..."
+                    all_results.append(formatted_snip)
+                    char_count += len(formatted_snip)
+
+                if len(match_indices) > MAX_MATCHES_PER_FILE:
+                    overflow_msg = f"  *(+{len(match_indices) - MAX_MATCHES_PER_FILE} more matches not shown)*"
+                    all_results.append(overflow_msg)
+                    char_count += len(overflow_msg)
+
+            except Exception as e:
+                logger.warning(f"Error searching {md_file}: {e}")
 
     if not total_matches:
         return f"No matches found for pattern: {pattern}"
@@ -316,73 +411,307 @@ def grep_corpus(pattern: str, context_lines: int = 3, corpus_path: Optional[Path
     result_str = "\n".join(all_results)
     if len(result_str) > MAX_CHARS:
         result_str = result_str[:MAX_CHARS] + "\n\n[TRUNCATED: Maximum output length reached]"
-        
+
     return result_str
 
 
-def _find_file_by_doc_id(doc_id: str, corpus_path: Optional[Path] = None) -> Optional[Path]:
-    """Resolve a doc_id to its actual file path. Supports custom corpus path."""
-    corpus = _get_corpus_path(corpus_path)
-    # First try exact filename match
-    direct_path = corpus / f"{doc_id}.md"
-    if direct_path.exists():
-        return direct_path
+def _find_file_by_doc_id(
+    doc_id: str,
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> Optional[Path]:
+    """Resolve a doc_id to its actual file path. Supports custom corpus path with global fallback.
 
-    # Then fallback to parsing frontmatter to find the true ID
-    for md_file in corpus.glob("*.md"):
-        if md_file.stem == doc_id:
-            return md_file
-        try:
-            with open(md_file, "r", encoding="utf-8") as f:
-                meta, _, _ = _parse_frontmatter(f.read())
-                if meta.get("doc_id") == doc_id:
-                    return md_file
-        except Exception:
-            pass
-            
+    Search order:
+    1. Tenant-specific corpus (corpus_path)
+    2. Global corpus (global_corpus_path) - for shared skills and base documents
+
+    Args:
+        doc_id: Document ID to find
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        Path to the document file, or None if not found
+    """
+    corpus = _get_corpus_path(corpus_path)
+
+    # Search paths in priority order
+    search_paths = [corpus]
+    if global_corpus_path and global_corpus_path != corpus:
+        search_paths.append(global_corpus_path)
+
+    for search_corpus in search_paths:
+        # First try exact filename match
+        direct_path = search_corpus / f"{doc_id}.md"
+        if direct_path.exists():
+            return direct_path
+
+        # Then fallback to parsing frontmatter to find the true ID
+        for md_file in search_corpus.glob("*.md"):
+            if md_file.stem == doc_id:
+                return md_file
+            try:
+                with open(md_file, "r", encoding="utf-8") as f:
+                    meta, _, _ = _parse_frontmatter(f.read())
+                    if meta.get("doc_id") == doc_id:
+                        return md_file
+            except Exception:
+                pass
+
     return None
 
 
-def read_document(doc_id: str, corpus_path: Optional[Path] = None) -> str:
-    """Read the full content of a document by doc_id. Supports custom corpus path."""
-    target_file = _find_file_by_doc_id(doc_id, corpus_path)
-    
+def read_document(
+    doc_id: str,
+    offset: int = 0,
+    limit: Optional[int] = None,
+    truncate_on_byte_limit: bool = False,
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> str:
+    """Read document content with pagination and context protection. Supports custom corpus path with global fallback.
+
+    Multi-layer protection (from spec):
+    - Layer 1: Byte size limit (256KB default) - prevents context explosion
+    - Layer 2: Token limit validation (25K tokens) - ensures model can process
+    - Pagination: offset/limit for large documents
+
+    Args:
+        doc_id: Document ID to read
+        offset: Line number to start reading from (0-indexed, default 0)
+        limit: Number of lines to read (default 2000, max 2000)
+        truncate_on_byte_limit: If True, truncate at byte limit instead of error
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        Document content with pagination metadata, or error message if limits exceeded
+    """
+    # Cap limit to prevent unbounded reads
+    if limit is None:
+        limit = CORPUS_READ_DEFAULT_LINES
+    limit = min(limit, CORPUS_READ_DEFAULT_LINES)
+
+    if offset < 0:
+        return f"Error: offset must be non-negative (got {offset})"
+
+    target_file = _find_file_by_doc_id(doc_id, corpus_path, global_corpus_path)
+
     if not target_file:
         return f"Error: Document '{doc_id}' not found"
 
     try:
+        # Get file size for Layer 1 check
+        file_size = target_file.stat().st_size
+
+        # Read file with streaming if large
+        if file_size >= CORPUS_READ_FAST_PATH_THRESHOLD:
+            return _read_document_streaming(
+                target_file, doc_id, offset, limit, truncate_on_byte_limit, file_size
+            )
+
+        # Fast path: read entire file for smaller documents
         with open(target_file, "r", encoding="utf-8") as f:
-            content = f.read()
+            lines = f.readlines()
 
-        if len(content) > 8000:
-            content = content[:8000] + f"\n\n...[TRUNCATED at 8000 chars. Use read_lines(doc_id='{doc_id}', start_line=..., end_line=...) for the rest]"
+        total_lines = len(lines)
+        start_idx = max(0, offset)
+        end_idx = min(total_lines, start_idx + limit)
 
-        return content
+        # Extract requested range
+        selected = lines[start_idx:end_idx]
+        content = "".join(selected)
+
+        # Layer 1: Byte limit check
+        content_bytes = len(content.encode("utf-8"))
+        if content_bytes > CORPUS_READ_MAX_BYTES:
+            if truncate_on_byte_limit:
+                # Truncate to byte limit
+                content = content[:CORPUS_READ_MAX_BYTES]
+                content_bytes = CORPUS_READ_MAX_BYTES
+            else:
+                return (
+                    f"Error: Content exceeds {CORPUS_READ_MAX_BYTES} byte limit ({content_bytes} bytes).\n"
+                    f"File size: {file_size} bytes, total lines: {total_lines}.\n"
+                    f"Suggestion: Use smaller limit (current: {limit}) or offset to read in chunks.\n"
+                    f"Example: read_document(doc_id='{doc_id}', offset={offset}, limit={limit // 2})"
+                )
+
+        # Layer 2: Token limit check (rough estimation)
+        estimated_tokens = len(content) // 4  # chars_per_token approximation
+        if estimated_tokens > CORPUS_READ_MAX_TOKENS:
+            if truncate_on_byte_limit:
+                # Truncate to token limit
+                safe_chars = CORPUS_READ_MAX_TOKENS * 4
+                content = content[:safe_chars]
+            else:
+                return (
+                    f"Error: Content would add ~{estimated_tokens} tokens (max: {CORPUS_READ_MAX_TOKENS}).\n"
+                    f"Use offset={offset + limit} and limit={limit // 2} to read next chunk."
+                )
+
+        # Format with line numbers (cat -n style)
+        formatted_lines = []
+        for i, line in enumerate(selected, start=start_idx + 1):
+            line_num = str(i).rjust(6)
+            formatted_lines.append(f"{line_num}\t{line.rstrip()}")
+        formatted_content = "\n".join(formatted_lines)
+
+        # Pagination metadata
+        has_more = end_idx < total_lines
+        truncated = end_idx < total_lines or content_bytes >= CORPUS_READ_MAX_BYTES
+
+        header = f"📄 {doc_id} (lines {start_idx + 1}-{end_idx} of {total_lines})"
+        if truncated:
+            header += " [TRUNCATED]"
+        if has_more:
+            header += f"\nNext: read_document(doc_id='{doc_id}', offset={end_idx}, limit={limit})"
+
+        return f"{header}\n\n{formatted_content}"
+
     except IOError as e:
         return f"Error reading document: {e}"
 
 
-def read_lines(doc_id: str, start_line: int, end_line: int, corpus_path: Optional[Path] = None) -> str:
-    """Read a specific line range from a document. Supports custom corpus path."""
-    target_file = _find_file_by_doc_id(doc_id, corpus_path)
+def _read_document_streaming(
+    target_file: Path,
+    doc_id: str,
+    offset: int,
+    limit: int,
+    truncate_on_byte_limit: bool,
+    file_size: int,
+) -> str:
+    """Streaming reader for large documents (>10MB). Avoids loading entire file into memory."""
+
+    collected_lines = []
+    current_line = 0
+    bytes_collected = 0
+    total_lines = 0
+
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            for line in f:
+                total_lines += 1
+                line_bytes = len(line.encode("utf-8"))
+
+                if current_line >= offset:
+                    if len(collected_lines) < limit:
+                        # Check byte limit before adding
+                        if bytes_collected + line_bytes > CORPUS_READ_MAX_BYTES:
+                            if truncate_on_byte_limit:
+                                break
+                            else:
+                                return (
+                                    f"Error: Content exceeds {CORPUS_READ_MAX_BYTES} byte limit.\n"
+                                    f"File size: {file_size} bytes.\n"
+                                    f"Suggestion: Use smaller limit (current: {limit}).\n"
+                                    f"Example: read_document(doc_id='{doc_id}', offset={offset}, limit={limit // 4})"
+                                )
+                        collected_lines.append(line)
+                        bytes_collected += line_bytes
+                    else:
+                        # We have enough lines, stop collecting
+                        break
+                current_line += 1
+
+        # Format with line numbers
+        formatted_lines = []
+        for i, line in enumerate(collected_lines, start=offset + 1):
+            line_num = str(i).rjust(6)
+            formatted_lines.append(f"{line_num}\t{line.rstrip()}")
+        formatted_content = "\n".join(formatted_lines)
+
+        end_line = offset + len(collected_lines)
+        has_more = current_line > end_line or end_line < total_lines
+
+        header = f"📄 {doc_id} (lines {offset + 1}-{end_line} of {total_lines}) [STREAMED]"
+        if bytes_collected >= CORPUS_READ_MAX_BYTES:
+            header += " [BYTE-LIMITED]"
+        if has_more:
+            header += f"\nNext: read_document(doc_id='{doc_id}', offset={end_line}, limit={limit})"
+
+        return f"{header}\n\n{formatted_content}"
+
+    except IOError as e:
+        return f"Error reading document: {e}"
+
+
+def read_lines(
+    doc_id: str,
+    start_line: int,
+    end_line: int,
+    corpus_path: Optional[Path] = None,
+    global_corpus_path: Optional[Path] = None,
+) -> str:
+    """Read a specific line range from a document with byte limit enforcement. Supports custom corpus path with global fallback.
+
+    Args:
+        doc_id: Document ID to read
+        start_line: Start line number (1-indexed)
+        end_line: End line number (1-indexed)
+        corpus_path: Primary corpus directory (tenant-specific)
+        global_corpus_path: Global corpus for shared documents (fallback)
+
+    Returns:
+        Document lines string with pagination metadata, or error message if limits exceeded
+    """
+    target_file = _find_file_by_doc_id(doc_id, corpus_path, global_corpus_path)
 
     if not target_file:
         return f"Error: Document '{doc_id}' not found"
 
+    # Enforce line limit
     if end_line - start_line > MAX_READ_LINES:
-        end_line = start_line + MAX_READ_LINES
+        actual_end = start_line + MAX_READ_LINES
+        limit_note = f"\nNote: Line range capped to {MAX_READ_LINES} lines (requested {end_line - start_line}).\n"
+        end_line = actual_end
+    else:
+        limit_note = ""
+
+    if start_line < 1:
+        return f"Error: start_line must be >= 1 (got {start_line})"
 
     try:
+        # Get file size for check
+        file_size = target_file.stat().st_size
+
         with open(target_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
+        total_lines = len(lines)
         start_idx = max(0, start_line - 1)
-        end_idx = min(len(lines), end_line)
+        end_idx = min(total_lines, end_line)
 
         selected = lines[start_idx:end_idx]
-        result = "".join(selected)
+        content = "".join(selected)
 
-        return f"Lines {start_line}-{end_line} of {doc_id}:\n\n{result}"
+        # Layer 1: Byte limit check
+        content_bytes = len(content.encode("utf-8"))
+        if content_bytes > CORPUS_READ_MAX_BYTES:
+            return (
+                f"Error: Content exceeds {CORPUS_READ_MAX_BYTES} byte limit ({content_bytes} bytes).\n"
+                f"Even {end_line - start_line} lines are too large for one request.\n"
+                f"Suggestion: Use read_document with smaller limit.\n"
+                f"Example: read_document(doc_id='{doc_id}', offset={start_line - 1}, limit=20)"
+            )
+
+        # Format with line numbers (cat -n style)
+        formatted_lines = []
+        for i, line in enumerate(selected, start=start_idx + 1):
+            line_num = str(i).rjust(6)
+            formatted_lines.append(f"{line_num}\t{line.rstrip()}")
+        formatted_content = "\n".join(formatted_lines)
+
+        # Pagination metadata
+        has_more = end_idx < total_lines
+
+        header = f"📄 {doc_id} (lines {start_idx + 1}-{end_idx} of {total_lines})"
+        if has_more:
+            header += f"\nNext: read_lines(doc_id='{doc_id}', start_line={end_idx + 1}, end_line={end_idx + 1 + MAX_READ_LINES})"
+
+        return f"{limit_note}{header}\n\n{formatted_content}"
+
     except IOError as e:
         return f"Error reading document: {e}"
 

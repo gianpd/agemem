@@ -5,6 +5,7 @@ This package provides various tools for the agent including:
 - Web search and fetch tools (web_tools.py)
 - Browser automation tools (browser_tools.py)
 - Corpus/document management tools (corpus.py)
+- Email client tools (email_tools.py)
 - Query expansion utilities (query_expansion.py)
 
 Note:
@@ -24,10 +25,10 @@ from .corpus import (
 
 from .query_expansion import QueryExpander
 
-# Lazy imports for web_tools to avoid dependency issues
+# Lazy imports for web_tools and email_tools to avoid dependency issues
 # Use: from tools.web_tools import web_search
 def __getattr__(name):
-    """Lazy load web_tools to avoid heavy dependencies on import."""
+    """Lazy load web_tools and email_tools to avoid heavy dependencies on import."""
     web_exports = {
         'web_search',
         'fetch_url',
@@ -36,6 +37,12 @@ def __getattr__(name):
         'register_conversation_urls',
         'validate_url_for_fetch',
         'web_tool_definitions',
+    }
+    email_exports = {
+        'fetch_emails',
+        'send_email',
+        'reply_to_email',
+        'email_tool_definitions',
     }
     browser_exports = {
         'browser_click',
@@ -73,6 +80,11 @@ def __getattr__(name):
             return BROWSER_CDP_ENDPOINT
         if name == 'BROWSER_CONNECT_OVER_CDP':
             return BROWSER_CONNECT_OVER_CDP
+    if name in email_exports:
+        from . import email_tools
+        if name == "email_tool_definitions":
+            return email_tools.tool_definitions
+        return getattr(email_tools, name)
     raise AttributeError(f"module 'tools' has no attribute '{name}'")
 
 
@@ -115,6 +127,11 @@ __all__ = [
     "read_lines",
     "ingest_document",
     "corpus_tool_definitions",
+    # Email tools (lazy loaded)
+    "fetch_emails",
+    "send_email",
+    "reply_to_email",
+    "email_tool_definitions",
     # Query expansion
     "QueryExpander",
 ]

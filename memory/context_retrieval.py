@@ -235,21 +235,53 @@ class ContextAwareRetriever:
                     weights.append(weight_map[i])
                     turn_indices.append(turn_idx)
 
-            # Compute or retrieve embeddings
-            embeddings = []
-            for text, turn_idx in zip(texts, turn_indices):
-                emb = self._get_or_compute_embedding(text, turn_idx)
-                if emb is not None:
-                    embeddings.append(emb)
+            # Compute or retrieve embeddings — batch uncached texts
+            embeddings: list[np.ndarray] = []
+            effective_weights: list[float] = []
+            uncached_indices: list[int] = []
+            uncached_texts: list[str] = []
+
+            for i, (text, turn_idx) in enumerate(zip(texts, turn_indices)):
+                # Check cache first
+                if (
+                    self._config.enable_caching
+                    and turn_idx >= 0
+                    and turn_idx in self._embedding_cache
+                ):
+                    embeddings.append(self._embedding_cache[turn_idx])
+                    effective_weights.append(weights[i])
                 else:
-                    # If any embedding fails, skip this text but continue
-                    weights = weights[: len(embeddings)]
+                    uncached_indices.append(i)
+                    uncached_texts.append(text)
+
+            # Batch-embed all uncached texts in one call
+            if uncached_texts:
+                try:
+                    batch = embed_batch(uncached_texts)
+                    for j, (orig_i, text, turn_idx) in enumerate(
+                        zip(uncached_indices, uncached_texts, [turn_indices[k] for k in uncached_indices])
+                    ):
+                        emb = batch[j]
+                        embeddings.append(emb)
+                        effective_weights.append(weights[orig_i])
+                        if self._config.enable_caching and turn_idx >= 0:
+                            self._embedding_cache[turn_idx] = emb
+                    self._prune_cache()
+                except Exception as e:
+                    logger.warning(f"Batch embedding failed, falling back to sequential: {e}")
+                    # Fallback: embed one at a time
+                    for orig_i, text, turn_idx in zip(
+                        uncached_indices, uncached_texts, [turn_indices[k] for k in uncached_indices]
+                    ):
+                        emb = self._get_or_compute_embedding(text, turn_idx)
+                        if emb is not None:
+                            embeddings.append(emb)
+                            effective_weights.append(weights[orig_i])
 
             if not embeddings:
                 return None
 
             # Normalize weights to sum to 1
-            effective_weights = weights[: len(embeddings)]
             total_weight = sum(effective_weights)
             if total_weight == 0:
                 return None
