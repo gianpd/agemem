@@ -12,6 +12,7 @@ __pytest__
 *.log
 *.db
 *.png
+*.parquet
 
 documents/
 corpus/
